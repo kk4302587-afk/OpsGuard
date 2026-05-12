@@ -1,0 +1,88 @@
+"""Database initialization and connection management."""
+
+import aiosqlite
+from pathlib import Path
+from loguru import logger
+
+from app.config import settings
+
+
+async def init_db():
+    """Initialize all database tables."""
+    # Ensure data directory exists
+    Path("./data").mkdir(parents=True, exist_ok=True)
+
+    # Initialize audit database
+    async with aiosqlite.connect(settings.audit.db_path) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                metadata TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_audit_session
+            ON audit_logs(session_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_audit_timestamp
+            ON audit_logs(timestamp)
+        """)
+        await db.commit()
+
+    # Initialize knowledge database
+    async with aiosqlite.connect(settings.knowledge.db_path) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                problem_signature TEXT NOT NULL,
+                diagnosis_path TEXT NOT NULL,
+                solution TEXT NOT NULL,
+                tools_used TEXT,
+                success_count INTEGER DEFAULT 1,
+                last_used DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'active'
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_session
+            ON messages(session_id)
+        """)
+        await db.commit()
+
+    logger.info("Database initialized successfully")
+
+
+def get_audit_db_path() -> str:
+    """Get audit database file path."""
+    return settings.audit.db_path
+
+
+def get_knowledge_db_path() -> str:
+    """Get knowledge database file path."""
+    return settings.knowledge.db_path
