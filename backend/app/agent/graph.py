@@ -286,30 +286,47 @@ async def run_agent(
         try:
             # Ask LLM to summarize the resolution for knowledge base
             summary_messages = [
-                {"role": "system", "content": "你是一个运维知识提取器。根据以下对话，提取问题特征、诊断路径和解决方案。用JSON格式回复：{\"problem\": \"问题简述\", \"diagnosis\": \"诊断步骤\", \"solution\": \"解决方案\"}。如果对话中没有成功解决问题，回复 null。"},
-                {"role": "user", "content": f"用户问题: {user_message}\n\nAgent回复: {final_response}"},
+                {"role": "system", "content": "你是一个运维知识提取器。请根据以下对话提取关键信息，严格按照JSON格式回复，不要添加任何其他文字：\n{\"problem\": \"一句话描述问题\", \"diagnosis\": \"诊断步骤摘要\", \"solution\": \"解决方案摘要\"}\n如果对话中没有成功解决问题，只回复: null"},
+                {"role": "user", "content": f"用户问题: {user_message}\n\nAgent回复: {final_response[:500]}"},
             ]
             summary_response = await call_llm(summary_messages)
             summary_text = summary_response.get("content", "").strip()
 
-            if summary_text and summary_text != "null":
+            logger.debug(f"Knowledge extraction response: {summary_text[:200]}")
+
+            if summary_text and summary_text.lower() != "null" and "{" in summary_text:
                 import re
-                # Try to parse JSON from response
-                json_match = re.search(r'\{[^}]+\}', summary_text)
+                # Match JSON object (handle multi-line and nested quotes)
+                json_match = re.search(r'\{.*?\}', summary_text, re.DOTALL)
                 if json_match:
-                    summary_data = json.loads(json_match.group())
-                    tools_used = list(set(
-                        msg.get("tool_call_id", "").split("_")[0]
-                        for msg in messages if msg.get("role") == "tool"
-                    ))
-                    await knowledge_store.save_resolution(
-                        problem_signature=summary_data.get("problem", user_message[:100]),
-                        diagnosis_path=summary_data.get("diagnosis", ""),
-                        solution=summary_data.get("solution", ""),
-                        tools_used=tools_used,
-                    )
-                    await audit_logger.log(session_id, AuditPhase.KNOWLEDGE_SAVE, AuditEventType.SUCCESS, "知识已沉淀")
-                    await send_to_client({"type": "trace", "phase": "knowledge_save", "event_type": "success", "content": "经验已保存到知识库"})
+                    try:
+                        summary_data = json.loads(json_match.group())
+                        problem = summary_data.get("problem", "")
+                        diagnosis = summary_data.get("diagnosis", "")
+                        solution = summary_data.get("solution", "")
+
+                        if problem and solution:  # Only save if we have meaningful data
+                            tools_used = [
+                                tool_call["name"]
+                                for msg in messages if msg.get("tool_calls")
+                                for tool_call in (msg["tool_calls"] if isinstance(msg.get("tool_calls"), list) else [])
+                                if isinstance(tool_call, dict) and "name" in tool_call
+                            ]
+                            # Deduplicate
+                            tools_used = list(set(tools_used)) if tools_used else ["unknown"]
+
+                            await knowledge_store.save_resolution(
+                                problem_signature=problem,
+                                diagnosis_path=diagnosis,
+                                solution=solution,
+                                tools_used=tools_used,
+                            )
+                            await audit_logger.log(session_id, AuditPhase.KNOWLEDGE_SAVE, AuditEventType.SUCCESS, f"知识已沉淀: {problem[:50]}")
+                            await send_to_client({"type": "trace", "phase": "knowledge_save", "event_type": "success", "content": f"经验已保存: {problem[:30]}"})
+                        else:
+                            logger.debug("Knowledge extraction: empty problem or solution, skipping")
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Knowledge JSON parse failed: {e}, raw: {json_match.group()[:100]}")
         except Exception as e:
             logger.warning(f"Knowledge save failed (non-critical): {e}")
 
