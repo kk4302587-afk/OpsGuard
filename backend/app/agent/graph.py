@@ -335,6 +335,83 @@ async def run_agent(
         except Exception as e:
             logger.warning(f"Knowledge save failed (non-critical): {e}")
 
+    # === Phase 6: Runbook Auto-Generation ===
+    # If write tools were used successfully, save the tool call sequence as a replayable Runbook
+    tool_call_sequence = []
+    for msg in messages:
+        if msg.get("tool_calls") and isinstance(msg["tool_calls"], list):
+            for tc in msg["tool_calls"]:
+                if isinstance(tc, dict) and "function" in tc:
+                    func = tc["function"]
+                    tool_call_sequence.append({
+                        "tool_name": func.get("name", ""),
+                        "tool_args": json.loads(func["arguments"]) if isinstance(func.get("arguments"), str) else func.get("arguments", {}),
+                    })
+
+    # Only generate Runbook if there were 2+ tool calls (single calls aren't worth saving)
+    if len(tool_call_sequence) >= 2:
+        try:
+            import aiosqlite
+            from app.database import get_knowledge_db_path
+            import uuid as _uuid
+
+            # Check if any write operations were involved (more valuable as Runbook)
+            has_write = any(
+                tools_registry.get_tool(tc["tool_name"]) and
+                tools_registry.get_tool(tc["tool_name"]).risk_level.value != "read"
+                for tc in tool_call_sequence
+            )
+
+            # Build runbook steps with descriptions
+            runbook_steps = []
+            for tc in tool_call_sequence:
+                tool_def = tools_registry.get_tool(tc["tool_name"])
+                if tool_def:
+                    runbook_steps.append({
+                        "tool_name": tc["tool_name"],
+                        "tool_args": tc["tool_args"],
+                        "description": tool_def.description,
+                        "risk_level": tool_def.risk_level.value,
+                    })
+
+            if runbook_steps:
+                # Generate a name from the user message
+                runbook_name = user_message[:40] + ("..." if len(user_message) > 40 else "")
+                runbook_id = str(_uuid.uuid4())
+                now = __import__('datetime').datetime.now().isoformat()
+
+                async with aiosqlite.connect(get_knowledge_db_path()) as db:
+                    await db.execute("""
+                        CREATE TABLE IF NOT EXISTS runbooks (
+                            id TEXT PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            description TEXT,
+                            trigger_pattern TEXT,
+                            steps TEXT NOT NULL,
+                            run_count INTEGER DEFAULT 0,
+                            last_run TEXT,
+                            created_at TEXT NOT NULL
+                        )
+                    """)
+                    await db.execute(
+                        "INSERT INTO runbooks (id, name, description, trigger_pattern, steps, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            runbook_id,
+                            runbook_name,
+                            f"自动生成: {final_response[:100]}",
+                            user_message[:100],
+                            json.dumps(runbook_steps, ensure_ascii=False),
+                            now,
+                        ),
+                    )
+                    await db.commit()
+
+                await send_to_client({"type": "trace", "phase": "knowledge_save", "event_type": "success", "content": f"Runbook 已保存: {runbook_name[:20]}"})
+                logger.info(f"Runbook auto-generated: {runbook_name}")
+
+        except Exception as e:
+            logger.warning(f"Runbook generation failed (non-critical): {e}")
+
     return final_response
 
 
