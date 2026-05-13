@@ -9,6 +9,7 @@ import {
 } from '@ant-design/icons'
 import { useChatStore } from '../stores/chatStore'
 import DiagnosisProgress from './DiagnosisProgress'
+import MarkdownRenderer from './MarkdownRenderer'
 import '../styles/chat.css'
 
 const { TextArea } = Input
@@ -41,7 +42,7 @@ function ChatPanel() {
     }
   }
 
-  const renderMessageContent = (content: string) => {
+  const renderMessageContent = (content: string, role: string) => {
     // Detect special message types
     if (content.startsWith('[需要确认]')) {
       const lines = content.split('\n')
@@ -53,7 +54,9 @@ function ChatPanel() {
           </div>
           <div className="msg-approval-body">
             <code>{lines[0].replace('[需要确认] ', '')}</code>
-            {lines[1] && <Tag color="orange" style={{ marginTop: 6 }}>{lines[1]}</Tag>}
+            {lines.slice(1).map((line, i) => (
+              <div key={i} style={{ marginTop: 4, fontSize: 12, color: 'var(--text-secondary)' }}>{line}</div>
+            ))}
           </div>
         </div>
       )
@@ -69,7 +72,12 @@ function ChatPanel() {
       )
     }
 
-    // Normal message - render with line breaks
+    // Assistant messages: render as Markdown
+    if (role === 'assistant') {
+      return <MarkdownRenderer content={content} />
+    }
+
+    // User messages: plain text with line breaks
     return (
       <div className="msg-text">
         {content.split('\n').map((line, i) => (
@@ -126,7 +134,7 @@ function ChatPanel() {
                     {new Date(msg.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
                   </Text>
                 </div>
-                {renderMessageContent(msg.content)}
+                {renderMessageContent(msg.content, msg.role)}
               </div>
             </div>
           )

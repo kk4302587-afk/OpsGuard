@@ -177,7 +177,7 @@ function SecurityDemo() {
           检测结果
           {results.length > 0 && (
             <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 12, fontWeight: 'normal' }}>
-              拦截 {results.filter(r => r.is_blocked).length} / 放行 {results.filter(r => !r.is_blocked).length}
+              拦截 {results.filter(r => r.is_blocked).length} / 警告 {results.filter(r => !r.is_blocked && r.blocked_by === 'high_risk_intent').length} / 放行 {results.filter(r => !r.is_blocked && r.blocked_by !== 'high_risk_intent').length}
             </span>
           )}
         </Title>
@@ -190,36 +190,50 @@ function SecurityDemo() {
       <List
         dataSource={results.slice(0, 20)}
         locale={{ emptyText: '点击上方按钮或标签开始测试' }}
-        renderItem={(item) => (
-          <List.Item style={{ borderBottom: '1px solid var(--border-color)', padding: '12px 0' }}>
-            <div style={{ width: '100%' }}>
-              <Space style={{ marginBottom: 8 }}>
-                {item.is_blocked ? (
-                  <CloseCircleOutlined style={{ fontSize: 16, color: 'var(--accent-red)' }} />
-                ) : (
-                  <CheckCircleOutlined style={{ fontSize: 16, color: 'var(--accent-green)' }} />
+        renderItem={(item) => {
+          // Determine display status: blocked / warning / safe
+          const isWarning = !item.is_blocked && item.blocked_by === 'high_risk_intent'
+          const statusIcon = item.is_blocked
+            ? <CloseCircleOutlined style={{ fontSize: 16, color: 'var(--accent-red)' }} />
+            : isWarning
+              ? <ExperimentOutlined style={{ fontSize: 16, color: 'var(--accent-yellow)' }} />
+              : <CheckCircleOutlined style={{ fontSize: 16, color: 'var(--accent-green)' }} />
+          const statusTag = item.is_blocked
+            ? <Tag color="red">已拦截</Tag>
+            : isWarning
+              ? <Tag color="orange">高风险警告</Tag>
+              : <Tag color="green">已放行</Tag>
+
+          return (
+            <List.Item style={{ borderBottom: '1px solid var(--border-color)', padding: '12px 0' }}>
+              <div style={{ width: '100%' }}>
+                <Space style={{ marginBottom: 8 }}>
+                  {statusIcon}
+                  {statusTag}
+                  {item.blocked_by && item.blocked_by !== 'high_risk_intent' && (
+                    <Tag color="volcano">防御层: {item.blocked_by}</Tag>
+                  )}
+                  <Text style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    检查层: {item.layers_checked.join(' → ')}
+                  </Text>
+                </Space>
+                <div style={{ background: 'var(--bg-primary)', padding: '8px 12px', borderRadius: 4, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                  {item.input_text}
+                </div>
+                {item.detail && (
+                  <Text style={{
+                    fontSize: 12,
+                    color: item.is_blocked ? 'var(--accent-red)' : isWarning ? 'var(--accent-yellow)' : 'var(--text-muted)',
+                    marginTop: 4,
+                    display: 'block',
+                  }}>
+                    {item.detail}
+                  </Text>
                 )}
-                <Tag color={item.is_blocked ? 'red' : 'green'}>
-                  {item.is_blocked ? '已拦截' : '已放行'}
-                </Tag>
-                {item.blocked_by && (
-                  <Tag color="orange">拦截层: {item.blocked_by}</Tag>
-                )}
-                <Text style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  检查层: {item.layers_checked.join(' → ')}
-                </Text>
-              </Space>
-              <div style={{ background: 'var(--bg-primary)', padding: '8px 12px', borderRadius: 4, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-                {item.input_text}
               </div>
-              {item.detail && (
-                <Text style={{ fontSize: 12, color: 'var(--accent-yellow)', marginTop: 4, display: 'block' }}>
-                  {item.detail}
-                </Text>
-              )}
-            </div>
-          </List.Item>
-        )}
+            </List.Item>
+          )
+        }}
       />
     </div>
   )

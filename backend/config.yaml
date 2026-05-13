@@ -1,0 +1,191 @@
+# OpsGuard Configuration
+# =====================
+
+app:
+  name: "OpsGuard"
+  version: "0.1.0"
+  debug: true
+  host: "0.0.0.0"
+  port: 8000
+
+# LLM Configuration
+llm:
+  # Primary model
+  primary:
+    provider: "openai"  # openai-compatible (works with Qwen/DeepSeek)
+    model: "qwen-plus"
+    api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    api_key: "sk-9168ce80371c4a148a8d4ea486f3caa8"
+    temperature: 0.7
+    max_tokens: 4096
+
+  # Fallback model
+  fallback:
+    provider: "openai"
+    model: "deepseek-chat"
+    api_base: "https://api.deepseek.com/v1"
+    api_key: "${sk-a2606eb23e464086bc1a10cfa18f7448}"
+    temperature: 0.7
+    max_tokens: 4096
+
+# Safety Configuration
+safety:
+  # Layer 1: Rule engine
+  rules:
+    enabled: true
+    # Dangerous command patterns
+    blocked_patterns:
+      # 文件系统破坏
+      - "rm\\s+-rf\\s+/"
+      - "rm\\s+-rf\\s+/\\*"
+      - "rm\\s+-rf\\s+~"
+      - "rm\\s+--no-preserve-root"
+      - "rmdir\\s+/"
+      # 磁盘格式化/覆写
+      - "mkfs\\."
+      - "dd\\s+if=.*of=/dev/"
+      - "dd\\s+of=/dev/[sh]d"
+      - "wipefs"
+      - "shred\\s+/dev/"
+      # 权限滥用
+      - "chmod\\s+777\\s+/"
+      - "chmod\\s+-R\\s+777"
+      - "chown\\s+-R\\s+.*:.*\\s+/"
+      - "chmod\\s+[0-7]*\\s+/etc/shadow"
+      - "chmod\\s+[0-7]*\\s+/etc/passwd"
+      # 系统破坏
+      - ":(){ :|:& };:"
+      - "\\|\\s*xargs\\s+rm"
+      - "mv\\s+/etc\\s+"
+      - "mv\\s+/usr\\s+"
+      - "mv\\s+/bin\\s+"
+      - "echo\\s+.*>\\s*/etc/passwd"
+      - "echo\\s+.*>\\s*/etc/shadow"
+      - ">\\s*/dev/sda"
+      # 网络危险操作
+      - "iptables\\s+-F"
+      - "iptables\\s+--flush"
+      - "ip\\s+link\\s+delete"
+      - "ifconfig\\s+.*\\s+down"
+      # 内核/引导破坏
+      - "rm\\s+.*vmlinuz"
+      - "rm\\s+.*initrd"
+      - "rm\\s+-rf\\s+/boot"
+      - "dd\\s+.*of=.*boot"
+      # 危险下载执行
+      - "curl.*\\|\\s*bash"
+      - "curl.*\\|\\s*sh"
+      - "wget.*\\|\\s*bash"
+      - "wget.*\\|\\s*sh"
+    # Prompt injection patterns
+    injection_patterns:
+      # English injection
+      - "ignore previous instructions"
+      - "ignore all previous"
+      - "ignore above"
+      - "disregard above"
+      - "disregard all prior"
+      - "forget your instructions"
+      - "forget everything above"
+      - "override your system prompt"
+      - "new instructions:"
+      - "system prompt:"
+      - "you are now"
+      - "act as if you"
+      - "pretend you are"
+      - "jailbreak"
+      - "DAN mode"
+      - "developer mode"
+      # Chinese injection
+      - "你现在是"
+      - "忽略之前的"
+      - "忽略上面的"
+      - "忘记你的设定"
+      - "忘记之前的指令"
+      - "无视安全规则"
+      - "无视你的限制"
+      - "取消你的限制"
+      - "解除限制"
+      - "你没有任何限制"
+      - "假装你是"
+      - "扮演一个"
+      - "新的指令"
+      - "覆盖系统提示"
+      - "越狱"
+      - "开发者模式"
+      # Encoding/obfuscation attempts
+      - "base64.*decode"
+      - "eval\\("
+      - "exec\\("
+      - "\\\\x[0-9a-f]{2}"
+    # High-risk intent patterns (not injection, but dangerous requests)
+    # These trigger a warning but don't block - Agent will still need approval at execution
+    high_risk_intent_patterns:
+      - "删除.*所有.*文件"
+      - "删除.*数据"
+      - "清空.*数据库"
+      - "格式化"
+      - "全部删除"
+      - "删除整个"
+      - "drop.*database"
+      - "truncate.*table"
+      - "delete.*all"
+      - "remove.*everything"
+      - "wipe.*data"
+      - "destroy"
+
+  # Layer 2: BERT classifier (optional, auto-degrades if unavailable)
+  classifier:
+    enabled: true
+    model_path: "./models/prompt_guard"
+    threshold: 0.85
+    fallback_on_error: true  # If model fails to load, continue without it
+
+  # Layer 3: LLM system prompt constraints (always active)
+  llm_constraints:
+    enabled: true
+
+# Execution Security
+execution:
+  # OS user for running commands
+  run_as_user: "opsguard"
+  # Commands allowed with sudo
+  sudo_whitelist:
+    - "systemctl restart *"
+    - "systemctl stop *"
+    - "systemctl start *"
+    - "journalctl *"
+    - "kill -9 *"
+    - "rm /tmp/*"
+    - "rm /var/log/*.log.*"
+  # Paths that are NEVER writable
+  protected_paths:
+    - "/etc/passwd"
+    - "/etc/shadow"
+    - "/etc/sudoers"
+    - "/boot"
+    - "/usr/bin"
+    - "/usr/sbin"
+  # Max command execution timeout (seconds)
+  timeout: 30
+  # Auto-backup before write operations
+  auto_backup: true
+  backup_dir: "/var/lib/opsguard/backups"
+
+# Knowledge Store
+knowledge:
+  db_path: "./data/knowledge.db"
+  auto_save: true  # Auto-save resolved issues
+
+# Audit Log
+audit:
+  db_path: "./data/audit.db"
+  # Log retention days
+  retention_days: 90
+
+# WebSocket
+websocket:
+  # Heartbeat interval (seconds)
+  heartbeat_interval: 30
+  # Max message size (bytes)
+  max_message_size: 1048576  # 1MB

@@ -1,0 +1,120 @@
+/* Markdown content styles for chat messages */
+
+.md-content {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.md-content h1,
+.md-content h2,
+.md-content h3,
+.md-content h4 {
+  color: var(--text-primary);
+  margin-top: 12px;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.md-content h3 {
+  font-size: 13px;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 4px;
+}
+
+.md-content h4 {
+  font-size: 12px;
+}
+
+.md-content p {
+  margin-bottom: 8px;
+}
+
+.md-content ul,
+.md-content ol {
+  padding-left: 18px;
+  margin-bottom: 8px;
+}
+
+.md-content li {
+  margin-bottom: 3px;
+}
+
+.md-content code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-primary);
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border-color);
+}
+
+.md-content pre {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  overflow-x: auto;
+}
+
+.md-content pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.md-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 12px;
+}
+
+.md-content th,
+.md-content td {
+  border: 1px solid var(--border-color);
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.md-content th {
+  background: var(--bg-primary);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.md-content tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.md-content blockquote {
+  border-left: 3px solid var(--accent-green);
+  padding-left: 12px;
+  margin: 8px 0;
+  color: var(--text-secondary);
+}
+
+.md-content hr {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 12px 0;
+}
+
+.md-content strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.md-content a {
+  color: var(--accent-blue);
+  text-decoration: none;
+}
+
+.md-content img {
+  max-width: 100%;
+  border-radius: 4px;
+}
