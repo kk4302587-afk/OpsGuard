@@ -52,3 +52,6 @@ No migration tool. Schema is defined in `database.py:init_db()` using `CREATE TA
 - Forgetting `await db.commit()` after INSERT/UPDATE
 - Using `db.row_factory` without `aiosqlite.Row` (returns tuples by default)
 - Not handling the case where `fetchone()` returns `None`
+- Reusing `aiosqlite.Connection` objects across requests (causes "threads can only be started once" error)
+- Forgetting to create tables with `IF NOT EXISTS` (breaks on restart)
+- Not using parameterized queries (SQL injection risk)

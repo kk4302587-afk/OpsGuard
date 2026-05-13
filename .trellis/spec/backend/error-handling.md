@@ -42,6 +42,21 @@ except Exception as e:
 ### API Endpoints
 Use FastAPI's built-in exception handling. Don't catch generic exceptions in endpoints.
 
+### Approval Flow
+If approval times out or is rejected, the tool call is skipped (not retried). The Agent receives a "REJECTED" tool result and adapts its plan.
+
+---
+
+## Lessons Learned
+
+### Race Condition in Async Approval
+**Problem**: If the approval Future is registered AFTER sending the request to the client, a fast client response can arrive before the Future exists.
+**Solution**: Always `register_pending()` BEFORE `send_to_client(approval_request)`.
+
+### aiosqlite Connection Reuse
+**Problem**: `aiosqlite.Connection` objects cannot be reused across requests (thread start error).
+**Solution**: Always use `async with aiosqlite.connect(path) as db:` per operation. Never store connections globally.
+
 ---
 
 ## Forbidden Patterns
