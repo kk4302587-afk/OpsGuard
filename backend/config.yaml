@@ -24,7 +24,7 @@ llm:
     provider: "openai"
     model: "deepseek-chat"
     api_base: "https://api.deepseek.com/v1"
-    api_key: "${sk-a2606eb23e464086bc1a10cfa18f7448}"
+    api_key: "sk-a2606eb23e464086bc1a10cfa18f7448"
     temperature: 0.7
     max_tokens: 4096
 

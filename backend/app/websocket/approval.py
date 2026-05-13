@@ -47,6 +47,37 @@ class ApprovalManager:
     def __init__(self):
         self._pending: dict[str, ApprovalRequest] = {}  # request_id → ApprovalRequest
 
+    def register_pending(
+        self,
+        request_id: str,
+        session_id: str,
+        tool_name: str,
+        tool_args: dict,
+        risk_level: str,
+        description: str,
+        future: asyncio.Future,
+    ):
+        """Register a pending approval request with its Future.
+
+        Must be called BEFORE sending the approval_request to the client,
+        so that if the client responds immediately, the Future is already registered.
+        """
+        request = ApprovalRequest(
+            request_id=request_id,
+            session_id=session_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            risk_level=risk_level,
+            description=description,
+            future=future,
+        )
+        self._pending[request_id] = request
+        logger.info(f"Approval registered: {request_id} ({tool_name})")
+
+    def remove_pending(self, request_id: str):
+        """Remove a pending request (after resolution or timeout)."""
+        self._pending.pop(request_id, None)
+
     async def request_approval(
         self,
         request_id: str,
@@ -71,7 +102,7 @@ class ApprovalManager:
         Returns:
             True if approved, False if rejected or timed out
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         future = loop.create_future()
 
         request = ApprovalRequest(

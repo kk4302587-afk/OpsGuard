@@ -28,7 +28,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     - Server → Client: { "type": "error", "content": "..." }
     - Server → Client: { "type": "trace", "phase": "...", "data": {...} }
     """
+    import asyncio
+
     await manager.connect(websocket, session_id)
+
+    # Track background agent task
+    agent_task: asyncio.Task | None = None
 
     try:
         while True:
@@ -38,11 +43,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             msg_type = message.get("type")
 
             if msg_type == "message":
-                # User sent a new message
-                await handle_user_message(websocket, session_id, message)
+                # Run Agent in background so WebSocket loop stays free for approval messages
+                if agent_task and not agent_task.done():
+                    await websocket.send_json({"type": "error", "content": "上一个请求还在处理中，请稍候"})
+                    continue
+                agent_task = asyncio.create_task(
+                    handle_user_message(websocket, session_id, message)
+                )
 
             elif msg_type == "approve":
-                # User responded to an approval request
+                # User responded to an approval request — this must not be blocked
                 await handle_approval(websocket, session_id, message)
 
             elif msg_type == "ping":
@@ -55,13 +65,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 })
 
     except WebSocketDisconnect:
+        if agent_task and not agent_task.done():
+            agent_task.cancel()
         manager.disconnect(session_id)
-        # Cancel any pending approvals for this session
         from app.websocket.approval import approval_manager
         approval_manager.cancel_all(session_id)
         logger.info(f"Session {session_id} disconnected")
     except Exception as e:
         logger.error(f"WebSocket error in session {session_id}: {e}")
+        if agent_task and not agent_task.done():
+            agent_task.cancel()
         from app.websocket.approval import approval_manager
         approval_manager.cancel_all(session_id)
         manager.disconnect(session_id)

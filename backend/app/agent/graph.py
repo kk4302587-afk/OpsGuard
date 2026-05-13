@@ -173,6 +173,12 @@ async def run_agent(
                     # Pre-execution impact assessment
                     impact_text = await assess_impact(tool_name, tool_args, session_id, send_to_client)
 
+                    # Register the approval Future FIRST (before sending to client)
+                    loop = __import__('asyncio').get_running_loop()
+                    approval_future = loop.create_future()
+                    approval_manager.register_pending(request_id, session_id, tool_name, tool_args, tool_def.risk_level, tool_def.description, approval_future)
+
+                    # NOW send the request to the client
                     await send_to_client({
                         "type": "approval_request",
                         "request_id": request_id,
@@ -188,15 +194,14 @@ async def run_agent(
                     await send_to_client({"type": "trace", "phase": "approval_request", "event_type": "pending", "content": f"等待用户审批: {tool_name}"})
 
                     # Wait for user approval (blocks until user responds or timeout)
-                    approved = await approval_manager.request_approval(
-                        request_id=request_id,
-                        session_id=session_id,
-                        tool_name=tool_name,
-                        tool_args=tool_args,
-                        risk_level=tool_def.risk_level,
-                        description=tool_def.description,
-                        timeout=300.0,
-                    )
+                    import asyncio as _asyncio
+                    try:
+                        approved = await _asyncio.wait_for(approval_future, timeout=300.0)
+                    except _asyncio.TimeoutError:
+                        logger.warning(f"Approval timeout: {request_id}")
+                        approved = False
+                    finally:
+                        approval_manager.remove_pending(request_id)
 
                     if not approved:
                         messages.append({"role": "assistant", "content": None, "tool_calls": [
