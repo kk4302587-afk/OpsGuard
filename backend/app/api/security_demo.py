@@ -71,6 +71,18 @@ async def test_command(request: AttackTestRequest):
     }
 
 
+@router.get("/status")
+async def get_security_status():
+    """Get current security system status (for debugging)."""
+    return {
+        "security_mode": _guardrail.security_mode,
+        "injection_patterns": len(_guardrail._rule_engine._injection_patterns),
+        "command_patterns": len(_guardrail._rule_engine._command_patterns),
+        "high_risk_patterns": len(_guardrail._rule_engine._high_risk_intent_patterns),
+        "classifier_available": _guardrail._classifier.is_available,
+    }
+
+
 @router.get("/attack-examples")
 async def get_attack_examples():
     """Get a list of example attacks for the demo page."""
