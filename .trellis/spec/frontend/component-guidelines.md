@@ -1,59 +1,69 @@
 # Component Guidelines
 
-> How components are built in this project.
-
----
-
-## Overview
-
-<!--
-Document your project's component conventions here.
-
-Questions to answer:
-- What component patterns do you use?
-- How are props defined?
-- How do you handle composition?
-- What accessibility standards apply?
--->
-
-(To be filled by the team)
+> How components are built in OpsGuard frontend.
 
 ---
 
 ## Component Structure
 
-<!-- Standard structure of a component file -->
+```tsx
+import { useState } from 'react'
+import { Button, Typography } from 'antd'
+import { SomeOutlined } from '@ant-design/icons'
+import { useSomeStore } from '../stores/someStore'
+import '../styles/some.css'  // optional, only if component has dedicated styles
 
-(To be filled by the team)
+const { Text } = Typography
 
----
+interface ComponentProps {
+  // props if any
+}
 
-## Props Conventions
+/**
+ * Brief description of what this component does.
+ */
+function ComponentName({ prop }: ComponentProps) {
+  // hooks
+  // handlers
+  // render
+  return (...)
+}
 
-<!-- How props should be defined and typed -->
-
-(To be filled by the team)
-
----
-
-## Styling Patterns
-
-<!-- How styles are applied (CSS modules, styled-components, Tailwind, etc.) -->
-
-(To be filled by the team)
-
----
-
-## Accessibility
-
-<!-- A11y requirements and patterns -->
-
-(To be filled by the team)
+export default ComponentName
+```
 
 ---
 
-## Common Mistakes
+## Conventions
 
-<!-- Component-related mistakes your team has made -->
+- One component per file, named same as the component (`ChatPanel.tsx`)
+- Function components only (no class components)
+- Props interface defined above the component
+- JSDoc comment describing purpose
+- Default export (no named exports for components)
 
-(To be filled by the team)
+---
+
+## Styling
+
+- CSS variables from `global.css` for all colors/fonts
+- Inline styles for one-off layout (flexbox, padding)
+- Dedicated `.css` file for complex/reusable styles
+- No CSS-in-JS libraries
+- No Tailwind
+
+---
+
+## State
+
+- Local state: `useState` for UI-only state (loading, input values)
+- Global state: Zustand stores for shared data (sessions, messages, system status)
+- No prop drilling beyond 2 levels — use store instead
+
+---
+
+## Icons
+
+- Use `@ant-design/icons` exclusively
+- No emoji in UI (use icons instead)
+- Import only the icons you use (tree-shaking)

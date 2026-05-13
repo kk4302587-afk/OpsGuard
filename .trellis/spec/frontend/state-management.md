@@ -1,51 +1,68 @@
 # State Management
 
-> How state is managed in this project.
+> How state is managed in OpsGuard frontend.
 
 ---
 
-## Overview
+## Library
 
-<!--
-Document your project's state management conventions here.
-
-Questions to answer:
-- What state management solution do you use?
-- How is local vs global state decided?
-- How do you handle server state?
-- What are the patterns for derived state?
--->
-
-(To be filled by the team)
+**Zustand** — lightweight, no boilerplate, TypeScript-native.
 
 ---
 
-## State Categories
+## Stores
 
-<!-- Local state, global state, server state, URL state -->
-
-(To be filled by the team)
-
----
-
-## When to Use Global State
-
-<!-- Criteria for promoting state to global -->
-
-(To be filled by the team)
+| Store | File | Manages |
+|-------|------|---------|
+| `useChatStore` | `chatStore.ts` | Sessions, messages, WebSocket, approval, trace events |
+| `useSystemStore` | `systemStore.ts` | System metrics (CPU/MEM/DISK), polling |
 
 ---
 
-## Server State
+## When to Use Global State (Zustand)
 
-<!-- How server data is cached and synchronized -->
+- Data shared across multiple components
+- WebSocket connection state
+- Data that persists across page navigation
+- Server-fetched data that multiple components read
 
-(To be filled by the team)
+## When to Use Local State (useState)
+
+- Loading spinners
+- Form input values
+- UI toggle states (expanded/collapsed)
+- Component-specific temporary data
 
 ---
 
-## Common Mistakes
+## Patterns
 
-<!-- State management mistakes your team has made -->
+### Async actions in stores
+```typescript
+export const useStore = create<Store>((set, get) => ({
+  data: null,
+  fetchData: async () => {
+    const res = await fetch('/api/data')
+    if (res.ok) {
+      const data = await res.json()
+      set({ data })
+    }
+  },
+}))
+```
 
-(To be filled by the team)
+### Accessing other state in actions
+```typescript
+sendMessage: (content) => {
+  const { ws, activeSessionId } = get()
+  // use ws and activeSessionId
+}
+```
+
+---
+
+## Forbidden Patterns
+
+- No Redux, no MobX, no Context API for global state
+- No `useEffect` for data fetching that should be in a store
+- No storing derived data (compute it in the component)

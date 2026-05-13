@@ -1,51 +1,46 @@
 # Quality Guidelines
 
-> Code quality standards for backend development.
-
----
-
-## Overview
-
-<!--
-Document your project's quality standards here.
-
-Questions to answer:
-- What patterns are forbidden?
-- What linting rules do you enforce?
-- What are your testing requirements?
-- What code review standards apply?
--->
-
-(To be filled by the team)
-
----
-
-## Forbidden Patterns
-
-<!-- Patterns that should never be used and why -->
-
-(To be filled by the team)
+> Code quality standards for OpsGuard backend.
 
 ---
 
 ## Required Patterns
 
-<!-- Patterns that must always be used -->
-
-(To be filled by the team)
-
----
-
-## Testing Requirements
-
-<!-- What level of testing is expected -->
-
-(To be filled by the team)
+- Type hints on all function signatures
+- Docstrings on all public functions and classes
+- `async def` for all I/O operations (DB, network, subprocess)
+- `subprocess.run(..., timeout=N)` — always set timeout
+- `ToolResult` return type for all MCP tools
+- Risk level annotation for all registered tools
 
 ---
 
-## Code Review Checklist
+## Forbidden Patterns
 
-<!-- What reviewers should check -->
+| Pattern | Why | Alternative |
+|---------|-----|-------------|
+| `shell=True` in subprocess | Command injection risk | Use `args` list |
+| Bare `except:` | Hides bugs | `except Exception as e:` + log |
+| Global mutable state | Thread safety | Use function-scoped or class instances |
+| `os.system()` | No output capture, injection risk | `subprocess.run()` |
+| Hardcoded paths | Not portable | Use `config.yaml` or `Path` |
+| `print()` for logging | No levels, no format | `logger.info()` |
 
-(To be filled by the team)
+---
+
+## Security Requirements
+
+- All file paths must be validated against allowed prefixes
+- All subprocess commands must have timeout
+- No user input directly interpolated into shell commands
+- API keys loaded from config, never hardcoded
+- Protected paths list checked before any write operation
+
+---
+
+## Testing
+
+- Manual testing via API calls and browser
+- `python -c "from app.main import app"` — smoke test for import chain
+- Security rules tested via `test_rules.py` pattern (create, run, delete)
+- TypeScript `npx tsc --noEmit` for frontend
