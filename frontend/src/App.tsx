@@ -6,6 +6,8 @@ import {
   SafetyOutlined,
   MedicineBoxOutlined,
   DatabaseOutlined,
+  ApiOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons'
 import Sidebar from './components/Sidebar'
 import ChatPanel from './components/ChatPanel'
@@ -16,13 +18,17 @@ import TopologyGraph from './components/TopologyGraph'
 import SecurityDemo from './components/SecurityDemo'
 import HealthReport from './components/HealthReport'
 import KnowledgePanel from './components/KnowledgePanel'
+import ToolsPanel from './components/ToolsPanel'
+import RunbookPanel from './components/RunbookPanel'
 import { useChatStore } from './stores/chatStore'
 import './styles/layout.css'
 
-type PageKey = 'chat' | 'topology' | 'security' | 'health' | 'knowledge'
+type PageKey = 'chat' | 'topology' | 'security' | 'health' | 'knowledge' | 'tools' | 'runbook'
 
 const navItems = [
   { key: 'chat', icon: <MessageOutlined />, label: '对话' },
+  { key: 'tools', icon: <ApiOutlined />, label: 'MCP 工具' },
+  { key: 'runbook', icon: <ThunderboltOutlined />, label: '运维剧本' },
   { key: 'topology', icon: <ApartmentOutlined />, label: '拓扑图谱' },
   { key: 'health', icon: <MedicineBoxOutlined />, label: '健康巡检' },
   { key: 'security', icon: <SafetyOutlined />, label: '安全演示' },
@@ -57,6 +63,10 @@ function App() {
         return <HealthReport />
       case 'knowledge':
         return <KnowledgePanel />
+      case 'tools':
+        return <ToolsPanel />
+      case 'runbook':
+        return <RunbookPanel />
       default:
         return null
     }
