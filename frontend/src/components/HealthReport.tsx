@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Button, Card, Tag, Space, Typography, Spin } from 'antd'
+import { Button, Card, Tag, Space, Typography, Spin, Progress } from 'antd'
 import {
   MedicineBoxOutlined,
   ReloadOutlined,
@@ -7,7 +7,12 @@ import {
   WarningOutlined,
   CloseCircleOutlined,
   FilePdfOutlined,
+  DashboardOutlined,
+  CloudServerOutlined,
+  HddOutlined,
+  WifiOutlined,
 } from '@ant-design/icons'
+import ReactECharts from 'echarts-for-react'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -30,9 +35,16 @@ interface HealthReportData {
 }
 
 const statusConfig: Record<string, { color: string; label: string; tagColor: string }> = {
-  healthy: { color: 'var(--accent-green)', label: '正常', tagColor: 'green' },
-  warning: { color: 'var(--accent-yellow)', label: '警告', tagColor: 'orange' },
-  critical: { color: 'var(--accent-red)', label: '严重', tagColor: 'red' },
+  healthy: { color: '#00d4aa', label: '正常', tagColor: 'green' },
+  warning: { color: '#e5c07b', label: '警告', tagColor: 'orange' },
+  critical: { color: '#e06c75', label: '严重', tagColor: 'red' },
+}
+
+const sectionIcons: Record<string, any> = {
+  'CPU 状态': <DashboardOutlined />,
+  '内存状态': <CloudServerOutlined />,
+  '磁盘状态': <HddOutlined />,
+  '网络状态': <WifiOutlined />,
 }
 
 function HealthReport() {
@@ -54,8 +66,7 @@ function HealthReport() {
   }
 
   const getStatusIcon = (status: string) => {
-    const cfg = statusConfig[status]
-    const color = cfg?.color || 'var(--text-muted)'
+    const color = statusConfig[status]?.color || 'var(--text-muted)'
     switch (status) {
       case 'healthy': return <CheckCircleOutlined style={{ color }} />
       case 'warning': return <WarningOutlined style={{ color }} />
@@ -64,14 +75,58 @@ function HealthReport() {
     }
   }
 
+  // Extract percentage from metrics for gauge display
+  const extractPercent = (section: ReportSection): number | null => {
+    for (const value of Object.values(section.metrics)) {
+      if (typeof value === 'string') {
+        const match = value.match(/(\d+\.?\d*)%/)
+        if (match) return parseFloat(match[1])
+      }
+    }
+    return null
+  }
+
+  const getGaugeOption = (percent: number, title: string, color: string) => ({
+    series: [{
+      type: 'gauge',
+      startAngle: 220,
+      endAngle: -40,
+      min: 0,
+      max: 100,
+      radius: '100%',
+      progress: { show: true, width: 12, roundCap: true, itemStyle: { color } },
+      pointer: { show: false },
+      axisLine: { lineStyle: { width: 12, color: [[1, '#2d3139']] } },
+      axisTick: { show: false },
+      splitLine: { show: false },
+      axisLabel: { show: false },
+      title: { show: true, offsetCenter: [0, '70%'], fontSize: 11, color: '#8b929a' },
+      detail: {
+        valueAnimation: true,
+        offsetCenter: [0, '20%'],
+        fontSize: 20,
+        fontWeight: 'bold',
+        formatter: '{value}%',
+        color: color,
+      },
+      data: [{ value: percent, name: title }],
+    }],
+  })
+
   const formatMetricValue = (value: string | number | string[] | Record<string, string>): string => {
     if (typeof value === 'object' && !Array.isArray(value)) {
-      return Object.entries(value).map(([k, v]) => `${k}: ${v}`).join(', ')
+      return Object.entries(value).map(([k, v]) => `${k}: ${v}`).join(' | ')
     }
     if (Array.isArray(value)) {
-      return value.join(', ')
+      return value.slice(0, 6).join(', ') + (value.length > 6 ? ' ...' : '')
     }
     return String(value)
+  }
+
+  const getProgressColor = (percent: number) => {
+    if (percent > 90) return '#e06c75'
+    if (percent > 70) return '#e5c07b'
+    return '#00d4aa'
   }
 
   return (
@@ -84,10 +139,7 @@ function HealthReport() {
         </Title>
         <Space>
           {report && (
-            <Button
-              icon={<FilePdfOutlined />}
-              onClick={() => window.open('/api/health-report/export-pdf', '_blank')}
-            >
+            <Button icon={<FilePdfOutlined />} onClick={() => window.open('/api/health-report/export-pdf', '_blank')}>
               导出 PDF
             </Button>
           )}
@@ -117,49 +169,77 @@ function HealthReport() {
       {/* Report content */}
       {report && !loading && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {/* Overall status bar */}
+          {/* Overall status + gauge charts */}
           <Card size="small" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap' }}>
-              <Space size={8}>
-                {getStatusIcon(report.overall_status)}
-                <Text strong>整体状态:</Text>
-                <Tag color={statusConfig[report.overall_status]?.tagColor || 'default'}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
+              {getStatusIcon(report.overall_status)}
+              <div>
+                <Text strong style={{ fontSize: 16 }}>整体状态 </Text>
+                <Tag color={statusConfig[report.overall_status]?.tagColor || 'default'} style={{ fontSize: 13 }}>
                   {statusConfig[report.overall_status]?.label || '未知'}
                 </Tag>
-              </Space>
-              <Text style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                主机: <Text code style={{ fontSize: 11 }}>{report.hostname}</Text>
-              </Text>
-              <Text style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                系统: <Text code style={{ fontSize: 11 }}>{report.os}</Text>
-              </Text>
-              <Text style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                架构: <Text code style={{ fontSize: 11 }}>{report.arch}</Text>
-              </Text>
+              </div>
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 16, fontSize: 12, color: 'var(--text-secondary)' }}>
+                <span>主机: <Text code style={{ fontSize: 11 }}>{report.hostname}</Text></span>
+                <span>系统: <Text code style={{ fontSize: 11 }}>{report.os}</Text></span>
+                <span>架构: <Text code style={{ fontSize: 11 }}>{report.arch}</Text></span>
+              </div>
+            </div>
+
+            {/* Gauge charts row */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8 }}>
+              {report.sections.map((section, idx) => {
+                const percent = extractPercent(section)
+                if (percent === null) return null
+                const color = getProgressColor(percent)
+                return (
+                  <div key={idx} style={{ textAlign: 'center' }}>
+                    <ReactECharts
+                      option={getGaugeOption(percent, section.title.replace(' 状态', ''), color)}
+                      style={{ height: 130, width: '100%' }}
+                      opts={{ renderer: 'svg' }}
+                    />
+                  </div>
+                )
+              })}
             </div>
           </Card>
 
-          {/* Section cards */}
+          {/* Section detail cards */}
           {report.sections.map((section, idx) => {
             const cfg = statusConfig[section.status] || statusConfig.healthy
+            const percent = extractPercent(section)
+
             return (
               <Card
                 key={idx}
                 size="small"
                 title={
                   <Space size={8}>
-                    {getStatusIcon(section.status)}
+                    {sectionIcons[section.title] || getStatusIcon(section.status)}
                     <span>{section.title}</span>
-                    <Tag color={cfg.tagColor} style={{ marginLeft: 4 }}>{cfg.label}</Tag>
+                    <Tag color={cfg.tagColor}>{cfg.label}</Tag>
                   </Space>
                 }
                 style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}
               >
+                {/* Progress bar if we have a percentage */}
+                {percent !== null && (
+                  <div style={{ marginBottom: 12 }}>
+                    <Progress
+                      percent={percent}
+                      strokeColor={getProgressColor(percent)}
+                      trailColor="var(--border-color)"
+                      format={(p) => <span style={{ color: 'var(--text-primary)', fontSize: 12 }}>{p}%</span>}
+                    />
+                  </div>
+                )}
+
                 {/* Metrics grid */}
                 <div style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
-                  gap: 8,
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+                  gap: 6,
                   marginBottom: (section.issues.length > 0 || section.recommendations.length > 0) ? 12 : 0,
                 }}>
                   {Object.entries(section.metrics).map(([key, value]) => (
@@ -169,14 +249,13 @@ function HealthReport() {
                         display: 'flex',
                         justifyContent: 'space-between',
                         alignItems: 'center',
-                        padding: '6px 12px',
+                        padding: '5px 10px',
                         background: 'var(--bg-primary)',
-                        borderRadius: 6,
-                        border: '1px solid var(--border-color)',
+                        borderRadius: 4,
                       }}
                     >
-                      <Text style={{ fontSize: 12, color: 'var(--text-muted)' }}>{key}</Text>
-                      <Text style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
+                      <Text style={{ fontSize: 11, color: 'var(--text-muted)' }}>{key}</Text>
+                      <Text style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
                         {formatMetricValue(value)}
                       </Text>
                     </div>
@@ -187,8 +266,7 @@ function HealthReport() {
                 {section.issues.length > 0 && (
                   <div style={{ marginBottom: 8 }}>
                     <Text strong style={{ fontSize: 12, color: 'var(--accent-yellow)', display: 'block', marginBottom: 4 }}>
-                      <WarningOutlined style={{ marginRight: 4 }} />
-                      发现问题:
+                      <WarningOutlined style={{ marginRight: 4 }} /> 发现问题:
                     </Text>
                     {section.issues.map((issue, i) => (
                       <Text key={i} style={{ fontSize: 12, color: 'var(--accent-yellow)', display: 'block', paddingLeft: 18 }}>
