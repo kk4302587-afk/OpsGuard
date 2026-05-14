@@ -48,6 +48,8 @@ async def get_topology_graph():
     nodes = []
     edges = []
     seen_nodes = set()
+    seen_edges = set()
+    connections = []
 
     def add_node(node_id: str, name: str, category: str, value: str = ""):
         if node_id not in seen_nodes:
@@ -61,7 +63,10 @@ async def get_topology_graph():
             })
 
     def add_edge(source: str, target: str, relation: str):
-        edges.append({"source": source, "target": target, "relation": relation})
+        edge_key = f"{source}->{target}:{relation}"
+        if edge_key not in seen_edges:
+            seen_edges.add(edge_key)
+            edges.append({"source": source, "target": target, "relation": relation})
 
     # Collect listening processes and their ports
     try:
@@ -125,9 +130,12 @@ async def get_topology_graph():
                         svc_name = parts[0].replace(".service", "")
                         svc_id = f"svc_{svc_name}"
                         add_node(svc_id, svc_name, "service")
+                        # Match service to process by checking if process name starts with service name
                         for node in list(nodes):
-                            if node["category"] == "process" and svc_name.lower() in node["name"].lower():
-                                add_edge(svc_id, node["id"], "manages")
+                            if node["category"] == "process":
+                                proc_name_lower = node["name"].split(" ")[0].lower()  # e.g. "nginx" from "nginx (PID:123)"
+                                if proc_name_lower == svc_name.lower() or proc_name_lower.startswith(svc_name.lower()):
+                                    add_edge(svc_id, node["id"], "manages")
         except (FileNotFoundError, Exception):
             pass
 
@@ -167,8 +175,6 @@ async def get_topology_graph():
 @router.get("/graph/{session_id}")
 async def get_topology_with_diagnosis(session_id: str):
     """Get topology graph merged with dynamic diagnosis findings for a session."""
-    # Get base graph
-    from starlette.testclient import TestClient
     base = await get_topology_graph()
 
     # Merge dynamic updates if any
