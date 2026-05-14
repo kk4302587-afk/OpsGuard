@@ -9,6 +9,7 @@ import {
   CheckCircleOutlined,
   BulbOutlined,
   PlayCircleOutlined,
+  FilePdfOutlined,
 } from '@ant-design/icons'
 
 const { Title, Text, Paragraph } = Typography
@@ -71,6 +72,11 @@ function OpsReport() {
               { value: 72, label: '最近 3 天' },
             ]}
           />
+          {report && (
+            <Button icon={<FilePdfOutlined />} onClick={() => window.open(`/api/ops-report/export-pdf?hours=${hours}`, '_blank')}>
+              导出 PDF
+            </Button>
+          )}
           <Button type="primary" icon={<ReloadOutlined />} onClick={generateReport} loading={loading}>
             生成报告
           </Button>
