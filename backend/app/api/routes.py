@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api import sessions, system, knowledge, health_report, topology, security_demo, health_report_pdf, tools, runbook
+from app.api import sessions, system, knowledge, health_report, topology, security_demo, health_report_pdf, tools, runbook, ops_report
 
 router = APIRouter()
 
@@ -15,3 +15,4 @@ router.include_router(topology.router, prefix="/topology", tags=["topology"])
 router.include_router(security_demo.router, prefix="/security", tags=["security-demo"])
 router.include_router(tools.router, prefix="/tools", tags=["tools"])
 router.include_router(runbook.router, prefix="/runbooks", tags=["runbooks"])
+router.include_router(ops_report.router, prefix="/ops-report", tags=["ops-report"])
