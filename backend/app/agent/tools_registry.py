@@ -272,6 +272,226 @@ class ToolsRegistry:
             "type": "object", "properties": {},
         }, system_tools.get_user_sessions, RiskLevel.READ, "system")
 
+        # File management tools
+        from app.mcp_tools import file_tools
+
+        self._register("write_file", "写入或追加文件内容", {
+            "type": "object",
+            "properties": {
+                "filepath": {"type": "string", "description": "目标文件路径"},
+                "content": {"type": "string", "description": "要写入的内容"},
+                "append": {"type": "boolean", "description": "是否追加模式", "default": False},
+            },
+            "required": ["filepath", "content"],
+        }, file_tools.write_file, RiskLevel.WRITE, "file")
+
+        self._register("delete_file", "删除文件", {
+            "type": "object",
+            "properties": {
+                "filepath": {"type": "string", "description": "要删除的文件路径"},
+            },
+            "required": ["filepath"],
+        }, file_tools.delete_file, RiskLevel.DESTRUCTIVE, "file")
+
+        self._register("delete_directory", "删除目录", {
+            "type": "object",
+            "properties": {
+                "dirpath": {"type": "string", "description": "要删除的目录路径"},
+                "force": {"type": "boolean", "description": "是否强制删除非空目录", "default": False},
+            },
+            "required": ["dirpath"],
+        }, file_tools.delete_directory, RiskLevel.DESTRUCTIVE, "file")
+
+        self._register("move_file", "移动或重命名文件", {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "源路径"},
+                "destination": {"type": "string", "description": "目标路径"},
+            },
+            "required": ["source", "destination"],
+        }, file_tools.move_file, RiskLevel.WRITE, "file")
+
+        self._register("copy_file", "复制文件", {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "源文件路径"},
+                "destination": {"type": "string", "description": "目标路径"},
+            },
+            "required": ["source", "destination"],
+        }, file_tools.copy_file, RiskLevel.WRITE, "file")
+
+        self._register("change_permissions", "修改文件权限", {
+            "type": "object",
+            "properties": {
+                "filepath": {"type": "string", "description": "文件路径"},
+                "mode": {"type": "string", "description": "权限模式 (如 644, 755)"},
+            },
+            "required": ["filepath", "mode"],
+        }, file_tools.change_permissions, RiskLevel.WRITE, "file")
+
+        self._register("change_owner", "修改文件所有者", {
+            "type": "object",
+            "properties": {
+                "filepath": {"type": "string", "description": "文件路径"},
+                "owner": {"type": "string", "description": "新所有者 (格式: user:group)"},
+            },
+            "required": ["filepath", "owner"],
+        }, file_tools.change_owner, RiskLevel.WRITE, "file")
+
+        # Package management tools
+        from app.mcp_tools import package_tools
+
+        self._register("list_installed_packages", "列出已安装的软件包", {
+            "type": "object",
+            "properties": {
+                "filter_name": {"type": "string", "description": "按名称过滤", "default": ""},
+            },
+        }, package_tools.list_installed_packages, RiskLevel.READ, "package")
+
+        self._register("search_package", "搜索可用软件包", {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "包名关键词"},
+            },
+            "required": ["name"],
+        }, package_tools.search_package, RiskLevel.READ, "package")
+
+        self._register("install_package", "安装软件包", {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "要安装的包名"},
+            },
+            "required": ["name"],
+        }, package_tools.install_package, RiskLevel.WRITE, "package")
+
+        self._register("remove_package", "卸载软件包", {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "要卸载的包名"},
+            },
+            "required": ["name"],
+        }, package_tools.remove_package, RiskLevel.WRITE, "package")
+
+        self._register("check_package_updates", "检查可用的软件更新", {
+            "type": "object", "properties": {},
+        }, package_tools.check_package_updates, RiskLevel.READ, "package")
+
+        # User management tools
+        from app.mcp_tools import user_tools
+
+        self._register("list_users", "列出系统用户", {
+            "type": "object", "properties": {},
+        }, user_tools.list_users, RiskLevel.READ, "user")
+
+        self._register("list_groups", "列出系统用户组", {
+            "type": "object", "properties": {},
+        }, user_tools.list_groups, RiskLevel.READ, "user")
+
+        self._register("get_user_info", "获取用户详细信息", {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "用户名"},
+            },
+            "required": ["username"],
+        }, user_tools.get_user_info, RiskLevel.READ, "user")
+
+        self._register("create_user", "创建系统用户", {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "用户名"},
+                "home_dir": {"type": "string", "description": "主目录路径（可选）", "default": ""},
+                "shell": {"type": "string", "description": "登录 shell", "default": "/bin/bash"},
+            },
+            "required": ["username"],
+        }, user_tools.create_user, RiskLevel.WRITE, "user")
+
+        self._register("delete_user", "删除系统用户", {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "用户名"},
+                "remove_home": {"type": "boolean", "description": "是否删除主目录", "default": False},
+            },
+            "required": ["username"],
+        }, user_tools.delete_user, RiskLevel.DESTRUCTIVE, "user")
+
+        self._register("lock_user", "锁定用户账户（禁止登录）", {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "用户名"},
+            },
+            "required": ["username"],
+        }, user_tools.lock_user, RiskLevel.WRITE, "user")
+
+        self._register("unlock_user", "解锁用户账户", {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "用户名"},
+            },
+            "required": ["username"],
+        }, user_tools.unlock_user, RiskLevel.WRITE, "user")
+
+        # Firewall tools
+        from app.mcp_tools import firewall_tools
+
+        self._register("get_firewall_status", "获取防火墙状态和规则", {
+            "type": "object", "properties": {},
+        }, firewall_tools.get_firewall_status, RiskLevel.READ, "firewall")
+
+        self._register("list_open_ports", "列出防火墙放行的端口", {
+            "type": "object", "properties": {},
+        }, firewall_tools.list_open_ports, RiskLevel.READ, "firewall")
+
+        self._register("allow_port", "开放防火墙端口", {
+            "type": "object",
+            "properties": {
+                "port": {"type": "integer", "description": "端口号"},
+                "protocol": {"type": "string", "description": "协议 (tcp/udp)", "default": "tcp"},
+            },
+            "required": ["port"],
+        }, firewall_tools.allow_port, RiskLevel.WRITE, "firewall")
+
+        self._register("block_port", "关闭防火墙端口", {
+            "type": "object",
+            "properties": {
+                "port": {"type": "integer", "description": "端口号"},
+                "protocol": {"type": "string", "description": "协议 (tcp/udp)", "default": "tcp"},
+            },
+            "required": ["port"],
+        }, firewall_tools.block_port, RiskLevel.WRITE, "firewall")
+
+        # Cron/timer tools
+        from app.mcp_tools import cron_tools
+
+        self._register("list_cron_jobs", "列出定时任务（详细）", {
+            "type": "object",
+            "properties": {
+                "user": {"type": "string", "description": "指定用户（可选）", "default": ""},
+            },
+        }, cron_tools.list_cron_jobs, RiskLevel.READ, "cron")
+
+        self._register("list_system_timers", "列出 systemd 定时器", {
+            "type": "object", "properties": {},
+        }, cron_tools.list_system_timers, RiskLevel.READ, "cron")
+
+        self._register("add_cron_job", "添加定时任务", {
+            "type": "object",
+            "properties": {
+                "schedule": {"type": "string", "description": "Cron 表达式 (如 '0 2 * * *' 表示每天凌晨2点)"},
+                "command": {"type": "string", "description": "要执行的命令"},
+                "user": {"type": "string", "description": "指定用户（可选）", "default": ""},
+            },
+            "required": ["schedule", "command"],
+        }, cron_tools.add_cron_job, RiskLevel.WRITE, "cron")
+
+        self._register("remove_cron_job", "删除匹配的定时任务", {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "匹配文本（包含此文本的任务将被删除）"},
+                "user": {"type": "string", "description": "指定用户（可选）", "default": ""},
+            },
+            "required": ["pattern"],
+        }, cron_tools.remove_cron_job, RiskLevel.WRITE, "cron")
+
         logger.info(f"Tools registry loaded: {len(self._tools)} tools")
 
     def _register(
