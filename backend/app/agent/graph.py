@@ -204,6 +204,11 @@ async def reasoning_node(state: AgentState) -> dict:
                         if verification:
                             await send_to_client({"type": "trace", "phase": "verification", "event_type": verification["status"], "content": verification["message"]})
 
+                        # Before/After change diff
+                        change_diff = _capture_change_diff(tool_name, tool_args, backup_record)
+                        if change_diff:
+                            await send_to_client({"type": "trace", "phase": "verification", "event_type": "success", "content": f"变更对比:\n{change_diff}"})
+
                     await audit_logger.log(session_id, AuditPhase.EXECUTION, AuditEventType.SUCCESS, f"工具执行成功: {tool_name}")
                     await send_to_client({"type": "trace", "phase": "execution", "event_type": "success", "content": f"执行成功: {tool_name}"})
 
@@ -452,3 +457,54 @@ def _verify_tool_result(tool_name: str, tool_args: dict, result) -> dict | None:
     if success:
         return {"status": "success", "message": f"执行完成: {tool_name}"}
     return None
+
+
+def _capture_change_diff(tool_name: str, tool_args: dict, backup_record: dict | None) -> str | None:
+    """Capture before/after diff for write operations."""
+    diff_lines = []
+
+    if tool_name == "kill_process":
+        import psutil
+        pid = tool_args.get("pid")
+        if pid:
+            exists = psutil.pid_exists(pid)
+            diff_lines.append(f"[Before] PID {pid}: 运行中")
+            diff_lines.append(f"[After]  PID {pid}: {'仍在运行' if exists else '已终止'}")
+
+    elif tool_name == "restart_service":
+        import subprocess
+        service = tool_args.get("service")
+        if service:
+            try:
+                check = subprocess.run(["systemctl", "is-active", service], capture_output=True, text=True, timeout=5)
+                diff_lines.append(f"[Before] {service}: 运行中 (重启前)")
+                diff_lines.append(f"[After]  {service}: {check.stdout.strip()}")
+            except Exception:
+                pass
+
+    elif tool_name == "stop_service":
+        import subprocess
+        service = tool_args.get("service")
+        if service:
+            try:
+                check = subprocess.run(["systemctl", "is-active", service], capture_output=True, text=True, timeout=5)
+                diff_lines.append(f"[Before] {service}: 运行中")
+                diff_lines.append(f"[After]  {service}: {check.stdout.strip()}")
+            except Exception:
+                pass
+
+    elif backup_record:
+        from pathlib import Path
+        original_path = Path(backup_record.get("original_path", ""))
+        if original_path.exists():
+            current_size = original_path.stat().st_size
+            backup_size = backup_record.get("size", 0)
+            if current_size != backup_size:
+                diff_lines.append(f"[Before] 文件大小: {backup_size} bytes")
+                diff_lines.append(f"[After]  文件大小: {current_size} bytes")
+                diff_lines.append(f"[Diff]   变化: {current_size - backup_size:+d} bytes")
+        elif backup_record.get("original_path"):
+            diff_lines.append(f"[Before] 文件存在: {backup_record['original_path']}")
+            diff_lines.append(f"[After]  文件已删除")
+
+    return "\n".join(diff_lines) if diff_lines else None
