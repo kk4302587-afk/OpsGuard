@@ -1,9 +1,9 @@
-/* Chat panel styles */
+/* Chat panel styles - Premium feel */
 
 .messages-container {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 24px;
+  padding: var(--space-lg) var(--space-xl);
 }
 
 /* Welcome screen */
@@ -13,65 +13,69 @@
   align-items: center;
   justify-content: center;
   height: 100%;
-  padding: 40px;
+  padding: var(--space-2xl);
 }
 
 .welcome-icon {
-  width: 64px;
-  height: 64px;
-  border-radius: 16px;
-  background: linear-gradient(135deg, var(--accent-green), #00a88a);
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, var(--accent-green), #009e80);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 28px;
+  font-size: 24px;
   color: #fff;
-  margin-bottom: 20px;
-  box-shadow: 0 8px 24px rgba(0, 212, 170, 0.2);
+  margin-bottom: var(--space-lg);
+  box-shadow: var(--glow-green);
 }
 
 .welcome-title {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 8px;
+  margin-bottom: var(--space-sm);
+  letter-spacing: -0.3px;
 }
 
 .welcome-subtitle {
   font-size: 14px;
   color: var(--text-muted);
-  margin-bottom: 24px;
+  margin-bottom: var(--space-xl);
 }
 
 .welcome-hints {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-sm);
   justify-content: center;
-  max-width: 400px;
+  max-width: 420px;
 }
 
 .welcome-hint-tag {
   cursor: pointer;
-  padding: 6px 12px;
-  border-radius: 16px;
+  padding: 8px 14px !important;
+  border-radius: 20px !important;
   background: var(--bg-elevated) !important;
   border: 1px solid var(--border-color) !important;
   color: var(--text-secondary) !important;
+  font-size: 13px !important;
   transition: all 0.2s ease;
+  line-height: 1.4 !important;
 }
 
 .welcome-hint-tag:hover {
   border-color: var(--accent-green) !important;
   color: var(--accent-green) !important;
-  background: rgba(0, 212, 170, 0.08) !important;
+  background: var(--accent-green-dim) !important;
+  transform: translateY(-1px);
 }
 
 /* Message rows */
 .message-row {
   display: flex;
   gap: 12px;
-  margin-bottom: 20px;
+  margin-bottom: var(--space-lg);
   animation: fadeIn 0.3s ease;
 }
 
@@ -84,74 +88,74 @@
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(8px); }
+  from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
 /* Avatars */
 .message-avatar {
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  border-radius: 8px;
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
-  margin-top: 2px;
+  font-size: 13px;
+  margin-top: 3px;
 }
 
 .avatar-user {
-  background: var(--accent-blue);
-  color: #fff;
+  background: var(--accent-blue-dim);
+  color: var(--accent-blue);
 }
 
 .avatar-assistant {
-  background: linear-gradient(135deg, var(--accent-green), #00a88a);
-  color: #fff;
+  background: var(--accent-green-dim);
+  color: var(--accent-green);
 }
 
 /* Message bubbles */
 .message-bubble {
-  max-width: 70%;
-  padding: 10px 14px;
-  border-radius: 12px;
+  max-width: 72%;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  line-height: 1.6;
 }
 
 .bubble-user {
   background: var(--bg-elevated);
   border: 1px solid var(--border-color);
-  border-top-right-radius: 4px;
 }
 
 .bubble-assistant {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-top-left-radius: 4px;
 }
 
 .message-meta {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 
 .message-sender {
   font-size: 11px;
   font-weight: 600;
   color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .message-time {
   font-size: 10px;
-  color: var(--text-muted);
-  opacity: 0.6;
+  color: var(--text-dim);
 }
 
 .msg-text {
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.7;
   color: var(--text-primary);
   font-family: var(--font-sans);
   word-break: break-word;
@@ -159,19 +163,21 @@
 
 /* Special message cards */
 .msg-approval-card {
-  border: 1px solid rgba(229, 192, 123, 0.3);
-  border-radius: 8px;
+  border: 1px solid var(--accent-yellow-dim);
+  border-radius: var(--radius-sm);
   overflow: hidden;
+  background: var(--accent-yellow-dim);
 }
 
 .msg-approval-header {
   padding: 8px 12px;
-  background: rgba(229, 192, 123, 0.1);
-  border-bottom: 1px solid rgba(229, 192, 123, 0.2);
+  background: rgba(240, 195, 98, 0.08);
+  border-bottom: 1px solid var(--accent-yellow-dim);
 }
 
 .msg-approval-body {
   padding: 10px 12px;
+  background: var(--bg-primary);
 }
 
 .msg-approval-body code {
@@ -179,16 +185,17 @@
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
-  background: var(--bg-primary);
+  background: var(--bg-base);
   padding: 8px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
 }
 
 .msg-error-card {
-  padding: 8px 12px;
-  border: 1px solid rgba(224, 108, 117, 0.3);
-  border-radius: 8px;
-  background: rgba(224, 108, 117, 0.06);
+  padding: 10px 14px;
+  border: 1px solid var(--accent-red-dim);
+  border-radius: var(--radius-sm);
+  background: var(--accent-red-dim);
 }
 
 /* Thinking indicator */
@@ -200,25 +207,25 @@
 
 /* Input area */
 .input-container {
-  padding: 12px 24px 16px;
+  padding: 14px var(--space-xl) 18px;
   border-top: 1px solid var(--border-color);
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
 }
 
 .input-wrapper {
   display: flex;
   align-items: flex-end;
   gap: 10px;
-  background: var(--bg-primary);
+  background: var(--bg-base);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
-  padding: 8px 12px;
-  transition: border-color 0.2s ease;
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  transition: all 0.2s ease;
 }
 
 .input-wrapper:focus-within {
-  border-color: var(--accent-green);
-  box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.1);
+  border-color: rgba(0, 212, 170, 0.4);
+  box-shadow: 0 0 0 3px rgba(0, 212, 170, 0.06);
 }
 
 .chat-input {
@@ -226,13 +233,19 @@
   border: none !important;
   box-shadow: none !important;
   font-family: var(--font-sans) !important;
-  font-size: 13px !important;
+  font-size: 14px !important;
+  line-height: 1.6 !important;
   resize: none !important;
-  padding: 4px 0 !important;
+  padding: 2px 0 !important;
+  color: var(--text-primary) !important;
 }
 
 .chat-input:focus {
   box-shadow: none !important;
+}
+
+.chat-input::placeholder {
+  color: var(--text-dim) !important;
 }
 
 .send-button {

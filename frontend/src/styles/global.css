@@ -1,21 +1,57 @@
-/* OpsGuard Global Styles - Dark Terminal Theme */
+/* OpsGuard Global Styles - Premium Dark Theme */
 
 :root {
-  --bg-primary: #13151a;
-  --bg-secondary: #1a1d23;
-  --bg-elevated: #21252b;
-  --bg-hover: #282c34;
-  --border-color: #2d3139;
-  --text-primary: #e4e7eb;
-  --text-secondary: #8b929a;
+  /* Background layers (5 levels of elevation) */
+  --bg-base: #0a0c10;
+  --bg-primary: #0f1117;
+  --bg-secondary: #161920;
+  --bg-elevated: #1c2028;
+  --bg-hover: #242830;
+  --bg-active: #2c3038;
+
+  /* Border - very subtle */
+  --border-color: rgba(255, 255, 255, 0.06);
+  --border-color-strong: rgba(255, 255, 255, 0.1);
+
+  /* Text hierarchy */
+  --text-primary: #f0f2f5;
+  --text-secondary: #a0a8b4;
   --text-muted: #5c6370;
+  --text-dim: #3d4450;
+
+  /* Accent colors */
   --accent-green: #00d4aa;
-  --accent-blue: #61afef;
-  --accent-yellow: #e5c07b;
-  --accent-red: #e06c75;
-  --accent-purple: #c678dd;
+  --accent-green-dim: rgba(0, 212, 170, 0.12);
+  --accent-blue: #5b9cf6;
+  --accent-blue-dim: rgba(91, 156, 246, 0.12);
+  --accent-yellow: #f0c362;
+  --accent-yellow-dim: rgba(240, 195, 98, 0.12);
+  --accent-red: #f06868;
+  --accent-red-dim: rgba(240, 104, 104, 0.12);
+  --accent-purple: #b07ce8;
+
+  /* Typography */
   --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Consolas, monospace;
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif;
+
+  /* Spacing scale */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* Shadows & effects */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --glow-green: 0 0 20px rgba(0, 212, 170, 0.15);
 }
 
 * {
@@ -26,20 +62,24 @@
 
 body {
   font-family: var(--font-sans);
-  background-color: var(--bg-primary);
+  font-size: 14px;
+  line-height: 1.6;
+  background-color: var(--bg-base);
   color: var(--text-primary);
   overflow: hidden;
   height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 #root {
   height: 100vh;
 }
 
-/* Scrollbar styling */
+/* Scrollbar - minimal */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
@@ -47,20 +87,63 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border-color);
-  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
+  background: rgba(255, 255, 255, 0.15);
 }
 
 /* Code blocks */
 code, pre {
   font-family: var(--font-mono);
+  font-size: 12px;
 }
 
 /* Selection */
 ::selection {
-  background: rgba(0, 212, 170, 0.3);
+  background: rgba(0, 212, 170, 0.25);
+}
+
+/* Ant Design overrides for premium feel */
+.ant-card {
+  background: var(--bg-secondary) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: var(--radius-md) !important;
+}
+
+.ant-tag {
+  border-radius: 4px !important;
+  font-size: 11px !important;
+  line-height: 20px !important;
+}
+
+.ant-btn {
+  border-radius: var(--radius-sm) !important;
+  font-weight: 500 !important;
+}
+
+.ant-collapse {
+  border: none !important;
+  background: transparent !important;
+}
+
+.ant-collapse-item {
+  border-bottom: 1px solid var(--border-color) !important;
+}
+
+.ant-modal-content {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-color-strong) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: var(--shadow-lg) !important;
+}
+
+.ant-statistic-title {
+  color: var(--text-muted) !important;
+}
+
+.ant-statistic-content-value {
+  color: var(--text-primary) !important;
 }

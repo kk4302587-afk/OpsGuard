@@ -13,20 +13,36 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         algorithm: theme.darkAlgorithm,
         token: {
           colorPrimary: '#00d4aa',
-          colorBgContainer: '#1a1d23',
-          colorBgElevated: '#21252b',
-          colorBgLayout: '#13151a',
-          colorBorder: '#2d3139',
-          colorText: '#e4e7eb',
-          colorTextSecondary: '#8b929a',
-          borderRadius: 8,
-          fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace",
+          colorBgContainer: '#161920',
+          colorBgElevated: '#1c2028',
+          colorBgLayout: '#0f1117',
+          colorBorder: 'rgba(255, 255, 255, 0.06)',
+          colorText: '#f0f2f5',
+          colorTextSecondary: '#a0a8b4',
+          borderRadius: 10,
+          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif",
+          fontSize: 14,
+          lineHeight: 1.6,
         },
         components: {
           Layout: {
-            headerBg: '#1a1d23',
-            siderBg: '#1a1d23',
-            bodyBg: '#13151a',
+            headerBg: '#0f1117',
+            siderBg: '#0f1117',
+            bodyBg: '#0a0c10',
+          },
+          Card: {
+            colorBgContainer: '#161920',
+            colorBorderSecondary: 'rgba(255, 255, 255, 0.06)',
+          },
+          Button: {
+            borderRadius: 6,
+          },
+          Input: {
+            colorBgContainer: '#0f1117',
+            colorBorder: 'rgba(255, 255, 255, 0.08)',
+          },
+          Modal: {
+            colorBgElevated: '#1c2028',
           },
         },
       }}

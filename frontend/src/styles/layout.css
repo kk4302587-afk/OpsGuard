@@ -1,4 +1,4 @@
-/* Layout styles */
+/* Layout styles - Premium spacing and elevation */
 
 .app-layout {
   height: 100vh;
@@ -6,73 +6,88 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  background: var(--bg-base);
 }
 
 .status-header {
   height: 48px;
   min-height: 48px;
-  padding: 0 16px;
+  padding: 0 20px;
   border-bottom: 1px solid var(--border-color);
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
   display: flex;
   align-items: center;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 /* Left navigation rail */
 .nav-rail {
-  width: 52px;
-  min-width: 52px;
+  width: 56px;
+  min-width: 56px;
   height: 100%;
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
   border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding-top: 12px;
-  gap: 4px;
+  padding-top: 16px;
+  gap: 6px;
 }
 
 .nav-rail-item {
-  width: 38px;
-  height: 38px;
+  width: 36px;
+  height: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--text-muted);
-  font-size: 18px;
-  transition: all 0.2s ease;
+  font-size: 17px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
 }
 
 .nav-rail-item:hover {
   background: var(--bg-hover);
-  color: var(--text-primary);
+  color: var(--text-secondary);
 }
 
 .nav-rail-item-active {
-  background: var(--bg-hover);
+  background: var(--accent-green-dim);
   color: var(--accent-green);
-  box-shadow: inset 3px 0 0 var(--accent-green);
-  border-radius: 0 8px 8px 0;
+}
+
+.nav-rail-item-active::before {
+  content: '';
+  position: absolute;
+  left: -10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  background: var(--accent-green);
+  border-radius: 0 2px 2px 0;
 }
 
 /* Chat page panels */
 .session-sider {
   height: 100%;
   border-right: 1px solid var(--border-color);
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
   overflow-y: auto;
 }
 
 .chat-content {
   height: 100%;
   overflow: hidden;
+  background: var(--bg-base);
 }
 
 .trace-sider {
   height: 100%;
   border-left: 1px solid var(--border-color);
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
   overflow-y: auto;
 }
