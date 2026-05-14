@@ -86,26 +86,29 @@ function TopologyGraph() {
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'item',
-      backgroundColor: '#21252b',
-      borderColor: '#2d3139',
-      textStyle: { color: '#e4e7eb', fontSize: 12, fontFamily: "'JetBrains Mono', monospace" },
+      backgroundColor: 'rgba(20, 21, 24, 0.95)',
+      borderColor: 'rgba(255,255,255,0.08)',
+      borderRadius: 8,
+      padding: [8, 12],
+      textStyle: { color: '#d8dce2', fontSize: 12, fontFamily: "'JetBrains Mono', monospace" },
       formatter: (params: any) => {
         if (params.dataType === 'node') {
           const cat = data.categories[params.data.category]?.name || ''
-          return `<strong>${params.data.name}</strong><br/><span style="color:#8b929a">${categoryLabels[cat] || cat}</span>${params.data.value ? `<br/>${params.data.value}` : ''}`
+          return `<strong>${params.data.name}</strong><br/><span style="color:#8b929e">${categoryLabels[cat] || cat}</span>${params.data.value ? `<br/><span style="color:#34d399">${params.data.value}</span>` : ''}`
         }
         if (params.dataType === 'edge') {
-          return `<span style="color:#8b929a">${params.data.relation || ''}</span>`
+          return `<span style="color:#8b929e">${params.data.relation || ''}</span>`
         }
         return ''
       },
     },
     legend: {
       data: data.categories.map((c) => ({ name: categoryLabels[c.name] || c.name, icon: 'circle' })),
-      textStyle: { color: '#8b929a', fontSize: 11 },
+      textStyle: { color: '#8b929e', fontSize: 11 },
       top: 16,
       right: 16,
       orient: 'vertical',
+      itemGap: 12,
     },
     series: [
       {
@@ -115,22 +118,14 @@ function TopologyGraph() {
         draggable: true,
         animation: true,
         animationDuration: 1500,
-        animationEasingUpdate: 'quinticInOut',
+        animationEasingUpdate: 'cubicInOut',
+        // DEFAULT: hide all labels — only show on hover
         label: {
-          show: true,
-          position: 'bottom',
-          color: '#8b929a',
-          fontSize: 9,
-          fontFamily: "'JetBrains Mono', monospace",
-          formatter: (params: any) => {
-            const name = params.data.name as string
-            // Only show labels for process and service nodes, hide port/remote labels
-            if (params.data.category === categoryMap['port'] || params.data.category === categoryMap['remote']) {
-              return ''
-            }
-            return name.length > 16 ? name.slice(0, 16) + '..' : name
-          },
+          show: false,
         },
+        // Edge arrows to show direction (causality)
+        edgeSymbol: ['none', 'arrow'],
+        edgeSymbolSize: [0, 7],
         edgeLabel: {
           show: false,
         },
@@ -139,64 +134,85 @@ function TopologyGraph() {
           itemStyle: c.itemStyle,
         })),
         data: data.nodes.map((node) => {
-          // Size based on category importance
-          let size = 16
-          if (node.category === 'service') size = 42
-          else if (node.category === 'process') size = 32
-          else if (node.category === 'remote') size = 24
-          else if (node.category === 'port') size = 12
-          else if (node.category === 'config') size = 20
+          // Size hierarchy: service > process > config > remote > port
+          let size = 14
+          if (node.category === 'service') size = 48
+          else if (node.category === 'process') size = 30
+          else if (node.category === 'config') size = 22
+          else if (node.category === 'remote') size = 18
+          else if (node.category === 'port') size = 8  // Tiny dots
 
-          const catColor = data.categories[categoryMap[node.category]]?.itemStyle.color || '#8b929a'
+          const catColor = data.categories[categoryMap[node.category]]?.itemStyle.color || '#8b929e'
+          const isHighlight = (node as any).highlight
 
           return {
             name: node.name,
             value: node.value,
             category: categoryMap[node.category] ?? 0,
             symbolSize: size,
-            label: {
-              show: node.category === 'process' || node.category === 'service',
-            },
+            // No label by default
+            label: { show: false },
             itemStyle: {
-              shadowBlur: (node as any).highlight ? 24 : 6,
-              shadowColor: (node as any).highlight ? '#e06c75' : catColor + '30',
-              borderColor: (node as any).highlight ? '#e06c75' : catColor + '80',
-              borderWidth: (node as any).highlight ? 3 : 1.5,
+              shadowBlur: isHighlight ? 28 : 4,
+              shadowColor: isHighlight ? '#f87171' : catColor + '20',
+              borderColor: isHighlight ? '#f87171' : catColor + '60',
+              borderWidth: isHighlight ? 3 : node.category === 'port' ? 0 : 1.5,
+              opacity: node.category === 'port' ? 0.7 : 1,
             },
           }
         }),
         edges: data.edges.map((edge) => {
           const sourceNode = data.nodes.find((n) => n.id === edge.source)
           const targetNode = data.nodes.find((n) => n.id === edge.target)
+          const isConnectsTo = edge.relation === 'connects_to'
+
           return {
             source: sourceNode?.name || edge.source,
             target: targetNode?.name || edge.target,
             relation: edge.relation,
             lineStyle: {
-              color: '#3d4450',
-              width: edge.relation === 'connects_to' ? 1 : 2,
-              curveness: 0.2,
-              opacity: 0.7,
-              type: edge.relation === 'connects_to' ? 'dashed' as const : 'solid' as const,
+              color: 'source',  // Inherit color from source node
+              width: isConnectsTo ? 1 : 1.8,
+              curveness: 0.15,
+              opacity: isConnectsTo ? 0.4 : 0.6,
+              type: isConnectsTo ? 'dashed' as const : 'solid' as const,
             },
           }
         }),
         force: {
-          repulsion: 120,
-          edgeLength: [40, 100],
-          gravity: 0.15,
-          friction: 0.5,
+          repulsion: 250,       // Prevent overlap
+          edgeLength: [60, 140], // Keep related nodes close
+          gravity: 0.2,          // Pull toward center
+          friction: 0.55,
           layoutAnimation: true,
         },
+        // HOVER: show label with background, highlight adjacency
         emphasis: {
           focus: 'adjacency',
-          lineStyle: { width: 4, color: '#00d4aa' },
-          itemStyle: { shadowBlur: 20, shadowColor: '#00d4aa40' },
-          label: { show: true, fontSize: 11, color: '#e4e7eb' },
+          label: {
+            show: true,
+            fontSize: 11,
+            color: '#f0f2f5',
+            fontFamily: "'JetBrains Mono', monospace",
+            backgroundColor: 'rgba(20, 21, 24, 0.85)',
+            borderRadius: 4,
+            padding: [4, 8],
+            borderColor: 'rgba(255,255,255,0.1)',
+            borderWidth: 1,
+          },
+          lineStyle: {
+            width: 3,
+            opacity: 1,
+          },
+          itemStyle: {
+            shadowBlur: 24,
+            shadowColor: 'rgba(52, 211, 153, 0.3)',
+            borderWidth: 2,
+          },
         },
         blur: {
-          itemStyle: { opacity: 0.3 },
-          lineStyle: { opacity: 0.1 },
+          itemStyle: { opacity: 0.15 },
+          lineStyle: { opacity: 0.05 },
         },
       },
     ],
