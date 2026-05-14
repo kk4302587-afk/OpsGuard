@@ -5,6 +5,13 @@ import {
   EyeOutlined,
   EditOutlined,
   DeleteOutlined,
+  SettingOutlined,
+  HddOutlined,
+  WifiOutlined,
+  FileTextOutlined,
+  ToolOutlined,
+  FolderOutlined,
+  DesktopOutlined,
 } from '@ant-design/icons'
 
 const { Title, Text } = Typography
@@ -30,14 +37,14 @@ const riskConfig: Record<string, { color: string; label: string; icon: any }> = 
   destructive: { color: 'red', label: '高危', icon: <DeleteOutlined /> },
 }
 
-const categoryIcons: Record<string, string> = {
-  process: '⚙',
-  disk: '💾',
-  network: '🌐',
-  log: '📋',
-  service: '🔧',
-  config: '📄',
-  system: '🖥',
+const categoryIcons: Record<string, any> = {
+  process: <SettingOutlined />,
+  disk: <HddOutlined />,
+  network: <WifiOutlined />,
+  log: <FileTextOutlined />,
+  service: <ToolOutlined />,
+  config: <FolderOutlined />,
+  system: <DesktopOutlined />,
 }
 
 /**
@@ -74,11 +81,18 @@ function ToolsPanel() {
           MCP 工具注册表
         </Title>
         <Space>
-          <Badge count={data.total} style={{ backgroundColor: 'var(--accent-green)' }}>
-            <Tag>已注册工具</Tag>
-          </Badge>
-          <Tag color="green"><EyeOutlined /> 只读 {data.categories.reduce((sum, c) => sum + c.tools.filter(t => t.risk_level === 'read').length, 0)}</Tag>
-          <Tag color="orange"><EditOutlined /> 写操作 {data.categories.reduce((sum, c) => sum + c.tools.filter(t => t.risk_level === 'write').length, 0)}</Tag>
+          <Tag style={{ fontSize: 12 }}>
+            <ApiOutlined style={{ marginRight: 4 }} />
+            共 {data.total} 个工具
+          </Tag>
+          <Tag color="green" style={{ fontSize: 11 }}>
+            <EyeOutlined style={{ marginRight: 4 }} />
+            只读 {data.categories.reduce((sum, c) => sum + c.tools.filter(t => t.risk_level === 'read').length, 0)}
+          </Tag>
+          <Tag color="orange" style={{ fontSize: 11 }}>
+            <EditOutlined style={{ marginRight: 4 }} />
+            写操作 {data.categories.reduce((sum, c) => sum + c.tools.filter(t => t.risk_level === 'write').length, 0)}
+          </Tag>
         </Space>
       </div>
 
@@ -89,7 +103,7 @@ function ToolsPanel() {
           key: category.key,
           label: (
             <Space>
-              <span style={{ fontSize: 16 }}>{categoryIcons[category.key] || '📦'}</span>
+              <span style={{ color: 'var(--accent-blue)' }}>{categoryIcons[category.key] || <ApiOutlined />}</span>
               <Text strong>{category.label}</Text>
               <Badge count={category.count} style={{ backgroundColor: 'var(--bg-hover)', color: 'var(--text-secondary)' }} />
             </Space>
