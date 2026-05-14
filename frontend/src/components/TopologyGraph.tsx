@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import ReactECharts from 'echarts-for-react'
+import { useEffect, useState, useRef, useCallback } from 'react'
+import ForceGraph3D from 'react-force-graph-3d'
 import { Button, Spin, Empty, Typography, Space, Tag } from 'antd'
 import { ApartmentOutlined, ReloadOutlined, NodeIndexOutlined } from '@ant-design/icons'
 
@@ -10,6 +10,7 @@ interface TopologyNode {
   name: string
   category: string
   value?: string
+  highlight?: boolean
 }
 
 interface TopologyEdge {
@@ -30,19 +31,46 @@ const categoryLabels: Record<string, string> = {
   service: '服务',
   config: '配置',
   remote: '远程连接',
+  log: '日志',
+}
+
+const categoryColors: Record<string, string> = {
+  process: '#60a5fa',
+  port: '#fbbf24',
+  service: '#34d399',
+  config: '#a78bfa',
+  remote: '#f87171',
+  log: '#fb923c',
 }
 
 /**
- * Fault correlation topology graph using ECharts.
- * Visualizes relationships between processes, ports, services, configs.
+ * 3D Fault correlation topology graph.
+ * Uses react-force-graph-3d for Obsidian-like 3D visualization.
  */
 function TopologyGraph() {
   const [data, setData] = useState<TopologyData | null>(null)
   const [loading, setLoading] = useState(false)
+  const graphRef = useRef<any>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [dimensions, setDimensions] = useState({ width: 800, height: 600 })
 
   useEffect(() => {
     fetchTopology()
   }, [])
+
+  useEffect(() => {
+    const updateDimensions = () => {
+      if (containerRef.current) {
+        setDimensions({
+          width: containerRef.current.clientWidth,
+          height: containerRef.current.clientHeight,
+        })
+      }
+    }
+    updateDimensions()
+    window.addEventListener('resize', updateDimensions)
+    return () => window.removeEventListener('resize', updateDimensions)
+  }, [data])
 
   const fetchTopology = async () => {
     setLoading(true)
@@ -58,6 +86,43 @@ function TopologyGraph() {
       setLoading(false)
     }
   }
+
+  const getNodeSize = (category: string) => {
+    switch (category) {
+      case 'service': return 8
+      case 'process': return 5
+      case 'config': return 4
+      case 'remote': return 3.5
+      case 'port': return 2
+      default: return 3
+    }
+  }
+
+  const getNodeColor = (node: TopologyNode) => {
+    if (node.highlight) return '#f87171'
+    return categoryColors[node.category] || '#8b929e'
+  }
+
+  const getLinkColor = (link: any) => {
+    const sourceNode = data?.nodes.find(n => n.id === link.source?.id || n.id === link.source)
+    if (sourceNode) {
+      const color = categoryColors[sourceNode.category] || '#555'
+      return color + '80' // 50% opacity
+    }
+    return '#ffffff20'
+  }
+
+  const handleNodeClick = useCallback((node: any) => {
+    if (graphRef.current) {
+      const distance = 120
+      const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z)
+      graphRef.current.cameraPosition(
+        { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
+        node,
+        1000,
+      )
+    }
+  }, [])
 
   if (loading) {
     return (
@@ -77,180 +142,80 @@ function TopologyGraph() {
     )
   }
 
-  const categoryMap: Record<string, number> = {}
-  data.categories.forEach((cat, idx) => {
-    categoryMap[cat.name] = idx
-  })
-
-  const option = {
-    backgroundColor: 'transparent',
-    tooltip: {
-      trigger: 'item',
-      backgroundColor: 'rgba(20, 21, 24, 0.95)',
-      borderColor: 'rgba(255,255,255,0.08)',
-      borderRadius: 8,
-      padding: [8, 12],
-      textStyle: { color: '#d8dce2', fontSize: 12, fontFamily: "'JetBrains Mono', monospace" },
-      formatter: (params: any) => {
-        if (params.dataType === 'node') {
-          const cat = data.categories[params.data.category]?.name || ''
-          return `<strong>${params.data.name}</strong><br/><span style="color:#8b929e">${categoryLabels[cat] || cat}</span>${params.data.value ? `<br/><span style="color:#34d399">${params.data.value}</span>` : ''}`
-        }
-        if (params.dataType === 'edge') {
-          return `<span style="color:#8b929e">${params.data.relation || ''}</span>`
-        }
-        return ''
-      },
-    },
-    legend: {
-      data: data.categories.map((c) => ({ name: categoryLabels[c.name] || c.name, icon: 'circle' })),
-      textStyle: { color: '#8b929e', fontSize: 11 },
-      top: 16,
-      right: 16,
-      orient: 'vertical',
-      itemGap: 12,
-    },
-    series: [
-      {
-        type: 'graph',
-        layout: 'force',
-        roam: true,
-        draggable: true,
-        animation: true,
-        animationDuration: 1500,
-        animationEasingUpdate: 'cubicInOut',
-        // DEFAULT: hide all labels — only show on hover
-        label: {
-          show: false,
-        },
-        // Edge arrows to show direction (causality)
-        edgeSymbol: ['none', 'arrow'],
-        edgeSymbolSize: [0, 7],
-        edgeLabel: {
-          show: false,
-        },
-        categories: data.categories.map((c) => ({
-          name: categoryLabels[c.name] || c.name,
-          itemStyle: c.itemStyle,
-        })),
-        data: data.nodes.map((node) => {
-          // Size hierarchy: service > process > config > remote > port
-          let size = 14
-          if (node.category === 'service') size = 48
-          else if (node.category === 'process') size = 30
-          else if (node.category === 'config') size = 22
-          else if (node.category === 'remote') size = 18
-          else if (node.category === 'port') size = 8  // Tiny dots
-
-          const catColor = data.categories[categoryMap[node.category]]?.itemStyle.color || '#8b929e'
-          const isHighlight = (node as any).highlight
-
-          return {
-            name: node.name,
-            value: node.value,
-            category: categoryMap[node.category] ?? 0,
-            symbolSize: size,
-            // No label by default
-            label: { show: false },
-            itemStyle: {
-              shadowBlur: isHighlight ? 28 : 4,
-              shadowColor: isHighlight ? '#f87171' : catColor + '20',
-              borderColor: isHighlight ? '#f87171' : catColor + '60',
-              borderWidth: isHighlight ? 3 : node.category === 'port' ? 0 : 1.5,
-              opacity: node.category === 'port' ? 0.7 : 1,
-            },
-          }
-        }),
-        edges: data.edges.map((edge) => {
-          const sourceNode = data.nodes.find((n) => n.id === edge.source)
-          const targetNode = data.nodes.find((n) => n.id === edge.target)
-          const isConnectsTo = edge.relation === 'connects_to'
-
-          return {
-            source: sourceNode?.name || edge.source,
-            target: targetNode?.name || edge.target,
-            relation: edge.relation,
-            lineStyle: {
-              color: 'source',  // Inherit color from source node
-              width: isConnectsTo ? 1 : 1.8,
-              curveness: 0.15,
-              opacity: isConnectsTo ? 0.4 : 0.6,
-              type: isConnectsTo ? 'dashed' as const : 'solid' as const,
-            },
-          }
-        }),
-        force: {
-          repulsion: 250,       // Prevent overlap
-          edgeLength: [60, 140], // Keep related nodes close
-          gravity: 0.2,          // Pull toward center
-          friction: 0.55,
-          layoutAnimation: true,
-        },
-        // HOVER: show label with background, highlight adjacency
-        emphasis: {
-          focus: 'adjacency',
-          label: {
-            show: true,
-            fontSize: 11,
-            color: '#f0f2f5',
-            fontFamily: "'JetBrains Mono', monospace",
-            backgroundColor: 'rgba(20, 21, 24, 0.85)',
-            borderRadius: 4,
-            padding: [4, 8],
-            borderColor: 'rgba(255,255,255,0.1)',
-            borderWidth: 1,
-          },
-          lineStyle: {
-            width: 3,
-            opacity: 1,
-          },
-          itemStyle: {
-            shadowBlur: 24,
-            shadowColor: 'rgba(52, 211, 153, 0.3)',
-            borderWidth: 2,
-          },
-        },
-        blur: {
-          itemStyle: { opacity: 0.15 },
-          lineStyle: { opacity: 0.05 },
-        },
-      },
-    ],
+  // Transform data for react-force-graph-3d
+  const graphData = {
+    nodes: data.nodes.map(n => ({ ...n, val: getNodeSize(n.category) })),
+    links: data.edges.map(e => ({ source: e.source, target: e.target, relation: e.relation })),
   }
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--bg-base)' }}>
       {/* Header */}
-      <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={{ padding: 'var(--space-4) var(--space-5)', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 10 }}>
         <Space>
           <Title level={5} style={{ color: 'var(--text-primary)', margin: 0 }}>
             <ApartmentOutlined style={{ marginRight: 8, color: 'var(--accent-green)' }} />
             故障关联图谱
           </Title>
-          <Tag>
+          <Tag style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-color)' }}>
             <NodeIndexOutlined style={{ marginRight: 4 }} />
             {data.nodes.length} 节点 / {data.edges.length} 关系
           </Tag>
         </Space>
-        <Button icon={<ReloadOutlined />} onClick={fetchTopology} loading={loading}>
-          刷新
-        </Button>
+        <Space>
+          {/* Legend */}
+          {Object.entries(categoryLabels).slice(0, 5).map(([key, label]) => (
+            <span key={key} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--text-muted)' }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: categoryColors[key], display: 'inline-block' }} />
+              {label}
+            </span>
+          ))}
+          <Button size="small" icon={<ReloadOutlined />} onClick={fetchTopology}>
+            刷新
+          </Button>
+        </Space>
       </div>
 
-      {/* Graph */}
-      <div style={{ flex: 1, padding: 8 }}>
-        <ReactECharts
-          option={option}
-          style={{ height: '100%', width: '100%' }}
-          opts={{ renderer: 'canvas' }}
+      {/* 3D Graph */}
+      <div ref={containerRef} style={{ flex: 1, position: 'relative' }}>
+        <ForceGraph3D
+          ref={graphRef}
+          graphData={graphData}
+          width={dimensions.width}
+          height={dimensions.height}
+          backgroundColor="#09090b"
+          nodeVal="val"
+          nodeColor={(node: any) => getNodeColor(node)}
+          nodeOpacity={0.9}
+          nodeResolution={16}
+          linkColor={getLinkColor}
+          linkWidth={1}
+          linkOpacity={0.5}
+          linkDirectionalArrowLength={4}
+          linkDirectionalArrowRelPos={0.9}
+          linkDirectionalArrowColor={getLinkColor}
+          linkCurvature={0.1}
+          onNodeClick={handleNodeClick}
+          nodeLabel={(node: any) => `
+            <div style="background:rgba(20,21,24,0.92);padding:6px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);font-family:JetBrains Mono,monospace;font-size:11px;color:#d8dce2;max-width:240px">
+              <strong>${node.name}</strong><br/>
+              <span style="color:#8b929e">${categoryLabels[node.category] || node.category}</span>
+              ${node.value ? `<br/><span style="color:#34d399">${node.value}</span>` : ''}
+            </div>
+          `}
+          linkLabel={(link: any) => `<span style="background:rgba(20,21,24,0.9);padding:2px 6px;border-radius:3px;font-size:10px;color:#8b929e">${link.relation}</span>`}
+          d3AlphaDecay={0.02}
+          d3VelocityDecay={0.3}
+          warmupTicks={50}
+          cooldownTicks={100}
         />
-      </div>
 
-      {/* Footer hint */}
-      <div style={{ padding: '8px 24px', borderTop: '1px solid var(--border-color)' }}>
-        <Text style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-          拖拽节点调整布局 / 滚轮缩放 / 点击节点高亮关联
-        </Text>
+        {/* Bottom hint */}
+        <div style={{ position: 'absolute', bottom: 12, left: 16, zIndex: 10 }}>
+          <Text style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+            拖拽旋转 / 滚轮缩放 / 点击节点聚焦
+          </Text>
+        </div>
       </div>
     </div>
   )
