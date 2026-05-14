@@ -1,4 +1,4 @@
-import { Typography, Tag, Empty } from 'antd'
+import { Typography, Tag, Empty, Button } from 'antd'
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
@@ -21,7 +21,7 @@ const { Text, Title } = Typography
  * Visualizes: input → safety check → plan → tool calls → verify → respond
  */
 function TracePanel() {
-  const { traceEvents } = useChatStore()
+  const { traceEvents, sendMessage } = useChatStore()
 
   const getPhaseIcon = (phase: string, eventType: string) => {
     const iconStyle = { fontSize: 14 }
@@ -128,6 +128,17 @@ function TracePanel() {
                 >
                   {event.content}
                 </Text>
+                {event.phase === 'tool_call' && event.content.includes('调用工具') && (
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<BulbOutlined />}
+                    style={{ padding: 0, marginTop: 4, fontSize: 11, height: 'auto' }}
+                    onClick={() => sendMessage(`请解释这个操作的含义和作用：${event.content.replace('调用工具: ', '')}`)}
+                  >
+                    解释
+                  </Button>
+                )}
               </div>
             </div>
           ))}

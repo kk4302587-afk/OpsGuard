@@ -237,6 +237,17 @@ async def run_agent(
                     # Post-action verification for write operations
                     if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
                         verification = _verify_tool_result(tool_name, tool_args, result)
+
+                        # Generate Before/After diff for the trace panel
+                        change_diff = _capture_change_diff(tool_name, tool_args, backup_record)
+                        if change_diff:
+                            await send_to_client({
+                                "type": "trace",
+                                "phase": "verification",
+                                "event_type": "success",
+                                "content": f"变更对比:\n{change_diff}",
+                            })
+
                         if verification:
                             await send_to_client({"type": "trace", "phase": "verification", "event_type": verification["status"], "content": verification["message"]})
                             await audit_logger.log(
@@ -558,3 +569,68 @@ async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_t
         return impact_text
 
     return None
+
+
+def _capture_change_diff(tool_name: str, tool_args: dict, backup_record: dict | None) -> str | None:
+    """Capture before/after diff for write operations.
+
+    Compares the current state with the backup to show what changed.
+    Returns a human-readable diff string, or None if no diff available.
+    """
+    diff_lines = []
+
+    if tool_name == "kill_process":
+        pid = tool_args.get("pid")
+        if pid:
+            import psutil
+            exists = psutil.pid_exists(pid)
+            diff_lines.append(f"[Before] PID {pid}: 运行中")
+            diff_lines.append(f"[After]  PID {pid}: {'仍在运行' if exists else '已终止'}")
+
+    elif tool_name == "restart_service":
+        service = tool_args.get("service")
+        if service:
+            import subprocess
+            try:
+                check = subprocess.run(["systemctl", "is-active", service], capture_output=True, text=True, timeout=5)
+                status = check.stdout.strip()
+                diff_lines.append(f"[Before] {service}: 运行中 (重启前)")
+                diff_lines.append(f"[After]  {service}: {status}")
+
+                # Get uptime
+                uptime_check = subprocess.run(
+                    ["systemctl", "show", service, "--property=ActiveEnterTimestamp"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if uptime_check.returncode == 0:
+                    diff_lines.append(f"[After]  启动时间: {uptime_check.stdout.strip().split('=')[-1]}")
+            except Exception:
+                pass
+
+    elif tool_name == "stop_service":
+        service = tool_args.get("service")
+        if service:
+            import subprocess
+            try:
+                check = subprocess.run(["systemctl", "is-active", service], capture_output=True, text=True, timeout=5)
+                diff_lines.append(f"[Before] {service}: 运行中")
+                diff_lines.append(f"[After]  {service}: {check.stdout.strip()}")
+            except Exception:
+                pass
+
+    elif backup_record:
+        # For file operations, show size diff
+        from pathlib import Path
+        original_path = Path(backup_record.get("original_path", ""))
+        if original_path.exists():
+            current_size = original_path.stat().st_size
+            backup_size = backup_record.get("size", 0)
+            if current_size != backup_size:
+                diff_lines.append(f"[Before] 文件大小: {backup_size} bytes")
+                diff_lines.append(f"[After]  文件大小: {current_size} bytes")
+                diff_lines.append(f"[Diff]   变化: {current_size - backup_size:+d} bytes")
+        elif backup_record.get("original_path"):
+            diff_lines.append(f"[Before] 文件存在: {backup_record['original_path']}")
+            diff_lines.append(f"[After]  文件已删除")
+
+    return "\n".join(diff_lines) if diff_lines else None

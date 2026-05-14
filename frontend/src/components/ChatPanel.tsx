@@ -6,6 +6,7 @@ import {
   UserOutlined,
   LoadingOutlined,
   SafetyOutlined,
+  BulbOutlined,
 } from '@ant-design/icons'
 import { useChatStore } from '../stores/chatStore'
 import DiagnosisProgress from './DiagnosisProgress'
@@ -46,6 +47,7 @@ function ChatPanel() {
     // Detect special message types
     if (content.startsWith('[需要确认]')) {
       const lines = content.split('\n')
+      const command = lines[0].replace('[需要确认] ', '')
       return (
         <div className="msg-approval-card">
           <div className="msg-approval-header">
@@ -53,10 +55,21 @@ function ChatPanel() {
             <Text strong style={{ color: 'var(--accent-yellow)' }}>操作需要确认</Text>
           </div>
           <div className="msg-approval-body">
-            <code>{lines[0].replace('[需要确认] ', '')}</code>
+            <code>{command}</code>
             {lines.slice(1).map((line, i) => (
               <div key={i} style={{ marginTop: 4, fontSize: 12, color: 'var(--text-secondary)' }}>{line}</div>
             ))}
+            <Button
+              size="small"
+              type="link"
+              icon={<BulbOutlined />}
+              style={{ padding: 0, marginTop: 8, fontSize: 12 }}
+              onClick={() => {
+                setInputValue(`请解释这条命令的含义、每个参数的作用以及可能的影响：${command}`)
+              }}
+            >
+              解释这条命令
+            </Button>
           </div>
         </div>
       )
