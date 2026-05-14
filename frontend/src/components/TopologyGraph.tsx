@@ -1,5 +1,5 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
-import ForceGraph3D from 'react-force-graph-3d'
+import { useEffect, useState } from 'react'
+import ReactECharts from 'echarts-for-react'
 import { Button, Spin, Empty, Typography, Space, Tag } from 'antd'
 import { ApartmentOutlined, ReloadOutlined, NodeIndexOutlined } from '@ant-design/icons'
 
@@ -44,33 +44,16 @@ const categoryColors: Record<string, string> = {
 }
 
 /**
- * 3D Fault correlation topology graph.
- * Uses react-force-graph-3d for Obsidian-like 3D visualization.
+ * Radial topology graph - center-outward layout like Obsidian.
+ * Services at center, processes in middle ring, ports on outer ring.
  */
 function TopologyGraph() {
   const [data, setData] = useState<TopologyData | null>(null)
   const [loading, setLoading] = useState(false)
-  const graphRef = useRef<any>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-  const [dimensions, setDimensions] = useState({ width: 800, height: 600 })
 
   useEffect(() => {
     fetchTopology()
   }, [])
-
-  useEffect(() => {
-    const updateDimensions = () => {
-      if (containerRef.current) {
-        setDimensions({
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight,
-        })
-      }
-    }
-    updateDimensions()
-    window.addEventListener('resize', updateDimensions)
-    return () => window.removeEventListener('resize', updateDimensions)
-  }, [data])
 
   const fetchTopology = async () => {
     setLoading(true)
@@ -86,43 +69,6 @@ function TopologyGraph() {
       setLoading(false)
     }
   }
-
-  const getNodeSize = (category: string) => {
-    switch (category) {
-      case 'service': return 8
-      case 'process': return 5
-      case 'config': return 4
-      case 'remote': return 3.5
-      case 'port': return 2
-      default: return 3
-    }
-  }
-
-  const getNodeColor = (node: TopologyNode) => {
-    if (node.highlight) return '#f87171'
-    return categoryColors[node.category] || '#8b929e'
-  }
-
-  const getLinkColor = (link: any) => {
-    const sourceNode = data?.nodes.find(n => n.id === link.source?.id || n.id === link.source)
-    if (sourceNode) {
-      const color = categoryColors[sourceNode.category] || '#555'
-      return color + '80' // 50% opacity
-    }
-    return '#ffffff20'
-  }
-
-  const handleNodeClick = useCallback((node: any) => {
-    if (graphRef.current) {
-      const distance = 120
-      const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z)
-      graphRef.current.cameraPosition(
-        { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
-        node,
-        1000,
-      )
-    }
-  }, [])
 
   if (loading) {
     return (
@@ -142,16 +88,174 @@ function TopologyGraph() {
     )
   }
 
-  // Transform data for react-force-graph-3d
-  const graphData = {
-    nodes: data.nodes.map(n => ({ ...n, val: getNodeSize(n.category) })),
-    links: data.edges.map(e => ({ source: e.source, target: e.target, relation: e.relation })),
+  // Assign radial positions: services center, processes middle, ports outer
+  const categoryOrder: Record<string, number> = {
+    service: 0,   // Center
+    process: 1,   // Middle ring
+    config: 1,
+    remote: 2,    // Outer ring
+    port: 2,
+    log: 2,
+  }
+
+  const categoryMap: Record<string, number> = {}
+  data.categories.forEach((cat, idx) => {
+    categoryMap[cat.name] = idx
+  })
+
+  // Group nodes by ring
+  const rings: Record<number, TopologyNode[]> = { 0: [], 1: [], 2: [] }
+  data.nodes.forEach(node => {
+    const ring = categoryOrder[node.category] ?? 1
+    rings[ring].push(node)
+  })
+
+  // Calculate positions in concentric circles
+  const positionedNodes = data.nodes.map(node => {
+    const ring = categoryOrder[node.category] ?? 1
+    const nodesInRing = rings[ring]
+    const indexInRing = nodesInRing.indexOf(node)
+    const totalInRing = nodesInRing.length
+
+    // Radius for each ring
+    const radius = ring === 0 ? 0 : ring === 1 ? 200 : 360
+    const angle = (2 * Math.PI * indexInRing) / totalInRing - Math.PI / 2
+
+    // Add slight randomness to prevent perfect circle (more organic)
+    const jitter = ring === 0 ? 0 : (Math.random() - 0.5) * 30
+
+    const x = radius === 0 ? 0 : Math.cos(angle) * (radius + jitter)
+    const y = radius === 0 ? 0 : Math.sin(angle) * (radius + jitter)
+
+    let size = 12
+    if (node.category === 'service') size = 36
+    else if (node.category === 'process') size = 18
+    else if (node.category === 'config') size = 14
+    else if (node.category === 'remote') size = 12
+    else if (node.category === 'port') size = 6
+
+    const color = categoryColors[node.category] || '#8b929e'
+    const isHighlight = (node as any).highlight
+
+    return {
+      name: node.name,
+      value: node.value,
+      category: categoryMap[node.category] ?? 0,
+      symbolSize: size,
+      x,
+      y,
+      fixed: false,
+      label: { show: false },
+      itemStyle: {
+        color: isHighlight ? '#f87171' : color,
+        shadowBlur: isHighlight ? 20 : ring === 0 ? 12 : 4,
+        shadowColor: isHighlight ? 'rgba(248,113,113,0.4)' : color + (ring === 0 ? '40' : '20'),
+        borderColor: color + '60',
+        borderWidth: ring === 0 ? 2 : node.category === 'port' ? 0 : 1,
+        opacity: node.category === 'port' ? 0.6 : 0.9,
+      },
+    }
+  })
+
+  const option = {
+    backgroundColor: 'transparent',
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: 'rgba(14, 15, 18, 0.94)',
+      borderColor: 'rgba(255,255,255,0.08)',
+      borderRadius: 8,
+      padding: [8, 12],
+      textStyle: { color: '#d8dce2', fontSize: 12, fontFamily: "'JetBrains Mono', monospace" },
+      formatter: (params: any) => {
+        if (params.dataType === 'node') {
+          const cat = data.categories[params.data.category]?.name || ''
+          return `<div style="max-width:220px"><strong>${params.data.name}</strong><br/><span style="color:#8b929e">${categoryLabels[cat] || cat}</span>${params.data.value ? `<br/><span style="color:#34d399">${params.data.value}</span>` : ''}</div>`
+        }
+        if (params.dataType === 'edge') {
+          return `<span style="color:#8b929e">${params.data.relation || ''}</span>`
+        }
+        return ''
+      },
+    },
+    series: [
+      {
+        type: 'graph',
+        layout: 'force',
+        roam: true,
+        draggable: true,
+        animation: true,
+        animationDuration: 2000,
+        animationEasingUpdate: 'cubicInOut',
+        label: { show: false },
+        edgeSymbol: ['none', 'arrow'],
+        edgeSymbolSize: [0, 6],
+        categories: data.categories.map((c) => ({
+          name: categoryLabels[c.name] || c.name,
+          itemStyle: { color: c.itemStyle.color },
+        })),
+        data: positionedNodes,
+        edges: data.edges.map((edge) => {
+          const sourceNode = data.nodes.find((n) => n.id === edge.source)
+          const targetNode = data.nodes.find((n) => n.id === edge.target)
+          const isConnectsTo = edge.relation === 'connects_to'
+          const sourceColor = categoryColors[sourceNode?.category || 'process'] || '#555'
+
+          return {
+            source: sourceNode?.name || edge.source,
+            target: targetNode?.name || edge.target,
+            relation: edge.relation,
+            lineStyle: {
+              color: sourceColor + '60',
+              width: isConnectsTo ? 0.8 : 1.5,
+              curveness: 0.12,
+              type: isConnectsTo ? 'dashed' as const : 'solid' as const,
+            },
+          }
+        }),
+        force: {
+          // Gentle force to maintain radial shape while allowing some movement
+          repulsion: 80,
+          edgeLength: [30, 80],
+          gravity: 0.05,
+          friction: 0.7,
+          layoutAnimation: true,
+        },
+        emphasis: {
+          focus: 'adjacency',
+          label: {
+            show: true,
+            fontSize: 11,
+            color: '#f0f2f5',
+            fontFamily: "'JetBrains Mono', monospace",
+            backgroundColor: 'rgba(14, 15, 18, 0.9)',
+            borderRadius: 4,
+            padding: [4, 8],
+            borderColor: 'rgba(255,255,255,0.1)',
+            borderWidth: 1,
+          },
+          lineStyle: {
+            width: 2.5,
+            opacity: 1,
+          },
+          itemStyle: {
+            shadowBlur: 20,
+            shadowColor: 'rgba(52, 211, 153, 0.35)',
+            borderWidth: 2,
+            borderColor: '#34d399',
+          },
+        },
+        blur: {
+          itemStyle: { opacity: 0.12 },
+          lineStyle: { opacity: 0.04 },
+        },
+      },
+    ],
   }
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--bg-base)' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
-      <div style={{ padding: 'var(--space-4) var(--space-5)', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 10 }}>
+      <div style={{ padding: 'var(--space-4) var(--space-5)', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Space>
           <Title level={5} style={{ color: 'var(--text-primary)', margin: 0 }}>
             <ApartmentOutlined style={{ marginRight: 8, color: 'var(--accent-green)' }} />
@@ -163,7 +267,6 @@ function TopologyGraph() {
           </Tag>
         </Space>
         <Space>
-          {/* Legend */}
           {Object.entries(categoryLabels).slice(0, 5).map(([key, label]) => (
             <span key={key} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--text-muted)' }}>
               <span style={{ width: 8, height: 8, borderRadius: '50%', background: categoryColors[key], display: 'inline-block' }} />
@@ -176,46 +279,20 @@ function TopologyGraph() {
         </Space>
       </div>
 
-      {/* 3D Graph */}
-      <div ref={containerRef} style={{ flex: 1, position: 'relative' }}>
-        <ForceGraph3D
-          ref={graphRef}
-          graphData={graphData}
-          width={dimensions.width}
-          height={dimensions.height}
-          backgroundColor="#09090b"
-          nodeVal="val"
-          nodeColor={(node: any) => getNodeColor(node)}
-          nodeOpacity={0.9}
-          nodeResolution={16}
-          linkColor={getLinkColor}
-          linkWidth={1}
-          linkOpacity={0.5}
-          linkDirectionalArrowLength={4}
-          linkDirectionalArrowRelPos={0.9}
-          linkDirectionalArrowColor={getLinkColor}
-          linkCurvature={0.1}
-          onNodeClick={handleNodeClick}
-          nodeLabel={(node: any) => `
-            <div style="background:rgba(20,21,24,0.92);padding:6px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);font-family:JetBrains Mono,monospace;font-size:11px;color:#d8dce2;max-width:240px">
-              <strong>${node.name}</strong><br/>
-              <span style="color:#8b929e">${categoryLabels[node.category] || node.category}</span>
-              ${node.value ? `<br/><span style="color:#34d399">${node.value}</span>` : ''}
-            </div>
-          `}
-          linkLabel={(link: any) => `<span style="background:rgba(20,21,24,0.9);padding:2px 6px;border-radius:3px;font-size:10px;color:#8b929e">${link.relation}</span>`}
-          d3AlphaDecay={0.02}
-          d3VelocityDecay={0.3}
-          warmupTicks={50}
-          cooldownTicks={100}
+      {/* Graph */}
+      <div style={{ flex: 1 }}>
+        <ReactECharts
+          option={option}
+          style={{ height: '100%', width: '100%' }}
+          opts={{ renderer: 'canvas' }}
         />
+      </div>
 
-        {/* Bottom hint */}
-        <div style={{ position: 'absolute', bottom: 12, left: 16, zIndex: 10 }}>
-          <Text style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-            拖拽旋转 / 滚轮缩放 / 点击节点聚焦
-          </Text>
-        </div>
+      {/* Footer */}
+      <div style={{ padding: '8px var(--space-5)', borderTop: '1px solid var(--border-color)' }}>
+        <Text style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          拖拽节点调整 / 滚轮缩放 / 悬浮查看详情 / 点击高亮关联
+        </Text>
       </div>
     </div>
   )
