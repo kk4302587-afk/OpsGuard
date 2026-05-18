@@ -138,7 +138,10 @@ safety:
   classifier:
     enabled: true
     model_path: "./models/prompt_guard"
-    threshold: 0.85
+    # Threshold raised to 0.97: only block on very high-confidence injection.
+    # The classifier tends to over-fire on Chinese conversational input —
+    # leave the gray zone to the rule engine + LLM system prompt.
+    threshold: 0.97
     fallback_on_error: true  # If model fails to load, continue without it
 
   # Layer 3: LLM system prompt constraints (always active)

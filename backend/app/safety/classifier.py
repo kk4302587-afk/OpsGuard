@@ -139,6 +139,17 @@ class PromptClassifier:
         if not self._available:
             return ClassifierResult(is_safe=True, confidence=0.0, label="safe")
 
+        # Short text exemption: the BERT classifier is trained mostly on English
+        # injection patterns and is unreliable on short conversational replies like
+        # "执行", "确认", "yes", "do it", "那就清理 /tmp 下的大文件吧". These are common
+        # follow-ups after the Agent asks for approval, not injection attempts.
+        # Rule engine + LLM system prompt still defend against real attacks
+        # (real injection templates like "ignore previous instructions and ..."
+        # are typically much longer and caught by the rule engine first anyway).
+        stripped = text.strip()
+        if len(stripped) < 20:
+            return ClassifierResult(is_safe=True, confidence=0.0, label="safe_short")
+
         try:
             # Tokenize
             encoding = self._tokenizer.encode(text)
