@@ -71,3 +71,36 @@ Added a read-only recent changes collector, registered get_recent_changes, integ
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Implement incident memory knowledge
+
+**Date**: 2026-05-19
+**Task**: Implement incident memory knowledge
+**Branch**: `main`
+
+### Summary
+
+Extended knowledge entries into structured incident memory with safe schema migration, richer save/search fields, match reasons, safe reuse flags, Agent retrieval formatting, and regression coverage.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4d7d551` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
