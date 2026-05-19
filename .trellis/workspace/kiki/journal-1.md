@@ -137,3 +137,36 @@ Added a generic alert webhook endpoint that creates sessions and incidents, runs
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: Implement topology based RCA view
+
+**Date**: 2026-05-19
+**Task**: Implement topology based RCA view
+**Branch**: `main`
+
+### Summary
+
+Added session-aware topology RCA annotations from incident/audit evidence, merged annotations into topology nodes and inferred evidence edges, rendered RCA highlights in the frontend topology graph, and covered nginx service/config/port/process extraction with regression tests.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `dd49d73` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
