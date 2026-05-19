@@ -11,6 +11,7 @@ import aiosqlite
 from fastapi import APIRouter, Query
 
 from app.database import get_audit_db_path, get_knowledge_db_path
+from app.incidents.store import get_recent_incident_stats
 
 router = APIRouter()
 
@@ -86,6 +87,14 @@ async def generate_ops_report(hours: int = Query(default=24, description="回溯
             "count": len(runbooks),
             "items": runbooks[:10],
         }
+
+    incident_stats = await get_recent_incident_stats(since=since, limit=10)
+    report["sections"]["incidents"] = {
+        "title": "事件时间线",
+        "count": incident_stats["total"],
+        "by_status": incident_stats["by_status"],
+        "items": incident_stats["recent"],
+    }
 
     # 2. Audit log summary
     async with aiosqlite.connect(get_audit_db_path()) as db:
@@ -187,5 +196,14 @@ def _generate_summary_text(report: dict) -> str:
     r = sections.get("runbooks", {})
     if r.get("count", 0) > 0:
         lines.append(f"新增 Runbook: {r['count']} 个")
+
+    # Incidents
+    inc = sections.get("incidents", {})
+    if inc.get("count", 0) > 0:
+        by_status = inc.get("by_status") or {}
+        lines.append(
+            f"事件时间线: {inc['count']} 个 "
+            f"(resolved {by_status.get('resolved', 0)}, failed {by_status.get('failed', 0)}, open {by_status.get('open', 0)})"
+        )
 
     return "\n".join(lines)

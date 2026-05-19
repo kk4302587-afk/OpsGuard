@@ -268,6 +268,64 @@ else:
     impact_lines.append("Rollback: no reliable automated rollback will be claimed")
 ```
 
+## Scenario: Incident Timeline Truthfulness
+
+### 1. Scope / Trigger
+- Trigger: any change to Agent, Runbook replay, trace payloads, incident APIs,
+  or OpsReport incident aggregation.
+- Goal: incident timelines must be a persisted operational record derived from
+  real trace/evidence payloads, not a parallel narrative invented after the
+  fact.
+
+### 2. Signatures
+- Schema helper: `ensure_incident_schema(db: aiosqlite.Connection) -> None`
+- Create: `create_incident(session_id, problem_statement, source, metadata=None) -> str`
+- Record: `record_incident_from_message(incident_id, session_id, message) -> str | None`
+- Finalize: `finalize_incident(incident_id, final_summary, status=None) -> dict`
+- APIs:
+  - `GET /api/incidents?session_id=...`
+  - `GET /api/incidents/{incident_id}`
+  - `GET /api/incidents/{incident_id}/events`
+
+### 3. Contracts
+- Agent and Runbook executions create at most one incident per submitted
+  operation.
+- Timeline events are recorded from live `trace` and `approval_request`
+  payloads, preserving structured evidence when present.
+- A timeline event may claim execution only when its evidence says
+  `execution_state: executed` or `failed` from a real tool/result path.
+- Approval pending/rejected entries use `execution_state: skipped`.
+- Final assistant responses include a compact incident reference with the
+  incident id, status, event count, tool result count, failure count, and API
+  endpoint for the timeline.
+- OpsReport may aggregate incident counts, but it must not synthesize missing
+  incident events.
+
+### 4. Validation & Error Matrix
+- Tool result success trace -> incident event keeps `execution_state: executed`.
+- Tool result failure trace -> incident event keeps `execution_state: failed`
+  and failure details.
+- Knowledge no-match -> incident event is a successful executed search with
+  zero matches, not a failure.
+- Knowledge/search exception -> failure event, not "no related history".
+- Incident persistence failure should be logged and must not interrupt the real
+  Agent/Runbook execution.
+
+### 5. Good/Base/Bad Cases
+- Good: Runbook step execution event is copied into `incident_events` with the
+  same evidence source and observed result.
+- Base: read-only diagnostic request creates an incident with planning,
+  knowledge, and response events.
+- Bad: creating a timeline item that says "service restarted" when no service
+  tool returned a real success result.
+
+### 6. Tests Required
+- Store-level test for schema, event recording, evidence serialization, and
+  finalization.
+- Agent integration test proving a normal request creates one incident and
+  appends an incident reference.
+- Runbook integration test proving step traces become incident events.
+
 ---
 
 ## Testing

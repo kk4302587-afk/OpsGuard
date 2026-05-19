@@ -10,6 +10,7 @@ import {
   BulbOutlined,
   PlayCircleOutlined,
   FilePdfOutlined,
+  AlertOutlined,
 } from '@ant-design/icons'
 
 const { Title, Text, Paragraph } = Typography
@@ -26,6 +27,7 @@ interface OpsReportData {
     approvals: { title: string; total_requests: number; approved: number; rejected: number }
     knowledge: { title: string; count: number; items: any[] }
     runbooks: { title: string; count: number; items: any[] }
+    incidents?: { title: string; count: number; by_status: Record<string, number>; items: any[] }
   }
 }
 
@@ -150,6 +152,15 @@ function OpsReport() {
                 title={<Text style={{ color: 'var(--text-muted)', fontSize: 11 }}>新增 Runbook</Text>}
                 value={report.sections.runbooks?.count || 0}
                 prefix={<PlayCircleOutlined style={{ color: 'var(--accent-purple)' }} />}
+                valueStyle={{ fontSize: 24, color: 'var(--text-primary)' }}
+              />
+            </Card>
+            <Card size="small" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+              <Statistic
+                title={<Text style={{ color: 'var(--text-muted)', fontSize: 11 }}>Incidents</Text>}
+                value={report.sections.incidents?.count || 0}
+                suffix={report.sections.incidents?.by_status?.failed ? ` / ${report.sections.incidents.by_status.failed} failed` : ''}
+                prefix={<AlertOutlined style={{ color: 'var(--accent-yellow)' }} />}
                 valueStyle={{ fontSize: 24, color: 'var(--text-primary)' }}
               />
             </Card>

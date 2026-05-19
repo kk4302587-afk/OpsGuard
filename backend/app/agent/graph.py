@@ -24,6 +24,7 @@ from app.agent.trace_evidence import (
 from app.agent.tools_registry import tools_registry, RiskLevel
 from app.safety.guardrail import SafetyGuardrail
 from app.audit.logger import audit_logger, AuditPhase, AuditEventType
+from app.incidents import store as incident_store
 from app.knowledge.store import KnowledgeSearchError, knowledge_store
 
 
@@ -733,6 +734,29 @@ async def run_agent(
 
     This is the main entry point called by the WebSocket handler.
     """
+    incident_id = None
+    original_send_to_client = send_to_client
+    try:
+        incident_id = await incident_store.create_incident(
+            session_id=session_id,
+            problem_statement=user_message,
+            source="agent",
+        )
+    except Exception as e:
+        logger.warning(f"Incident creation failed for session {session_id}: {e}")
+
+    if incident_id:
+        async def send_to_client(data: dict):
+            try:
+                await incident_store.record_incident_from_message(
+                    incident_id=incident_id,
+                    session_id=session_id,
+                    message=data,
+                )
+            except Exception as e:
+                logger.warning(f"Incident event recording failed for {incident_id}: {e}")
+            await original_send_to_client(data)
+
     initial_state: AgentState = {
         "session_id": session_id,
         "user_message": user_message,
@@ -746,10 +770,49 @@ async def run_agent(
         "send_to_client": send_to_client,
     }
 
-    # Run the graph
-    final_state = await agent_graph.ainvoke(initial_state)
-
-    return final_state.get("final_response", "处理完成。")
+    try:
+        # Run the graph
+        final_state = await agent_graph.ainvoke(initial_state)
+        final_response = final_state.get("final_response", "处理完成。")
+        if incident_id:
+            await incident_store.finalize_incident(
+                incident_id=incident_id,
+                final_summary=final_response,
+                status="failed" if final_state.get("is_blocked") else None,
+            )
+            final_response = await incident_store.append_incident_reference(
+                final_response,
+                incident_id,
+            )
+        return final_response
+    except Exception as e:
+        if incident_id:
+            try:
+                await incident_store.record_incident_event(
+                    incident_id=incident_id,
+                    session_id=session_id,
+                    phase="error",
+                    event_type="failure",
+                    title="Agent execution failed",
+                    detail=str(e),
+                    evidence={
+                        "claim": "Agent execution raised an exception",
+                        "evidence_type": "command",
+                        "source": "agent_graph",
+                        "observed": str(e),
+                        "confidence": "high",
+                        "execution_state": "failed",
+                        "failure_reason": str(e),
+                    },
+                )
+                await incident_store.finalize_incident(
+                    incident_id=incident_id,
+                    final_summary=str(e),
+                    status="failed",
+                )
+            except Exception as incident_error:
+                logger.warning(f"Incident failure bookkeeping failed for {incident_id}: {incident_error}")
+        raise
 
 
 # === Helper Functions ===

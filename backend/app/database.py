@@ -74,8 +74,10 @@ async def init_db():
             ON messages(session_id)
         """)
         from app.agent.runbook_governance import ensure_runbook_schema
+        from app.incidents.store import ensure_incident_schema
 
         await ensure_runbook_schema(db)
+        await ensure_incident_schema(db)
         await db.commit()
 
     logger.info("Database initialized successfully")

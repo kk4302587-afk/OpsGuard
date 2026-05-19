@@ -34,6 +34,7 @@ from app.agent.trace_evidence import (
 )
 from app.audit.logger import audit_logger, AuditPhase, AuditEventType
 from app.database import get_knowledge_db_path
+from app.incidents import store as incident_store
 from app.safety.guardrail import SafetyGuardrail
 from app.websocket.approval import approval_manager
 
@@ -272,13 +273,67 @@ async def execute_runbook(
         return f"Runbook {runbook_id} 不存在"
 
     runbook_name = row["name"] or "(unnamed)"
+    incident_id = None
+    incident_db_path = get_knowledge_db_path()
+    try:
+        incident_id = await incident_store.create_incident(
+            session_id=session_id,
+            problem_statement=f"Runbook replay: {runbook_name}",
+            source="runbook_executor",
+            metadata={"runbook_id": runbook_id},
+            db_path=incident_db_path,
+        )
+    except Exception as e:
+        logger.warning(f"Incident creation failed for runbook {runbook_id}: {e}")
+
+    if incident_id:
+        original_send_to_client = send_to_client
+
+        async def send_to_client(data: dict):
+            try:
+                await incident_store.record_incident_from_message(
+                    incident_id=incident_id,
+                    session_id=session_id,
+                    message=data,
+                    db_path=incident_db_path,
+                )
+            except Exception as e:
+                logger.warning(f"Incident event recording failed for {incident_id}: {e}")
+            await original_send_to_client(data)
+
     try:
         steps = json.loads(row["steps"]) if row["steps"] else []
     except Exception as e:
-        return f"Runbook 步骤解析失败: {e}"
+        response = f"Runbook 步骤解析失败: {e}"
+        if incident_id:
+            await incident_store.finalize_incident(
+                incident_id=incident_id,
+                final_summary=response,
+                status="failed",
+                db_path=incident_db_path,
+            )
+            response = await incident_store.append_incident_reference(
+                response,
+                incident_id,
+                db_path=incident_db_path,
+            )
+        return response
 
     if not steps:
-        return f"Runbook 「{runbook_name}」没有可执行的步骤"
+        response = f"Runbook 「{runbook_name}」没有可执行的步骤"
+        if incident_id:
+            await incident_store.finalize_incident(
+                incident_id=incident_id,
+                final_summary=response,
+                status="failed",
+                db_path=incident_db_path,
+            )
+            response = await incident_store.append_incident_reference(
+                response,
+                incident_id,
+                db_path=incident_db_path,
+            )
+        return response
 
     plan_steps: list[dict] = []
     for idx, step in enumerate(steps, start=1):
@@ -714,4 +769,16 @@ async def execute_runbook(
         f"Runbook replay finished: {runbook_name}",
         {"executed": len(executed), "failed_at": failed_step, "abort": abort_reason},
     )
+    if incident_id:
+        await incident_store.finalize_incident(
+            incident_id=incident_id,
+            final_summary=summary,
+            status="resolved" if failed_step is None else "failed",
+            db_path=incident_db_path,
+        )
+        summary = await incident_store.append_incident_reference(
+            summary,
+            incident_id,
+            db_path=incident_db_path,
+        )
     return summary
