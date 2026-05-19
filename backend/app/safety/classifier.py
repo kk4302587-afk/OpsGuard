@@ -147,8 +147,19 @@ class PromptClassifier:
         # (real injection templates like "ignore previous instructions and ..."
         # are typically much longer and caught by the rule engine first anyway).
         stripped = text.strip()
-        if len(stripped) < 20:
+        if len(stripped) < 40:
             return ClassifierResult(is_safe=True, confidence=0.0, label="safe_short")
+
+        # CJK exemption: the upstream model (protectai/deberta-v3-base-prompt-injection-v2)
+        # is trained almost exclusively on English. It produces ~99% "injection" scores
+        # on benign Chinese sentences such as "清理 /tmp 下的垃圾文件吧" or
+        # "那就清理 /tmp 下的大文件吧". Chinese attacks are already covered by the rule
+        # engine (config.yaml has 16+ Chinese injection patterns) and the LLM system
+        # prompt (Layer 3). So when the input is predominantly non-ASCII, skip Layer 2
+        # entirely instead of relying on an unreliable classifier.
+        ascii_chars = sum(1 for c in stripped if ord(c) < 128)
+        if ascii_chars / len(stripped) < 0.5:
+            return ClassifierResult(is_safe=True, confidence=0.0, label="safe_cjk")
 
         try:
             # Tokenize

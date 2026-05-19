@@ -7,6 +7,9 @@ import {
   LoadingOutlined,
   SafetyOutlined,
   BulbOutlined,
+  PlayCircleOutlined,
+  CloseCircleOutlined,
+  BookOutlined,
 } from '@ant-design/icons'
 import { useChatStore } from '../stores/chatStore'
 import DiagnosisProgress from './DiagnosisProgress'
@@ -20,7 +23,10 @@ const { Text } = Typography
  * Main chat panel - conversation flow with styled message bubbles.
  */
 function ChatPanel() {
-  const { messages, inputValue, setInputValue, sendMessage, isThinking } = useChatStore()
+  const {
+    messages, inputValue, setInputValue, sendMessage, isThinking,
+    pendingRunbookSuggestion, acceptRunbookSuggestion, dismissRunbookSuggestion,
+  } = useChatStore()
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -70,6 +76,59 @@ function ChatPanel() {
             >
               解释这条命令
             </Button>
+          </div>
+        </div>
+      )
+    }
+
+    if (content.startsWith('[Runbook建议]')) {
+      // Inline suggestion card. Buttons are only active for the currently
+      // pending suggestion — historical suggestion messages are read-only.
+      const lines = content.split('\n')
+      const name = lines[0].replace('[Runbook建议] ', '')
+      const isActive =
+        !!pendingRunbookSuggestion && pendingRunbookSuggestion.name === name
+      return (
+        <div className="msg-approval-card" style={{ borderColor: 'var(--accent-blue, #61afef)' }}>
+          <div className="msg-approval-header">
+            <BookOutlined style={{ color: 'var(--accent-blue, #61afef)', marginRight: 6 }} />
+            <Text strong style={{ color: 'var(--accent-blue, #61afef)' }}>
+              发现匹配的 Runbook
+            </Text>
+          </div>
+          <div className="msg-approval-body">
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>{name}</div>
+            {lines.slice(1).map((line, i) => (
+              line ? (
+                <div key={i} style={{ marginTop: 2, fontSize: 12, color: 'var(--text-secondary)' }}>
+                  {line}
+                </div>
+              ) : null
+            ))}
+            <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
+              <Button
+                size="small"
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                disabled={!isActive || isThinking}
+                onClick={acceptRunbookSuggestion}
+              >
+                按 Runbook 执行
+              </Button>
+              <Button
+                size="small"
+                icon={<CloseCircleOutlined />}
+                disabled={!isActive || isThinking}
+                onClick={dismissRunbookSuggestion}
+              >
+                重新分析
+              </Button>
+              {!isActive && (
+                <Text style={{ fontSize: 11, color: 'var(--text-muted)', alignSelf: 'center' }}>
+                  （此建议已处理）
+                </Text>
+              )}
+            </div>
           </div>
         </div>
       )

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Card, Tag, Space, Typography, Empty, Button, Steps, Badge, Popconfirm } from 'antd'
+import { Card, Tag, Space, Typography, Empty, Button, Steps, Badge, Popconfirm, message as antdMessage } from 'antd'
 import {
   PlayCircleOutlined,
   ThunderboltOutlined,
@@ -7,7 +7,9 @@ import {
   ClockCircleOutlined,
   ToolOutlined,
   FileTextOutlined,
+  CaretRightOutlined,
 } from '@ant-design/icons'
+import { useChatStore } from '../stores/chatStore'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -43,6 +45,24 @@ function RunbookPanel() {
   const [runbooks, setRunbooks] = useState<Runbook[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedId, setExpandedId] = useState<string | null>(null)
+
+  const runRunbookDirectly = useChatStore((s) => s.runRunbookDirectly)
+  const activeSessionId = useChatStore((s) => s.activeSessionId)
+  const isThinking = useChatStore((s) => s.isThinking)
+  const ws = useChatStore((s) => s.ws)
+
+  const handleRunNow = (runbookId: string, name: string) => {
+    if (!activeSessionId || !ws || ws.readyState !== WebSocket.OPEN) {
+      antdMessage.warning('请先打开一个聊天会话再执行 Runbook')
+      return
+    }
+    if (isThinking) {
+      antdMessage.info('当前还有任务在进行，请等待完成')
+      return
+    }
+    runRunbookDirectly(runbookId)
+    antdMessage.success(`已开始执行 Runbook「${name}」，请切换到聊天视图查看进度`)
+  }
 
   useEffect(() => {
     fetchRunbooks()
@@ -117,6 +137,22 @@ function RunbookPanel() {
                   </Paragraph>
                 </div>
                 <Space>
+                  <Popconfirm
+                    title={`立即执行 Runbook「${runbook.name}」？`}
+                    description="每个写操作步骤仍需逐条审批，可随时拒绝中止。"
+                    okText="执行"
+                    cancelText="取消"
+                    onConfirm={() => handleRunNow(runbook.id, runbook.name)}
+                  >
+                    <Button
+                      size="small"
+                      type="primary"
+                      icon={<CaretRightOutlined />}
+                      disabled={isThinking}
+                    >
+                      立即执行
+                    </Button>
+                  </Popconfirm>
                   <Button
                     size="small"
                     type="text"

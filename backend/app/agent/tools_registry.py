@@ -5,7 +5,7 @@ Each tool has a risk_level that determines whether approval is needed.
 """
 
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Any
 
 from loguru import logger
@@ -18,15 +18,102 @@ class RiskLevel(str, Enum):
     DESTRUCTIVE = "destructive"  # Dangerous, needs explicit approval + warning
 
 
+# Friendly Chinese names for every registered tool. Keyed by the technical
+# tool name (which the LLM tool-calling protocol requires to be a stable
+# English identifier). Only the UI consumes display_name; the LLM API never
+# sees it, so it's safe to localize freely without breaking tool calling.
+#
+# If a tool is missing from this map, display_name falls back to `name`.
+_DISPLAY_NAMES: dict[str, str] = {
+    # Process
+    "list_processes": "进程列表",
+    "find_zombie_processes": "查找僵尸进程",
+    "get_process_detail": "进程详情",
+    "kill_process": "终止进程",
+    # Disk
+    "get_disk_usage": "磁盘使用情况",
+    "find_large_files": "查找大文件",
+    "get_directory_size": "目录大小",
+    "get_inode_usage": "Inode 使用情况",
+    "check_file_info": "文件信息",
+    # Network
+    "get_listening_ports": "监听端口",
+    "get_connections": "网络连接",
+    "get_connection_count": "连接数统计",
+    "check_port": "端口占用查询",
+    "ping_host": "Ping 主机",
+    # Log
+    "get_journal_logs": "systemd 日志",
+    "get_recent_errors": "最近错误日志",
+    "tail_log_file": "查看日志末尾",
+    "search_logs": "搜索日志",
+    "get_boot_logs": "启动日志",
+    # Service
+    "list_services": "服务列表",
+    "get_service_status": "服务状态",
+    "get_failed_services": "失败的服务",
+    "restart_service": "重启服务",
+    "stop_service": "停止服务",
+    "get_service_logs": "服务日志",
+    # Config
+    "read_config_file": "读取配置文件",
+    "check_config_syntax": "检查配置语法",
+    "diff_config": "对比配置",
+    # System
+    "system_overview": "系统概览",
+    "health_check": "健康检查",
+    "get_crontab_list": "定时任务列表",
+    "get_user_sessions": "登录用户会话",
+    # File
+    "write_file": "写入文件",
+    "delete_file": "删除文件",
+    "delete_directory": "删除目录",
+    "move_file": "移动/重命名文件",
+    "copy_file": "复制文件",
+    "change_permissions": "修改文件权限",
+    "change_owner": "修改文件所有者",
+    # Package
+    "list_installed_packages": "已安装软件包",
+    "search_package": "搜索软件包",
+    "install_package": "安装软件包",
+    "remove_package": "卸载软件包",
+    "check_package_updates": "检查软件更新",
+    # User
+    "list_users": "用户列表",
+    "list_groups": "用户组列表",
+    "get_user_info": "用户详情",
+    "create_user": "创建用户",
+    "delete_user": "删除用户",
+    "lock_user": "锁定用户",
+    "unlock_user": "解锁用户",
+    # Firewall
+    "get_firewall_status": "防火墙状态",
+    "list_open_ports": "已开放端口",
+    "allow_port": "开放端口",
+    "block_port": "关闭端口",
+    # Cron
+    "list_cron_jobs": "定时任务详情",
+    "list_system_timers": "systemd 定时器",
+    "add_cron_job": "添加定时任务",
+    "remove_cron_job": "删除定时任务",
+}
+
+
 @dataclass
 class ToolDefinition:
-    """Definition of a registered MCP tool."""
+    """Definition of a registered MCP tool.
+
+    `name` is the stable identifier used by the LLM tool-calling protocol;
+    it MUST stay English / snake_case so OpenAI / Qwen tool schemas validate.
+    `display_name` is the human-friendly Chinese label shown in the UI.
+    """
     name: str
     description: str
     parameters: dict
     function: Callable
     risk_level: RiskLevel
-    category: str  # process, disk, network, log, service, config, system
+    category: str  # process, disk, network, log, service, config, system, ...
+    display_name: str = field(default="")
 
 
 class ToolsRegistry:
@@ -503,7 +590,8 @@ class ToolsRegistry:
         risk_level: RiskLevel,
         category: str,
     ):
-        """Register a single tool."""
+        """Register a single tool. display_name is auto-looked-up from
+        ``_DISPLAY_NAMES``; falls back to ``name`` if not registered there."""
         self._tools[name] = ToolDefinition(
             name=name,
             description=description,
@@ -511,6 +599,7 @@ class ToolsRegistry:
             function=function,
             risk_level=risk_level,
             category=category,
+            display_name=_DISPLAY_NAMES.get(name, name),
         )
 
     def get_tool(self, name: str) -> ToolDefinition | None:

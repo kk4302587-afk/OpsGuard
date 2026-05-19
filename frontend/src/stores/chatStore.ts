@@ -64,6 +64,19 @@ interface ChatStore {
   } | null
   clearApproval: () => void
 
+  // Runbook suggestion (proactive proposal before Agent runs)
+  pendingRunbookSuggestion: {
+    runbook_id: string
+    name: string
+    description: string
+    step_count: number
+    match_ratio: number
+    original_message: string
+  } | null
+  acceptRunbookSuggestion: () => void
+  dismissRunbookSuggestion: () => void
+  runRunbookDirectly: (runbookId: string) => void
+
   // WebSocket
   ws: WebSocket | null
   connectWebSocket: (sessionId: string) => void
@@ -78,9 +91,43 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   isThinking: false,
   traceEvents: [],
   pendingApproval: null,
+  pendingRunbookSuggestion: null,
   ws: null,
 
   clearApproval: () => set({ pendingApproval: null }),
+
+  acceptRunbookSuggestion: () => {
+    const { ws, pendingRunbookSuggestion } = get()
+    if (!pendingRunbookSuggestion || !ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({
+      type: 'runbook_decision',
+      decision: 'execute',
+      runbook_id: pendingRunbookSuggestion.runbook_id,
+    }))
+    set({ pendingRunbookSuggestion: null, isThinking: true })
+  },
+
+  dismissRunbookSuggestion: () => {
+    const { ws, pendingRunbookSuggestion } = get()
+    if (!pendingRunbookSuggestion || !ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({
+      type: 'runbook_decision',
+      decision: 'dismiss',
+      runbook_id: pendingRunbookSuggestion.runbook_id,
+      original_message: pendingRunbookSuggestion.original_message,
+    }))
+    set({ pendingRunbookSuggestion: null, isThinking: true })
+  },
+
+  runRunbookDirectly: (runbookId: string) => {
+    const { ws } = get()
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.error('Cannot run runbook: WebSocket not connected')
+      return
+    }
+    ws.send(JSON.stringify({ type: 'run_runbook', runbook_id: runbookId }))
+    set({ isThinking: true })
+  },
 
   fetchSessions: async () => {
     try {
@@ -325,6 +372,31 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 id: crypto.randomUUID(),
                 role: 'assistant',
                 content: `[需要确认] ${data.command}\n风险等级: ${data.risk_level}${data.impact ? '\n影响评估: ' + data.impact : ''}`,
+                timestamp: new Date().toISOString(),
+              },
+            ],
+            isThinking: false,
+          }))
+          break
+
+        case 'runbook_suggestion':
+          // Server matched a saved Runbook for the user's message.
+          // Show an inline card; user picks execute or dismiss.
+          set((state) => ({
+            pendingRunbookSuggestion: {
+              runbook_id: data.runbook_id,
+              name: data.name,
+              description: data.description || '',
+              step_count: data.step_count || 0,
+              match_ratio: data.match_ratio || 0,
+              original_message: data.original_message || '',
+            },
+            messages: [
+              ...state.messages.filter((m) => m.role !== 'progress'),
+              {
+                id: crypto.randomUUID(),
+                role: 'assistant',
+                content: `[Runbook建议] ${data.name}\n步骤数: ${data.step_count}\n相似度: ${Math.round((data.match_ratio || 0) * 100)}%\n${data.description || ''}`,
                 timestamp: new Date().toISOString(),
               },
             ],

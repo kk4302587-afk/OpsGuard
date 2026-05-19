@@ -14,6 +14,7 @@ async def list_tools():
     for name, tool_def in tools_registry._tools.items():
         tools.append({
             "name": tool_def.name,
+            "display_name": tool_def.display_name or tool_def.name,
             "description": tool_def.description,
             "category": tool_def.category,
             "risk_level": tool_def.risk_level.value,
@@ -61,6 +62,7 @@ async def get_tool_detail(tool_name: str):
 
     return {
         "name": tool_def.name,
+        "display_name": tool_def.display_name or tool_def.name,
         "description": tool_def.description,
         "category": tool_def.category,
         "risk_level": tool_def.risk_level.value,

@@ -113,6 +113,8 @@ async def reasoning_node(state: AgentState) -> dict:
     all_tools = tools_registry.get_all_tools_for_llm()
     max_iterations = 10
     iteration = 0
+    write_tools_called = 0  # Count of WRITE/DESTRUCTIVE tools genuinely invoked this turn
+    hallucination_retry_done = False  # Guard so we only retry once
 
     while iteration < max_iterations:
         iteration += 1
@@ -196,6 +198,8 @@ async def reasoning_node(state: AgentState) -> dict:
                                 await send_to_client({"type": "trace", "phase": "execution", "event_type": "start", "content": f"已备份: {target_path}"})
 
                     result = tool_def.function(**tool_args)
+                    if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
+                        write_tools_called += 1
                     tool_result_str = json.dumps(result.__dict__ if hasattr(result, '__dict__') else result, ensure_ascii=False, default=str)
 
                     # Post-action verification for write operations
@@ -221,6 +225,48 @@ async def reasoning_node(state: AgentState) -> dict:
                 ]})
                 messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": tool_result_str})
         else:
+            # LLM returned text only. Before accepting, check for hallucination:
+            # if the response claims a write operation was completed but NO write tool
+            # was actually called this turn, force one retry with an explicit reminder.
+            final_content = llm_response.get("content", "") or ""
+            if (
+                not hallucination_retry_done
+                and write_tools_called == 0
+                and _claims_write_completion(final_content)
+            ):
+                hallucination_retry_done = True
+                logger.warning(
+                    f"Hallucination guard triggered: LLM claimed completion without "
+                    f"invoking any tool. Response head: {final_content[:200]!r}"
+                )
+                await audit_logger.log(
+                    session_id,
+                    AuditPhase.RESPONSE,
+                    AuditEventType.FAILURE,
+                    "幻觉守卫: 模型声称完成写操作但未调用工具，强制重试",
+                    {"original_response": final_content[:500]},
+                )
+                await send_to_client({
+                    "type": "trace",
+                    "phase": "response",
+                    "event_type": "failure",
+                    "content": "⚠️ 检测到模型声称已完成写操作但未真实调用工具，已强制重新分析",
+                })
+                # Inject the assistant's bogus message so the LLM sees its own claim,
+                # then a strong system-role correction.
+                messages.append({"role": "assistant", "content": final_content})
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[系统强制纠正] 你上一条回复中声称已完成某个写操作（如\"已重启\"、\"已删除\"、\"已清理\"），"
+                        "但本轮你**没有调用任何工具**，操作根本没有发生。"
+                        "请立即重新处理用户请求：\n"
+                        "1) 如果用户确实需要执行该写操作，**立刻调用对应的工具**（如 restart_service、delete_file 等）来真正执行；\n"
+                        "2) 如果你认为不应执行（参数不全、风险过高、用户其实在询问），明确告知用户'尚未执行 / 我不会执行'并说明原因，绝不要使用'已...'之类的完成措辞。\n"
+                        "不允许再次仅用文字声称完成。"
+                    ),
+                })
+                continue  # Retry one more LLM round with reminder in context
             break
 
     final_response = llm_response.get("content", "") or "分析完成，请查看推理链路了解详情。"
@@ -231,44 +277,52 @@ async def reasoning_node(state: AgentState) -> dict:
 
 
 async def knowledge_save_node(state: AgentState) -> dict:
-    """Node 4: Save knowledge and generate Runbook from successful resolution."""
+    """Node 4: Save knowledge and Runbook based on LLM-extracted semantic problem.
+
+    The "problem signature" used for BOTH knowledge_entries and runbooks comes
+    from an LLM extraction over the full conversation, NOT from raw user_message.
+    This is because the current user_message can be just a confirmation
+    (e.g. "继续", "执行", "好的，那就这样吧") whose real underlying problem was
+    described in an earlier turn. The LLM is asked explicitly to look past such
+    confirmations and identify the substantive problem.
+    """
     session_id = state["session_id"]
     user_message = state["user_message"]
     final_response = state["final_response"]
     messages = state.get("messages", [])
     send_to_client = state["send_to_client"]
 
+    # No tool was executed → nothing actionable happened → nothing to save.
     if not any(msg.get("role") == "tool" for msg in messages):
         return {}
 
-    # Knowledge extraction
-    try:
-        import re
-        summary_messages = [
-            {"role": "system", "content": "你是一个运维知识提取器。严格按JSON格式回复：{\"problem\": \"问题简述\", \"diagnosis\": \"诊断步骤\", \"solution\": \"解决方案\"}。如果没有成功解决问题，回复 null"},
-            {"role": "user", "content": f"用户问题: {user_message}\n\nAgent回复: {final_response[:500]}"},
-        ]
-        summary_response = await call_llm(summary_messages)
-        summary_text = summary_response.get("content", "").strip()
+    # === Semantic extraction (single LLM call serves both knowledge and runbook) ===
+    summary_data = await _extract_resolution_summary(messages, final_response)
+    if not summary_data:
+        logger.debug("Skip save: LLM extracted no substantive resolution")
+        return {}
 
-        if summary_text and summary_text.lower() != "null" and "{" in summary_text:
-            json_match = re.search(r'\{.*?\}', summary_text, re.DOTALL)
-            if json_match:
-                summary_data = json.loads(json_match.group())
-                problem = summary_data.get("problem", "")
-                solution = summary_data.get("solution", "")
-                if problem and solution:
-                    await knowledge_store.save_resolution(
-                        problem_signature=problem,
-                        diagnosis_path=summary_data.get("diagnosis", ""),
-                        solution=solution,
-                        tools_used=["agent"],
-                    )
-                    await send_to_client({"type": "trace", "phase": "knowledge_save", "event_type": "success", "content": f"经验已保存: {problem[:30]}"})
+    problem = (summary_data.get("problem") or "").strip()
+    diagnosis = (summary_data.get("diagnosis") or "").strip()
+    solution = (summary_data.get("solution") or "").strip()
+
+    if not problem or not solution:
+        logger.debug(f"Skip save: incomplete extraction problem={problem!r}")
+        return {}
+
+    # === Knowledge entry ===
+    try:
+        await knowledge_store.save_resolution(
+            problem_signature=problem,
+            diagnosis_path=diagnosis,
+            solution=solution,
+            tools_used=["agent"],
+        )
+        await send_to_client({"type": "trace", "phase": "knowledge_save", "event_type": "success", "content": f"经验已保存: {problem[:30]}"})
     except Exception as e:
         logger.warning(f"Knowledge save failed: {e}")
 
-    # Runbook generation
+    # === Runbook generation (uses the same semantic `problem` as its name) ===
     tool_call_sequence = []
     for msg in messages:
         if msg.get("tool_calls") and isinstance(msg["tool_calls"], list):
@@ -292,14 +346,36 @@ async def knowledge_save_node(state: AgentState) -> dict:
                     runbook_steps.append({"tool_name": tc["tool_name"], "tool_args": tc["tool_args"], "description": td.description, "risk_level": td.risk_level.value})
 
             if runbook_steps:
+                runbook_name = problem[:40]
+                trigger_pattern = problem[:100]
+                steps_json = json.dumps(runbook_steps, ensure_ascii=False)
+                now_iso = datetime.now().isoformat()
+
                 async with aiosqlite.connect(get_knowledge_db_path()) as db:
                     await db.execute("CREATE TABLE IF NOT EXISTS runbooks (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, trigger_pattern TEXT, steps TEXT NOT NULL, run_count INTEGER DEFAULT 0, last_run TEXT, created_at TEXT NOT NULL)")
-                    await db.execute(
-                        "INSERT INTO runbooks (id, name, description, trigger_pattern, steps, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        (str(_uuid.uuid4()), user_message[:40], f"自动生成", user_message[:100], json.dumps(runbook_steps, ensure_ascii=False), datetime.now().isoformat()),
+
+                    # Dedup by semantic problem name — same problem solved twice
+                    # refreshes the existing runbook with the latest tool sequence.
+                    cursor = await db.execute(
+                        "SELECT id FROM runbooks WHERE name = ? LIMIT 1",
+                        (runbook_name,),
                     )
+                    existing = await cursor.fetchone()
+
+                    if existing:
+                        await db.execute(
+                            "UPDATE runbooks SET steps = ?, last_run = ?, trigger_pattern = ? WHERE id = ?",
+                            (steps_json, now_iso, trigger_pattern, existing[0]),
+                        )
+                        msg_text = f"Runbook 已更新: {runbook_name}"
+                    else:
+                        await db.execute(
+                            "INSERT INTO runbooks (id, name, description, trigger_pattern, steps, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                            (str(_uuid.uuid4()), runbook_name, "自动生成", trigger_pattern, steps_json, now_iso),
+                        )
+                        msg_text = f"Runbook 已保存: {runbook_name}"
                     await db.commit()
-                await send_to_client({"type": "trace", "phase": "knowledge_save", "event_type": "success", "content": "Runbook 已保存"})
+                await send_to_client({"type": "trace", "phase": "knowledge_save", "event_type": "success", "content": msg_text})
         except Exception as e:
             logger.warning(f"Runbook generation failed: {e}")
 
@@ -508,3 +584,126 @@ def _capture_change_diff(tool_name: str, tool_args: dict, backup_record: dict | 
             diff_lines.append(f"[After]  文件已删除")
 
     return "\n".join(diff_lines) if diff_lines else None
+
+
+def _format_conversation_excerpt(messages: list, final_response: str, max_chars: int = 2500) -> str:
+    """Render the agent turn into compact text for an extraction LLM prompt.
+
+    Includes user / assistant / tool_call / tool_result rows in chronological
+    order. Truncated to `max_chars` keeping the tail (most recent context).
+    """
+    lines = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if role == "user" and isinstance(content, str) and content.strip():
+            lines.append(f"[用户]: {content.strip()[:300]}")
+        elif role == "assistant" and isinstance(content, str) and content.strip():
+            lines.append(f"[助手]: {content.strip()[:300]}")
+        elif role == "assistant" and msg.get("tool_calls"):
+            for tc in msg.get("tool_calls") or []:
+                if isinstance(tc, dict) and "function" in tc:
+                    fn = tc["function"]
+                    args = fn.get("arguments", "")
+                    if not isinstance(args, str):
+                        args = json.dumps(args, ensure_ascii=False)
+                    lines.append(f"[助手→工具]: {fn.get('name', '')}({args[:120]})")
+        elif role == "tool" and isinstance(content, str):
+            lines.append(f"[工具返回]: {content[:200]}")
+
+    if final_response:
+        lines.append(f"[助手最终回复]: {final_response[:500]}")
+
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = "...（前面对话省略）...\n" + text[-(max_chars - 50):]
+    return text
+
+
+async def _extract_resolution_summary(messages: list, final_response: str) -> dict | None:
+    """Ask the LLM to semantically extract problem / diagnosis / solution.
+
+    The LLM is given the full conversation excerpt so it can correctly identify
+    the underlying problem even when the latest user message is just a
+    confirmation like "继续" or "执行". This replaces the older keyword/length
+    based filter, which was brittle and produced both false positives and
+    false negatives.
+
+    Returns:
+        dict with keys problem / diagnosis / solution, or None if the LLM
+        cannot identify a substantive resolution (which also covers the case
+        where the latest user message was a content-free confirmation with no
+        preceding problem in the conversation).
+    """
+    import re
+
+    excerpt = _format_conversation_excerpt(messages, final_response)
+    summary_messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是运维知识提取器。任务：从一轮 Agent 对话中提取出用户真正想解决的运维问题、"
+                "诊断步骤和解决方案。\n\n"
+                "**关键规则**：\n"
+                "1. 用户的最后一条消息可能只是确认/继续语（如\"继续\"、\"执行\"、\"好的\"、\"那就这样\"）。"
+                "**绝不能**把这种确认作为 problem。真正的 problem 应当从更早的用户消息或助手的方案提议中识别。\n"
+                "2. problem 字段必须是**自包含**的问题描述（其他人单独看到这个 problem 就能理解），"
+                "例如\"重启 nginx 服务\"、\"清理 /tmp 下的大文件\"、\"诊断磁盘空间不足\"。"
+                "禁止使用\"继续\"、\"执行\"、\"完成上一步\"等依赖上下文的指代词。\n"
+                "3. 如果对话没有形成实质性的问题解决（用户只是闲聊；agent 没真正调用任何工具；"
+                "或问题不明确无法概括），回复字符串 null。\n\n"
+                "严格按以下 JSON 之一回复，不要任何解释文字：\n"
+                "{\"problem\": \"自包含的问题简述(≤30字)\", \"diagnosis\": \"诊断步骤简述\", \"solution\": \"解决方案简述\"}\n"
+                "或：\n"
+                "null"
+            ),
+        },
+        {"role": "user", "content": f"对话记录：\n{excerpt}"},
+    ]
+
+    try:
+        summary_response = await call_llm(summary_messages)
+        summary_text = (summary_response.get("content") or "").strip()
+
+        if not summary_text or summary_text.lower() in ("null", "none", '"null"'):
+            return None
+
+        json_match = re.search(r'\{.*\}', summary_text, re.DOTALL)
+        if not json_match:
+            return None
+
+        data = json.loads(json_match.group())
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception as e:
+        logger.warning(f"Resolution summary extraction failed: {e}")
+        return None
+
+
+# Patterns that indicate the LLM is claiming a WRITE operation was completed.
+# Read-only / analysis verbs (检查, 分析, 识别, 看到) are intentionally NOT here
+# because legitimate text-only responses use them.
+_WRITE_COMPLETION_PATTERNS = (
+    "已重启", "已成功重启", "重启完成", "重启成功", "已为您重启",
+    "已停止", "已成功停止", "停止完成", "已为您停止",
+    "已启动", "已成功启动", "启动完成",
+    "已删除", "已成功删除", "删除完成", "已清除", "已为您删除", "已为您清除",
+    "已清理", "清理完成", "已成功清理", "已为您清理",
+    "已 kill", "已终止", "已杀死", "已为您终止",
+    "已修改", "已更新", "已写入", "已应用", "已保存", "已成功修改",
+    "已执行完毕", "已为您执行", "已为你执行", "执行完毕", "已经执行",
+    "已添加", "已配置", "已开启", "已关闭", "已禁用", "已启用",
+)
+
+
+def _claims_write_completion(text: str) -> bool:
+    """Detect whether an LLM text response claims a write operation was completed.
+
+    Used as a hallucination guard: if the LLM produced this kind of claim without
+    actually invoking any tool, the agent must re-prompt itself to either really
+    call the tool or retract the false claim.
+    """
+    if not text:
+        return False
+    return any(pat in text for pat in _WRITE_COMPLETION_PATTERNS)

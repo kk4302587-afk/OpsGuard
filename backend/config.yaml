@@ -121,6 +121,7 @@ safety:
     # High-risk intent patterns (not injection, but dangerous requests)
     # These trigger a warning but don't block - Agent will still need approval at execution
     high_risk_intent_patterns:
+      # Bulk deletion / data destruction
       - "删除.*所有.*文件"
       - "删除.*数据"
       - "清空.*数据库"
@@ -133,6 +134,29 @@ safety:
       - "remove.*everything"
       - "wipe.*data"
       - "destroy"
+      # Disk-level destruction (covers "清空 C 盘 / D 盘的文件" style requests)
+      - "清空.*[C-Zc-z]盘"
+      - "清空.*所有.*文件"
+      - "清空.*根目录"
+      # Firewall / network mass operations
+      - "清空.*防火墙"
+      - "关闭.*所有.*防火墙"
+      - "禁用.*防火墙"
+      - "关闭.*所有.*端口"
+      - "清空.*所有.*端口"
+      - "开放.*所有.*端口"
+      - "开放.*所有.*防火墙"
+      - "关闭.*所有.*网络"
+      # Service mass operations
+      - "停止.*所有.*服务"
+      - "禁用.*所有.*服务"
+      - "关闭.*所有.*服务"
+      # User mass operations
+      - "删除.*所有.*用户"
+      - "禁用.*所有.*用户"
+      # Package mass operations
+      - "卸载.*所有"
+      - "重置.*所有"
 
   # Layer 2: BERT classifier (optional, auto-degrades if unavailable)
   classifier:

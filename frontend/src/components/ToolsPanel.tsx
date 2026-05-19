@@ -18,6 +18,7 @@ const { Title, Text } = Typography
 
 interface Tool {
   name: string
+  display_name?: string
   description: string
   category: string
   risk_level: string
@@ -122,10 +123,23 @@ function ToolsPanel() {
                     style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
-                      <Text strong style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--accent-blue)' }}>
-                        {tool.name}
-                      </Text>
-                      <Tag color={risk.color} style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                        <Text strong style={{ fontSize: 13, color: 'var(--text-primary)' }}>
+                          {tool.display_name || tool.name}
+                        </Text>
+                        <Text
+                          style={{
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: 10,
+                            color: 'var(--text-muted)',
+                            marginTop: 1,
+                          }}
+                          ellipsis={{ tooltip: tool.name }}
+                        >
+                          {tool.name}
+                        </Text>
+                      </div>
+                      <Tag color={risk.color} style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', marginLeft: 6 }}>
                         {risk.icon} {risk.label}
                       </Tag>
                     </div>
