@@ -434,6 +434,74 @@ else:
 - Legacy compatibility search test.
 - Agent knowledge trace formatting test.
 
+## Scenario: Alert Webhook Auto-Triage
+
+### 1. Scope / Trigger
+- Trigger: any change to alert webhook endpoints, alert normalization, built-in
+  triage templates, or webhook-created sessions/incidents.
+- Goal: external alerts may start an automatic investigation, but that path must
+  stay deterministic, read-only, and evidence-backed.
+
+### 2. Signatures
+- API: `POST /api/alerts/webhook`
+- Service: `normalize_alert_payload(payload: dict) -> list[NormalizedAlert]`
+- Service: `run_alert_auto_triage(payload: dict) -> dict`
+- Templates:
+  - `service_down`: `get_service_status`, `get_service_logs`,
+    `get_listening_ports`, `get_recent_changes`
+  - `high_disk_usage`: `get_disk_usage`, `get_recent_changes`
+
+### 3. Contracts
+- Request accepts Alertmanager/Grafana-style `alerts[]` items with `labels`,
+  `annotations`, and `status`, or a single generic alert object.
+- Response includes `session_id`, `incident_id`, `template`, `checks`, and
+  `report` for each processed alert.
+- Webhook-created sessions must include an initial user message and assistant
+  auto-triage report.
+- Every check must write an audit trace event and incident timeline event with
+  evidence fields.
+- Webhook auto-triage may execute only tools whose registry metadata has
+  `risk_level == RiskLevel.READ`.
+
+### 4. Validation & Error Matrix
+- Payload contains no alert objects -> HTTP 400.
+- Expected tool missing -> check status `failed`, trace `execution_state:
+  failed`.
+- Tool returns `ToolResult(success=False)` -> check status `failed`, trace
+  `execution_state: failed`.
+- Required alert label missing -> check status `skipped`, trace
+  `execution_state: skipped`.
+- Template attempts a WRITE/DESTRUCTIVE tool -> block it, do not call the tool,
+  and record skipped/blocked evidence.
+
+### 5. Good/Base/Bad Cases
+- Good: service-down alert with `service=nginx` creates a session, incident,
+  four read-only checks, and a persisted assistant report.
+- Base: service-down alert without a service label skips service-specific checks
+  and still runs generic listening-port/recent-change checks.
+- Bad: webhook flow calls `restart_service`, asks for approval, or says a
+  failed `df` command succeeded.
+
+### 6. Tests Required
+- Service-down webhook creates session, incident, audit trace, and executed
+  evidence for all read-only checks.
+- Disk webhook preserves `ToolResult(success=False)` as failed evidence.
+- Non-read tool in a webhook template is blocked before invocation.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```python
+await tools_registry.execute_tool("restart_service", {"service": "nginx"})
+```
+
+#### Correct
+```python
+tool_def = tools_registry.get_tool(step.tool_name)
+if tool_def.risk_level != RiskLevel.READ:
+    return skipped_check("webhook auto-triage is read-only")
+```
+
 ---
 
 ## Testing
