@@ -59,6 +59,12 @@ sendMessage: (content) => {
 }
 ```
 
+### WebSocket message ownership
+Chat WebSocket handlers must verify the incoming message still belongs to the
+store's `activeSessionId` before mutating global chat state. Closing a socket
+for a session switch should not imply the backend operation is cancelled; the
+backend owns submitted operation lifecycle by session.
+
 ---
 
 ## Forbidden Patterns
@@ -66,3 +72,5 @@ sendMessage: (content) => {
 - No Redux, no MobX, no Context API for global state
 - No `useEffect` for data fetching that should be in a store
 - No storing derived data (compute it in the component)
+- No writing WebSocket messages from an inactive/stale session into the active
+  chat state

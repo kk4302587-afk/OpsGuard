@@ -39,6 +39,13 @@ except Exception as e:
     await websocket.send_json({"type": "error", "content": str(e)})
 ```
 
+### WebSocket Disconnects
+WebSocket disconnects are a client transport event, not proof that the user
+wants to cancel a submitted operation. Agent and Runbook tasks must be tracked
+by `session_id` independently from the current socket. Streaming sends should be
+best-effort: if no client is connected, the server continues real execution,
+persists audit logs/messages, and resumes prompts on reconnect.
+
 ### API Endpoints
 Use FastAPI's built-in exception handling. Don't catch generic exceptions in endpoints.
 
@@ -65,3 +72,5 @@ If approval times out or is rejected, the tool call is skipped (not retried). Th
 - Never swallow exceptions silently (always log)
 - Never use bare `except:` without logging
 - Never return 500 with internal details in production
+- Never cancel active Agent/Runbook work merely because the WebSocket
+  disconnected

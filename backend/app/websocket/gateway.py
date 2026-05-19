@@ -36,7 +36,7 @@ from app.websocket.manager import ConnectionManager
 router = APIRouter()
 manager = ConnectionManager()
 
-# Per-session runtime state. One entry per active WebSocket connection.
+# Per-session runtime state. One entry per submitted session operation.
 # Holds the currently running background task (Agent or Runbook replay) and
 # the runbook suggestion the user has not yet decided on.
 _session_state: dict[str, dict] = {}
@@ -56,6 +56,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     """WebSocket endpoint for Agent + Runbook interaction. See module docstring."""
     await manager.connect(websocket, session_id)
     state = _get_state(session_id)
+    await _send_runtime_snapshot(websocket, session_id, state)
 
     try:
         while True:
@@ -69,9 +70,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 if active and not active.done():
                     await websocket.send_json({"type": "error", "content": "上一个请求还在处理中，请稍候"})
                     continue
-                state["active_task"] = asyncio.create_task(
-                    handle_user_message(websocket, session_id, message)
-                )
+                _set_active_task(session_id, asyncio.create_task(
+                    handle_user_message(session_id, message)
+                ))
 
             elif msg_type == "approve":
                 # Approval responses must NOT be blocked by the active task — they
@@ -84,9 +85,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 if active and not active.done():
                     await websocket.send_json({"type": "error", "content": "上一个请求还在处理中，请稍候"})
                     continue
-                state["active_task"] = asyncio.create_task(
-                    handle_runbook_decision(websocket, session_id, message)
-                )
+                _set_active_task(session_id, asyncio.create_task(
+                    handle_runbook_decision(session_id, message)
+                ))
 
             elif msg_type == "run_runbook":
                 # Direct invocation from the Runbook page (no suggestion involved).
@@ -94,9 +95,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 if active and not active.done():
                     await websocket.send_json({"type": "error", "content": "上一个请求还在处理中，请稍候"})
                     continue
-                state["active_task"] = asyncio.create_task(
-                    handle_run_runbook(websocket, session_id, message)
-                )
+                _set_active_task(session_id, asyncio.create_task(
+                    handle_run_runbook(session_id, message)
+                ))
 
             elif msg_type == "ping":
                 await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
@@ -108,26 +109,78 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 })
 
     except WebSocketDisconnect:
-        await _cleanup_session(session_id)
+        _disconnect_client(session_id, websocket)
         logger.info(f"Session {session_id} disconnected")
     except Exception as e:
         logger.error(f"WebSocket error in session {session_id}: {e}")
-        await _cleanup_session(session_id)
+        _disconnect_client(session_id, websocket)
 
 
-async def _cleanup_session(session_id: str) -> None:
-    """Cancel active task, clear pending approvals, drop session state."""
-    state = _session_state.pop(session_id, None)
-    if state:
-        task = state.get("active_task")
-        if task and not task.done():
-            task.cancel()
+def _disconnect_client(session_id: str, websocket: WebSocket) -> None:
+    """Drop only the client connection; submitted operations keep running."""
+    manager.disconnect(session_id, websocket)
+
+
+def _set_active_task(session_id: str, task: asyncio.Task) -> None:
+    """Track a submitted operation independently from the client socket."""
+    state = _get_state(session_id)
+    state["active_task"] = task
+
+    def _clear_finished(done_task: asyncio.Task) -> None:
+        current_state = _session_state.get(session_id)
+        if current_state and current_state.get("active_task") is done_task:
+            current_state["active_task"] = None
+            if (
+                manager.get(session_id) is None
+                and not current_state.get("pending_suggestion")
+            ):
+                _session_state.pop(session_id, None)
+        if done_task.cancelled():
+            logger.warning(f"Session task cancelled: {session_id}")
+            return
+        error = done_task.exception()
+        if error:
+            logger.error(f"Session task failed: {session_id}: {error}")
+
+    task.add_done_callback(_clear_finished)
+
+
+async def _send_runtime_snapshot(websocket: WebSocket, session_id: str, state: dict) -> None:
+    """Replay live runtime prompts that are not persisted as messages."""
+    active = state.get("active_task")
+    if active and not active.done():
+        await websocket.send_json({
+            "type": "thinking",
+            "content": "请求仍在后台处理中...",
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    suggestion = state.get("pending_suggestion")
+    if suggestion:
+        await websocket.send_json({
+            "type": "runbook_suggestion",
+            "runbook_id": suggestion["runbook_id"],
+            "name": suggestion["name"],
+            "description": suggestion.get("description") or "",
+            "step_count": suggestion.get("step_count", 0),
+            "match_ratio": suggestion.get("match_ratio", 0.0),
+            "original_message": suggestion.get("original_message") or "",
+            "timestamp": datetime.now().isoformat(),
+        })
+
     from app.websocket.approval import approval_manager
-    approval_manager.cancel_all(session_id)
-    manager.disconnect(session_id)
+    for request in approval_manager.get_pending(session_id):
+        await websocket.send_json({
+            "type": "approval_request",
+            "request_id": request.request_id,
+            "command": f"{request.tool_name}({json.dumps(request.tool_args, ensure_ascii=False)})",
+            "risk_level": request.risk_level,
+            "description": request.description,
+            "timestamp": datetime.now().isoformat(),
+        })
 
 
-async def handle_user_message(websocket: WebSocket, session_id: str, message: dict):
+async def handle_user_message(session_id: str, message: dict):
     """Process a user message.
 
     Step 1: persist the user message.
@@ -157,9 +210,12 @@ async def handle_user_message(websocket: WebSocket, session_id: str, message: di
         state["pending_suggestion"] = {
             "runbook_id": match["id"],
             "name": match["name"],
+            "description": match.get("description") or "",
+            "step_count": match.get("step_count", 0),
+            "match_ratio": match.get("match_ratio", 0.0),
             "original_message": content,
         }
-        await websocket.send_json({
+        await _send_to_session(session_id, {
             "type": "runbook_suggestion",
             "runbook_id": match["id"],
             "name": match["name"],
@@ -176,17 +232,17 @@ async def handle_user_message(websocket: WebSocket, session_id: str, message: di
         return  # Stop here — wait for runbook_decision.
 
     # === Step 3: No match → regular Agent pipeline ===
-    await _run_agent_for_message(websocket, session_id, content)
+    await _run_agent_for_message(session_id, content)
 
 
-async def handle_runbook_decision(websocket: WebSocket, session_id: str, message: dict):
+async def handle_runbook_decision(session_id: str, message: dict):
     """Handle the user's accept/dismiss of a previously suggested runbook."""
     decision = message.get("decision")  # "execute" | "dismiss"
     state = _get_state(session_id)
     suggestion = state.pop("pending_suggestion", None)
 
     if not suggestion:
-        await websocket.send_json({
+        await _send_to_session(session_id, {
             "type": "error",
             "content": "没有待决策的 Runbook 建议",
         })
@@ -194,7 +250,7 @@ async def handle_runbook_decision(websocket: WebSocket, session_id: str, message
 
     if decision == "execute":
         await _replay_runbook(
-            websocket, session_id,
+            session_id,
             runbook_id=suggestion["runbook_id"],
             origin="suggestion",
         )
@@ -202,22 +258,22 @@ async def handle_runbook_decision(websocket: WebSocket, session_id: str, message
         # Dismiss → fall back to the regular Agent flow with the original message.
         original = suggestion.get("original_message") or message.get("original_message") or ""
         if not original:
-            await websocket.send_json({
+            await _send_to_session(session_id, {
                 "type": "error",
                 "content": "Runbook 建议已忽略，但找不到原始问题",
             })
             return
-        await _run_agent_for_message(websocket, session_id, original)
+        await _run_agent_for_message(session_id, original)
 
 
-async def handle_run_runbook(websocket: WebSocket, session_id: str, message: dict):
+async def handle_run_runbook(session_id: str, message: dict):
     """Handle a direct ``run_runbook`` request (from the Runbook UI)."""
     runbook_id = message.get("runbook_id")
     if not runbook_id:
-        await websocket.send_json({"type": "error", "content": "缺少 runbook_id"})
+        await _send_to_session(session_id, {"type": "error", "content": "缺少 runbook_id"})
         return
     await _replay_runbook(
-        websocket, session_id,
+        session_id,
         runbook_id=runbook_id,
         origin="direct",
     )
@@ -251,11 +307,15 @@ async def _persist_user_message(session_id: str, content: str) -> str:
     return user_msg_id
 
 
-def _make_sender(websocket: WebSocket):
+async def _send_to_session(session_id: str, data: dict) -> bool:
+    data.setdefault("timestamp", datetime.now().isoformat())
+    return await manager.send_to_session(session_id, data)
+
+
+def _make_sender(session_id: str):
     """Build a send_to_client callback that auto-stamps timestamps."""
     async def send_to_client(data: dict):
-        data.setdefault("timestamp", datetime.now().isoformat())
-        await websocket.send_json(data)
+        await _send_to_session(session_id, data)
     return send_to_client
 
 
@@ -277,13 +337,13 @@ async def _save_assistant_response(session_id: str, response: str) -> str:
     return assistant_msg_id
 
 
-async def _run_agent_for_message(websocket: WebSocket, session_id: str, content: str) -> None:
+async def _run_agent_for_message(session_id: str, content: str) -> None:
     """Run the full Agent pipeline on a user message and stream results."""
     import aiosqlite
     from app.database import get_knowledge_db_path
 
-    await websocket.send_json({"type": "thinking", "content": "正在分析您的请求..."})
-    send_to_client = _make_sender(websocket)
+    await _send_to_session(session_id, {"type": "thinking", "content": "正在分析您的请求..."})
+    send_to_client = _make_sender(session_id)
 
     try:
         from app.agent.graph import run_agent
@@ -307,7 +367,7 @@ async def _run_agent_for_message(websocket: WebSocket, session_id: str, content:
         )
 
         assistant_msg_id = await _save_assistant_response(session_id, response)
-        await websocket.send_json({
+        await _send_to_session(session_id, {
             "type": "response",
             "content": response,
             "message_id": assistant_msg_id,
@@ -316,7 +376,7 @@ async def _run_agent_for_message(websocket: WebSocket, session_id: str, content:
 
     except Exception as e:
         logger.error(f"Agent error in session {session_id}: {e}")
-        await websocket.send_json({
+        await _send_to_session(session_id, {
             "type": "error",
             "content": f"Agent 执行出错: {e}",
             "timestamp": datetime.now().isoformat(),
@@ -324,7 +384,6 @@ async def _run_agent_for_message(websocket: WebSocket, session_id: str, content:
 
 
 async def _replay_runbook(
-    websocket: WebSocket,
     session_id: str,
     *,
     runbook_id: str,
@@ -334,8 +393,8 @@ async def _replay_runbook(
 
     ``origin`` is just for logging ("suggestion" vs "direct").
     """
-    await websocket.send_json({"type": "thinking", "content": f"正在准备执行 Runbook..."})
-    send_to_client = _make_sender(websocket)
+    await _send_to_session(session_id, {"type": "thinking", "content": "正在准备执行 Runbook..."})
+    send_to_client = _make_sender(session_id)
 
     try:
         from app.agent.runbook_executor import execute_runbook
@@ -346,7 +405,7 @@ async def _replay_runbook(
         )
 
         assistant_msg_id = await _save_assistant_response(session_id, response)
-        await websocket.send_json({
+        await _send_to_session(session_id, {
             "type": "response",
             "content": response,
             "message_id": assistant_msg_id,
@@ -356,7 +415,7 @@ async def _replay_runbook(
 
     except Exception as e:
         logger.error(f"Runbook replay failed in session {session_id}: {e}")
-        await websocket.send_json({
+        await _send_to_session(session_id, {
             "type": "error",
             "content": f"Runbook 执行出错: {e}",
             "timestamp": datetime.now().isoformat(),

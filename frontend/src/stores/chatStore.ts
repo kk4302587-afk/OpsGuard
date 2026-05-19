@@ -247,6 +247,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   connectWebSocket: (sessionId: string) => {
+    const existingWs = get().ws
+    if (existingWs && existingWs.readyState !== WebSocket.CLOSED && existingWs.readyState !== WebSocket.CLOSING) {
+      existingWs.close()
+    }
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${protocol}//${window.location.host}/ws/${sessionId}`
     const ws = new WebSocket(wsUrl)
@@ -256,6 +261,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
 
     ws.onmessage = (event) => {
+      if (get().activeSessionId !== sessionId) return
+
       const data = JSON.parse(event.data)
 
       switch (data.type) {
@@ -423,6 +430,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     ws.onclose = () => {
       console.log(`WebSocket disconnected: ${sessionId}`)
+      if (get().ws === ws) {
+        set({ ws: null })
+      }
     }
 
     ws.onerror = (err) => {
@@ -436,7 +446,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const { ws } = get()
     if (ws) {
       ws.close()
-      set({ ws: null })
+      if (get().ws === ws) {
+        set({ ws: null })
+      }
     }
   },
 }))
