@@ -152,25 +152,54 @@ Operators know whether a Runbook is reliable before replaying it.
 
 ---
 
-### 5.3 Pre-Execution Impact Preview
+### 5.3 Pre-Execution Preview and Rollback Control
 
 **Priority:** P0
 
 Before a write/destructive action or Runbook replay, show what will be touched,
-what may change, and what rollback/verification exists.
+what may change, whether the operation can be previewed, and what rollback or
+verification exists. After execution, expose rollback points and rollback
+coverage instead of leaving backup/restore as an internal implementation detail.
 
 #### User Value
 
 Approvals become meaningful. Users approve operational impact, not opaque tool
-calls.
+calls. If something goes wrong, operators can quickly see whether OpsGuard can
+restore the previous state, perform an inverse action, or only provide manual
+recovery guidance.
+
+#### Current Foundation
+
+OpsGuard already has partial building blocks:
+
+- `BackupManager` can back up files/directories and restore by backup id.
+- Agent and Runbook execution already attempt backups before some write actions.
+- Write/destructive actions already require approval.
+- Write actions already emit verification and before/after change diff events.
+
+These capabilities are not yet productized. Users cannot reliably see rollback
+coverage before approval, browse rollback points, or trigger rollback through a
+controlled workflow.
 
 #### Functional Requirements
 
+- Add capability metadata to every registered tool:
+  - `supports_preview`: whether a real dry-run/preview is available.
+  - `supports_rollback`: whether OpsGuard can provide an automated rollback.
+  - `rollback_strategy`: `backup`, `inverse_action`, `manual`, or `none`.
+  - `preview_strategy`: `diff`, `check_mode`, `state_comparison`, `impact_only`,
+    or `none`.
+- Implement a preflight stage before approval:
+  - Run real previews where supported.
+  - Generate impact-only previews where true dry-run is impossible.
+  - Explicitly label unsupported preview cases as "impact estimate only".
 - For each proposed write/destructive step, show:
   - target resource,
   - expected change,
   - possible user-facing impact,
   - rollback option,
+  - rollback confidence,
+  - backup status or inverse action,
   - verification plan,
   - risk level.
 - For Runbooks, show an aggregate impact summary:
@@ -178,23 +207,70 @@ calls.
   - write steps count,
   - destructive steps count,
   - services/files/ports/users affected.
+  - rollback coverage by step.
 - Approval modal should display the human-readable impact summary first and raw
   tool call second.
 - If no reliable rollback exists, say so explicitly.
+- After a successful write/destructive action, show a rollback point in the
+  trace:
+  - rollback id,
+  - target,
+  - strategy,
+  - created_at,
+  - restore command/API availability.
+- Add rollback APIs and MCP tools:
+  - `GET /api/backups`
+  - `GET /api/backups?filepath=...`
+  - `POST /api/backups/{id}/rollback`
+  - `list_backups`
+  - `rollback_backup`
+- Treat `rollback_backup` as write/destructive and require approval.
+- Runbooks should store `rollback_plan` metadata per write/destructive step
+  where possible. On partial failure, OpsGuard should recommend which completed
+  steps can be rolled back safely.
 
 #### MVP Scope
 
 - Reuse existing `assess_impact` path.
 - Extend Runbook executor plan generation.
 - Improve ApprovalModal rendering.
+- Expose backup manifest through an authenticated API.
+- Register rollback-related MCP tools with approval.
+- Start with truthful rollback support for file/directory operations and
+  impact-only previews for service/process operations.
 
 #### Acceptance Criteria
 
 - Restarting nginx says service may be briefly unavailable and status will be
-  verified afterward.
+  verified afterward. It must not claim full rollback unless an actual safe
+  inverse plan exists.
 - Deleting a file shows the path, backup status, and whether rollback is
   possible.
 - A read-only Runbook clearly says it will not modify the system.
+- After modifying a backed-up file, the trace shows the rollback id and the
+  backup can be restored through a controlled rollback request.
+- If a Runbook fails after step 3, the final report lists which completed steps
+  have rollback coverage and which do not.
+
+#### Phased Delivery
+
+1. **Rollback visibility**
+   Surface rollback capability, backup status, and rollback points in approval
+   and trace events.
+
+2. **Manual rollback workflow**
+   Add backup listing and approved rollback APIs/tools.
+
+3. **Preflight preview**
+   Add tool-level preview strategies and show preview results before approval.
+
+4. **Runbook rollback plans**
+   Store per-step rollback metadata and recommend rollback on partial failure.
+
+5. **Selective sandbox/dry-run adapters**
+   Add tool-specific dry-run support only where the underlying system supports
+   it reliably, such as config syntax checks, package manager simulation,
+   Kubernetes dry-run/diff, or Ansible check/diff style integrations.
 
 ---
 
@@ -428,8 +504,9 @@ Operators spend less time writing reports after stressful incidents.
    Runbooks are already central to OpsGuard. Adding health, versions, and aging
    makes them safer to replay.
 
-3. **Pre-Execution Impact Preview**
-   This improves approvals and directly reduces production risk.
+3. **Pre-Execution Preview and Rollback Control**
+   This improves approvals, makes recovery explicit, and directly reduces
+   production risk.
 
 4. **Incident Timeline**
    This creates the structured substrate for knowledge, reports, handoffs, and
@@ -457,19 +534,26 @@ The first innovation milestone should ship:
 - Evidence blocks in TracePanel.
 - Runbook health fields and execution statistics.
 - Runbook plan/impact preview before replay.
-- Approval modal impact-first display.
+- Approval modal impact-first display with rollback coverage.
+- Visible rollback points for backed-up file/directory changes.
 
 ### P0 Success Metrics
 
 - Operators can answer "what did OpsGuard actually execute?" from the UI alone.
 - Runbook replay shows whether it is fresh, stale, or recently failing.
-- Every write approval includes target, expected impact, and verification plan.
+- Every write approval includes target, expected impact, rollback coverage, and
+  verification plan.
+- Backed-up file/directory changes can be restored through an approved rollback
+  workflow.
 - No final answer claims a system change without evidence or successful tool
   execution.
 
 ## 8. Non-Goals
 
 - Full autonomous remediation without approval.
+- Generic system-level sandbox execution for all host operations. Sandbox/dry-run
+  support is reserved for tool-specific integrations where results are truthful
+  and representative.
 - Replacing Prometheus/Grafana/Datadog-style monitoring systems.
 - Building a separate complex incident management product before core evidence
   and Runbook governance are reliable.
@@ -484,6 +568,8 @@ The first innovation milestone should ship:
 | Schema drift without migrations | Use safe `ALTER TABLE` helpers and regression tests |
 | Overloaded trace panel | Use progressive disclosure: summary first, raw detail collapsed |
 | Excessive automation risk | Default to read-only auto-triage; keep writes approval-gated |
+| False sense of rollback safety | Show rollback strategy and confidence per operation; never claim rollback when only manual recovery exists |
+| Sandbox results differ from host reality | Keep general sandbox execution out of near-term scope; implement only tool-specific dry-run adapters |
 
 ## 10. Open Questions
 
@@ -492,6 +578,14 @@ The first innovation milestone should ship:
 - What default staleness threshold should Runbooks use: 30, 60, or 90 days?
 - Should Runbook version rollback be exposed in the UI immediately or only via
   backend API first?
+- Which operations should support automated rollback first: files only, firewall
+  inverse actions, service state restoration, package operations, or user
+  management?
+- What language should approval UI use for operations that are reversible in
+  theory but risky in practice?
+- Which sandbox/dry-run adapters are worth implementing later: package manager
+  simulation, Kubernetes dry-run, Ansible check mode, or containerized config
+  validation?
 - Which alert source should be supported first: Alertmanager, Grafana, or a
   generic webhook?
 - Should topology RCA annotations be session-scoped only or persisted into
