@@ -732,15 +732,22 @@ _WRITE_COMPLETION_PATTERNS = (
     "已修改", "已更新", "已写入", "已应用", "已保存", "已成功修改",
     "已执行完毕", "已为您执行", "已为你执行", "执行完毕", "已经执行",
     "已添加", "已配置", "已开启", "已关闭", "已禁用", "已启用",
+    "已安装", "安装完成", "已卸载", "卸载完成",
+    "started", "start completed", "restarted", "restart completed",
+    "stopped", "stop completed", "deleted", "delete completed",
+    "removed", "remove completed", "modified", "updated", "saved",
+    "installed", "install completed", "uninstalled", "uninstall completed",
 )
 
 
 _WRITE_INTENT_PATTERNS = (
-    # Explicit operation requests, including common Chinese polite prefixes.
-    r"(帮我|请|执行|开始|给我|把|将|立即|现在).{0,20}(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|配置)",
-    # Bare imperative-style operation plus an object. Avoid matching read-only
-    # phrases like "查看 nginx 启动状态" where the verb describes state.
-    r"(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加).{0,20}(服务|进程|文件|目录|配置|端口|用户|软件|包|nginx|mysql|redis|apache|systemd)",
+    # Explicit operation requests. Keep the gap short so read-only phrases like
+    # "请查看 nginx 配置文件" do not treat the noun "配置" as a write verb.
+    r"(帮我|请|执行|开始|给我|把|将|立即|现在|麻烦).{0,4}(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|安装|卸载|配置)",
+    # Bare imperative-style operation plus an object.
+    r"^(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|安装|卸载|配置).{0,30}(服务|进程|文件|目录|配置|端口|用户|软件|包|规则|权限|nginx|mysql|redis|apache|systemd)",
+    # Mixed read-then-write requests such as "检查并重启 nginx".
+    r"(并|然后|之后|后).{0,6}(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|安装|卸载|配置)",
     # English operation requests.
     r"\b(start|restart|stop|delete|remove|clean|modify|write|save|apply|enable|disable|install|uninstall)\b.{0,40}\b(service|process|file|directory|config|port|user|package|nginx|mysql|redis|apache)\b",
     # Follow-up confirmations after the assistant proposed a write operation.

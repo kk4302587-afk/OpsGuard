@@ -44,5 +44,6 @@
 
 - Manual testing via API calls and browser
 - `python -c "from app.main import app"` — smoke test for import chain
+- `python backend/test_write_guard.py` — focused regression for write-completion guard false positives
 - Security rules tested via `test_rules.py` pattern (create, run, delete)
 - TypeScript `npx tsc --noEmit` for frontend
