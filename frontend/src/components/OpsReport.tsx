@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Button, Card, Space, Typography, Spin, Tag, Statistic, Select } from 'antd'
+import { Button, Card, Space, Typography, Spin, Tag, Statistic, Select, Modal } from 'antd'
 import {
   FileTextOutlined,
   ReloadOutlined,
@@ -31,6 +31,12 @@ interface OpsReportData {
   }
 }
 
+interface IncidentDraft {
+  type: 'handoff' | 'postmortem'
+  incidentId: string
+  markdown: string
+}
+
 /**
  * Operations report page - on-demand summary of recent operations.
  */
@@ -38,6 +44,8 @@ function OpsReport() {
   const [report, setReport] = useState<OpsReportData | null>(null)
   const [loading, setLoading] = useState(false)
   const [hours, setHours] = useState(24)
+  const [draft, setDraft] = useState<IncidentDraft | null>(null)
+  const [draftLoading, setDraftLoading] = useState(false)
 
   const generateReport = async () => {
     setLoading(true)
@@ -50,6 +58,21 @@ function OpsReport() {
       console.error('Failed to generate report:', err)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const openIncidentDraft = async (incidentId: string, type: 'handoff' | 'postmortem') => {
+    setDraftLoading(true)
+    try {
+      const res = await fetch(`/api/incidents/${incidentId}/${type}`)
+      if (res.ok) {
+        const data = await res.json()
+        setDraft({ type, incidentId, markdown: data.markdown || '' })
+      }
+    } catch (err) {
+      console.error('Failed to load incident draft:', err)
+    } finally {
+      setDraftLoading(false)
     }
   }
 
@@ -198,6 +221,41 @@ function OpsReport() {
             </Card>
           )}
 
+          {/* Incident drafts */}
+          {(report.sections.incidents?.items?.length || 0) > 0 && (
+            <Card
+              size="small"
+              title={<><AlertOutlined style={{ marginRight: 6, color: 'var(--accent-yellow)' }} />Incident Drafts</>}
+              style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}
+            >
+              {report.sections.incidents?.items.map((incident: any) => (
+                <div key={incident.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '8px 0', borderBottom: '1px solid var(--border-color)', alignItems: 'center' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <Space size={6} wrap>
+                      <Tag color={incident.status === 'resolved' ? 'green' : incident.status === 'failed' ? 'red' : 'orange'}>
+                        {incident.status}
+                      </Tag>
+                      <Text style={{ fontSize: 12, color: 'var(--text-primary)' }}>
+                        {incident.problem_statement || incident.id}
+                      </Text>
+                    </Space>
+                    <Text style={{ display: 'block', fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+                      {incident.id}
+                    </Text>
+                  </div>
+                  <Space>
+                    <Button size="small" icon={<FileTextOutlined />} loading={draftLoading} onClick={() => openIncidentDraft(incident.id, 'handoff')}>
+                      Handoff
+                    </Button>
+                    <Button size="small" icon={<FileTextOutlined />} loading={draftLoading} onClick={() => openIncidentDraft(incident.id, 'postmortem')}>
+                      Postmortem
+                    </Button>
+                  </Space>
+                </div>
+              ))}
+            </Card>
+          )}
+
           {/* Sessions list */}
           {report.sections.sessions?.count > 0 && (
             <Card
@@ -224,6 +282,26 @@ function OpsReport() {
           </Card>
         </div>
       )}
+      <Modal
+        open={!!draft}
+        title={draft ? `${draft.type === 'handoff' ? 'Handoff Note' : 'Postmortem Draft'} - ${draft.incidentId}` : 'Incident Draft'}
+        onCancel={() => setDraft(null)}
+        footer={[
+          <Button key="close" onClick={() => setDraft(null)}>Close</Button>,
+          <Button
+            key="copy"
+            type="primary"
+            onClick={() => draft && navigator.clipboard?.writeText(draft.markdown)}
+          >
+            Copy Markdown
+          </Button>,
+        ]}
+        width={900}
+      >
+        <pre style={{ maxHeight: 520, overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+          {draft?.markdown}
+        </pre>
+      </Modal>
     </div>
   )
 }

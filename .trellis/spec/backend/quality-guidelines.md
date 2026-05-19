@@ -576,6 +576,73 @@ if evidence.get("execution_state") in {"executed", "failed"}:
     annotations.append(annotation_from_evidence(evidence))
 ```
 
+## Scenario: Incident Handoff and Postmortem Drafts
+
+### 1. Scope / Trigger
+- Trigger: any change to incident handoff/postmortem endpoints, report draft
+  builders, OpsReport incident draft rendering, or incident event summarization.
+- Goal: generated operational reports must reduce writing effort without
+  inventing root cause, business impact, mitigation, or verification.
+
+### 2. Signatures
+- API: `GET /api/incidents/{incident_id}/handoff`
+- API: `GET /api/incidents/{incident_id}/postmortem`
+- Backend helper: `generate_handoff_note(incident_id, db_path=None) -> dict | None`
+- Backend helper: `generate_postmortem_draft(incident_id, db_path=None) -> dict | None`
+- Response fields:
+  - `incident`
+  - `type`: `handoff | postmortem`
+  - `markdown`
+
+### 3. Contracts
+- Drafts are deterministic in the MVP; do not call an LLM to fill missing facts.
+- Confirmed facts may only come from incident event evidence with
+  `execution_state` of `executed` or `failed`.
+- Evidence with `execution_state: inferred` belongs under hypotheses, not
+  confirmed facts.
+- Missing customer/business impact, root cause, mitigation, or verification
+  must remain a visible placeholder or explicit "not confirmed" statement.
+- OpsReport may expose draft actions for recent incidents, but the source of
+  truth remains the incident endpoint response.
+
+### 4. Validation & Error Matrix
+- Incident id not found -> HTTP 404.
+- No confirmed evidence -> markdown says no confirmed execution evidence yet.
+- Open/failed incident -> draft must include follow-up/owner/next-check language.
+- Failed tool evidence -> failures/risks section includes the failure reason.
+- No verification events -> postmortem includes an action item to add
+  verification evidence.
+
+### 5. Good/Base/Bad Cases
+- Good: resolved nginx incident draft lists status/log checks as confirmed
+  facts, keeps LLM analysis under hypotheses, and includes placeholders for
+  business impact.
+- Base: open incident draft becomes a handoff note with next checks and owner
+  follow-up.
+- Bad: draft claims "root cause was nginx config" because a recent-change event
+  mentioned `nginx.conf` without verification.
+
+### 6. Tests Required
+- Handoff/postmortem generation separates confirmed facts from inferred
+  hypotheses.
+- Open incident draft includes follow-up action items.
+- Frontend build verifies OpsReport draft modal and endpoint contracts.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```python
+root_cause = "nginx config changed"
+```
+
+#### Correct
+```python
+if evidence.get("execution_state") in {"executed", "failed"}:
+    confirmed_facts.append(render_fact(event, evidence))
+else:
+    hypotheses.append(render_hypothesis(event, evidence))
+```
+
 ---
 
 ## Testing

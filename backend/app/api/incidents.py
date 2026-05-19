@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, Query
 
+from app.incidents.reports import generate_handoff_note, generate_postmortem_draft
 from app.incidents.store import get_incident, get_incident_events, get_incidents
 
 router = APIRouter()
@@ -37,3 +38,21 @@ async def get_incident_timeline(
         raise HTTPException(status_code=404, detail="Incident not found")
     events = await get_incident_events(incident_id, limit=limit)
     return {"incident": incident, "events": events}
+
+
+@router.get("/{incident_id}/handoff")
+async def get_incident_handoff(incident_id: str):
+    """Generate a short Markdown handoff note for one incident."""
+    report = await generate_handoff_note(incident_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return report
+
+
+@router.get("/{incident_id}/postmortem")
+async def get_incident_postmortem(incident_id: str):
+    """Generate a Markdown postmortem draft for one incident."""
+    report = await generate_postmortem_draft(incident_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return report
