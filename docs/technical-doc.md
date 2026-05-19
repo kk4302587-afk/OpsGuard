@@ -24,7 +24,7 @@ OpsGuard 是一套部署于 Linux 操作系统的智能运维 Agent，通过实�
 │                                                             │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐  │
 │  │  MCP 工具层  │  │  知识库       │  │  审计日志         │  │
-│  │  (32个工具)  │  │  (SQLite)    │  │  (全链路溯源)     │  │
+│  │  (60个工具)  │  │  (SQLite)    │  │  (全链路溯源)     │  │
 │  └─────────────┘  └──────────────┘  └───────────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
 │                   操作系统层 (opsguard 用户)                   │
@@ -47,7 +47,7 @@ OpsGuard 是一套部署于 Linux 操作系统的智能运维 Agent，通过实�
 5. **执行验证**：执行后自动检查结果是否符合预期
 6. **知识沉淀**：成功解决后自动提炼经验存入知识库
 
-### 3.2 MCP 工具层 (32个原子化工具)
+### 3.2 MCP 工具层 (60个原子化工具)
 
 | 类别 | 工具数 | 示例 |
 |------|--------|------|
@@ -55,7 +55,7 @@ OpsGuard 是一套部署于 Linux 操作系统的智能运维 Agent，通过实�
 | 磁盘文件 | 5 | get_disk_usage, find_large_files, check_file_info |
 | 网络诊断 | 5 | get_listening_ports, get_connections, ping_host |
 | 日志分析 | 5 | get_journal_logs, get_recent_errors, search_logs |
-| 服务管理 | 6 | list_services, get_service_status, restart_service |
+| 服务管理 | 7 | list_services, get_service_status, start_service, restart_service |
 | 配置检查 | 5 | read_config_file, check_config_syntax, diff_config |
 | 系统概览 | 4 | system_overview, health_check, get_crontab_list |
 
@@ -111,7 +111,7 @@ OpsGuard 是一套部署于 Linux 操作系统的智能运维 Agent，通过实�
 ## 4. 创新功能
 
 ### 4.1 执行后验证 (Post-Action Verify)
-工具执行后自动验证结果：kill_process 后检查 PID 是否消失，restart_service 后检查服务是否 active。
+工具执行后自动验证结果：kill_process 后检查 PID 是否消失，start_service/restart_service 后检查服务是否 active，并用执行前真实状态生成变更对比。
 
 ### 4.2 故障关联图谱
 实时构建进程→端口→服务→配置的关联关系，ECharts 力导向图可视化。Agent 诊断时动态添加节点，故障相关节点红色高亮。

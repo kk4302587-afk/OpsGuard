@@ -102,7 +102,7 @@
 | # | 测试步骤 | 预期效果 |
 |---|---|---|
 | 1 | 点击左侧导航"MCP 工具"图标 | 进入工具注册表页面 |
-| 2 | 页面顶部 | 显示"共 59 个工具"、"只读 XX"、"写操作 XX" |
+| 2 | 页面顶部 | 显示"共 60 个工具"、"只读 XX"、"写操作 XX" |
 | 3 | 展开"进程管理"分类 | 显示 4 个工具卡片，每个有名称（蓝色 mono 字体）、描述、风险等级标签、参数列表 |
 | 4 | 检查风险等级标签颜色 | 只读=绿色，写操作=橙色，高危=红色 |
 | 5 | 展开所有分类 | 应有 12 个分类：进程/磁盘/网络/日志/服务/配置/系统/文件/包管理/用户/防火墙/定时任务 |
@@ -197,7 +197,7 @@
 | 1 | 执行一个写操作（如 kill 进程、重启服务） | 推理链路面板中出现"变更对比"事件 |
 | 2 | 变更对比内容格式 | `[Before] xxx: 状态A` / `[After] xxx: 状态B` |
 | 3 | 如果是 kill_process | 显示 `[Before] PID X: 运行中` / `[After] PID X: 已终止` |
-| 4 | 如果是 restart_service | 显示 `[Before] 服务: 运行中(重启前)` / `[After] 服务: active` |
+| 4 | 如果是 service write tool | 显示真实执行前状态，例如 `[Before] nginx: inactive` / `[After] nginx: active` |
 
 ---
 
@@ -209,7 +209,7 @@
 |---|---|---|
 | 1 | `GET /health` | `{"status": "ok", "version": "0.1.0"}` |
 | 2 | `GET /api/system/status` | 返回 CPU/内存/磁盘/负载 JSON |
-| 3 | `GET /api/tools/` | 返回 59 个工具，12 个分类 |
+| 3 | `GET /api/tools/` | 返回 60 个工具，12 个分类 |
 | 4 | `GET /api/security/status` | 返回安全模式和规则数量 |
 | 5 | `GET /api/security/attack-examples` | 返回预设攻击样本列表 |
 | 6 | `GET /api/health-report/report` | 返回健康报告 JSON |

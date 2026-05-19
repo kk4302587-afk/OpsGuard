@@ -53,6 +53,7 @@ _DISPLAY_NAMES: dict[str, str] = {
     "get_service_status": "服务状态",
     "get_failed_services": "失败的服务",
     "restart_service": "重启服务",
+    "start_service": "启动服务",
     "stop_service": "停止服务",
     "get_service_logs": "服务日志",
     # Config
@@ -288,13 +289,21 @@ class ToolsRegistry:
             "type": "object", "properties": {},
         }, service_tools.get_failed_services, RiskLevel.READ, "service")
 
-        self._register("restart_service", "重启服务", {
+        self._register("restart_service", "重启正在运行的服务；如果用户要求启动已停止服务，应使用 start_service", {
             "type": "object",
             "properties": {
                 "service": {"type": "string", "description": "服务名称"},
             },
             "required": ["service"],
         }, service_tools.restart_service, RiskLevel.WRITE, "service")
+
+        self._register("start_service", "启动已停止的服务；不会重启已经运行的服务", {
+            "type": "object",
+            "properties": {
+                "service": {"type": "string", "description": "服务名称"},
+            },
+            "required": ["service"],
+        }, service_tools.start_service, RiskLevel.WRITE, "service")
 
         self._register("stop_service", "停止服务", {
             "type": "object",

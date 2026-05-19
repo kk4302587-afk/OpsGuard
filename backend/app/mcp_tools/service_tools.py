@@ -66,6 +66,24 @@ def restart_service(service: str) -> ToolResult:
         return ToolResult(success=False, data="", error=str(e))
 
 
+def start_service(service: str) -> ToolResult:
+    """Start a service. REQUIRES APPROVAL.
+
+    Args:
+        service: Service name to start
+    """
+    try:
+        cmd = ["sudo", "systemctl", "start", service]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=result.stderr)
+
+        return ToolResult(success=True, data=f"Service {service} started successfully")
+    except Exception as e:
+        return ToolResult(success=False, data="", error=str(e))
+
+
 def stop_service(service: str) -> ToolResult:
     """Stop a service. REQUIRES APPROVAL.
 

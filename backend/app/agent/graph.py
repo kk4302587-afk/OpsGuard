@@ -189,6 +189,7 @@ async def reasoning_node(state: AgentState) -> dict:
                 try:
                     # Backup before write
                     backup_record = None
+                    before_change_state = None
                     if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
                         from app.mcp_tools.backup import backup_manager
                         target_path = tool_args.get("filepath") or tool_args.get("path") or tool_args.get("service")
@@ -196,6 +197,7 @@ async def reasoning_node(state: AgentState) -> dict:
                             backup_record = backup_manager.backup_file(target_path, operation=f"{tool_name}")
                             if backup_record:
                                 await send_to_client({"type": "trace", "phase": "execution", "event_type": "start", "content": f"已备份: {target_path}"})
+                        before_change_state = _capture_pre_change_state(tool_name, tool_args, backup_record)
 
                     result = tool_def.function(**tool_args)
                     if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
@@ -209,7 +211,7 @@ async def reasoning_node(state: AgentState) -> dict:
                             await send_to_client({"type": "trace", "phase": "verification", "event_type": verification["status"], "content": verification["message"]})
 
                         # Before/After change diff
-                        change_diff = _capture_change_diff(tool_name, tool_args, backup_record)
+                        change_diff = _capture_change_diff(tool_name, tool_args, backup_record, before_change_state)
                         if change_diff:
                             await send_to_client({"type": "trace", "phase": "verification", "event_type": "success", "content": f"变更对比:\n{change_diff}"})
 
@@ -261,7 +263,7 @@ async def reasoning_node(state: AgentState) -> dict:
                         "[系统强制纠正] 你上一条回复中声称已完成某个写操作（如\"已重启\"、\"已删除\"、\"已清理\"），"
                         "但本轮你**没有调用任何工具**，操作根本没有发生。"
                         "请立即重新处理用户请求：\n"
-                        "1) 如果用户确实需要执行该写操作，**立刻调用对应的工具**（如 restart_service、delete_file 等）来真正执行；\n"
+                        "1) 如果用户确实需要执行该写操作，**立刻调用对应的工具**（如 start_service、restart_service、delete_file 等）来真正执行；\n"
                         "2) 如果你认为不应执行（参数不全、风险过高、用户其实在询问），明确告知用户'尚未执行 / 我不会执行'并说明原因，绝不要使用'已...'之类的完成措辞。\n"
                         "不允许再次仅用文字声称完成。"
                     ),
@@ -474,13 +476,17 @@ async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_t
             except Exception:
                 pass
 
-    elif tool_name in ("restart_service", "stop_service"):
-        import subprocess
+    elif tool_name in ("restart_service", "start_service", "stop_service"):
         service = tool_args.get("service")
         if service:
-            action = "重启" if tool_name == "restart_service" else "停止"
+            action_map = {
+                "restart_service": "重启",
+                "start_service": "启动",
+                "stop_service": "停止",
+            }
+            action = action_map.get(tool_name, "操作")
             impact_lines.append(f"操作: {action} {service}")
-            impact_lines.append("影响: 服务短暂不可用")
+            impact_lines.append("影响: 服务状态将发生变化")
 
     if impact_lines:
         impact_text = "\n".join(impact_lines)
@@ -506,14 +512,15 @@ def _verify_tool_result(tool_name: str, tool_args: dict, result) -> dict | None:
         elif pid:
             return {"status": "failure", "message": f"验证失败: PID {pid} 仍然存在"}
 
-    elif tool_name == "restart_service":
+    elif tool_name in ("restart_service", "start_service"):
         import subprocess
         service = tool_args.get("service")
         if service:
             try:
                 check = subprocess.run(["systemctl", "is-active", service], capture_output=True, text=True, timeout=5)
                 if check.stdout.strip() == "active":
-                    return {"status": "success", "message": f"验证通过: {service} 已重启并运行中"}
+                    action = "已重启并运行中" if tool_name == "restart_service" else "已启动并运行中"
+                    return {"status": "success", "message": f"验证通过: {service} {action}"}
                 return {"status": "failure", "message": f"验证失败: {service} 状态为 {check.stdout.strip()}"}
             except Exception:
                 pass
@@ -535,39 +542,69 @@ def _verify_tool_result(tool_name: str, tool_args: dict, result) -> dict | None:
     return None
 
 
-def _capture_change_diff(tool_name: str, tool_args: dict, backup_record: dict | None) -> str | None:
+def _capture_pre_change_state(tool_name: str, tool_args: dict, backup_record: dict | None) -> dict | None:
+    """Capture live state immediately before executing a write operation."""
+    if tool_name == "kill_process":
+        import psutil
+        pid = tool_args.get("pid")
+        if pid:
+            return {"pid_exists": psutil.pid_exists(pid)}
+
+    if tool_name in ("restart_service", "start_service", "stop_service"):
+        service = tool_args.get("service")
+        if service:
+            return {"service_state": _get_service_active_state(service)}
+
+    if backup_record:
+        return {"backup_record": backup_record}
+
+    return None
+
+
+def _get_service_active_state(service: str) -> str:
+    """Return the current systemd active state for a service."""
+    import subprocess
+
+    try:
+        check = subprocess.run(
+            ["systemctl", "is-active", service],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        state = check.stdout.strip() or check.stderr.strip()
+        return state or f"unknown(rc={check.returncode})"
+    except Exception as e:
+        return f"unknown({e})"
+
+
+def _capture_change_diff(
+    tool_name: str,
+    tool_args: dict,
+    backup_record: dict | None,
+    before_state: dict | None = None,
+) -> str | None:
     """Capture before/after diff for write operations."""
     diff_lines = []
+    before_state = before_state or {}
 
     if tool_name == "kill_process":
         import psutil
         pid = tool_args.get("pid")
         if pid:
+            before_exists = before_state.get("pid_exists")
             exists = psutil.pid_exists(pid)
-            diff_lines.append(f"[Before] PID {pid}: 运行中")
+            before_text = "运行中" if before_exists else "不存在"
+            diff_lines.append(f"[Before] PID {pid}: {before_text}")
             diff_lines.append(f"[After]  PID {pid}: {'仍在运行' if exists else '已终止'}")
 
-    elif tool_name == "restart_service":
-        import subprocess
+    elif tool_name in ("restart_service", "start_service", "stop_service"):
         service = tool_args.get("service")
         if service:
-            try:
-                check = subprocess.run(["systemctl", "is-active", service], capture_output=True, text=True, timeout=5)
-                diff_lines.append(f"[Before] {service}: 运行中 (重启前)")
-                diff_lines.append(f"[After]  {service}: {check.stdout.strip()}")
-            except Exception:
-                pass
-
-    elif tool_name == "stop_service":
-        import subprocess
-        service = tool_args.get("service")
-        if service:
-            try:
-                check = subprocess.run(["systemctl", "is-active", service], capture_output=True, text=True, timeout=5)
-                diff_lines.append(f"[Before] {service}: 运行中")
-                diff_lines.append(f"[After]  {service}: {check.stdout.strip()}")
-            except Exception:
-                pass
+            before_service_state = before_state.get("service_state", "unknown")
+            after_service_state = _get_service_active_state(service)
+            diff_lines.append(f"[Before] {service}: {before_service_state}")
+            diff_lines.append(f"[After]  {service}: {after_service_state}")
 
     elif backup_record:
         from pathlib import Path

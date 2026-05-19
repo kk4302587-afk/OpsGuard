@@ -35,6 +35,7 @@
 - No user input directly interpolated into shell commands
 - API keys loaded from config, never hardcoded
 - Protected paths list checked before any write operation
+- Before/after change diffs must use a live pre-execution snapshot captured immediately before the write tool runs. Never hardcode "Before" values from assumptions.
 
 ---
 
