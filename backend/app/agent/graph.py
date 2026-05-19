@@ -15,7 +15,7 @@ from app.agent.llm import call_llm, SYSTEM_PROMPT
 from app.agent.tools_registry import tools_registry, RiskLevel
 from app.safety.guardrail import SafetyGuardrail
 from app.audit.logger import audit_logger, AuditPhase, AuditEventType
-from app.knowledge.store import knowledge_store
+from app.knowledge.store import KnowledgeSearchError, knowledge_store
 
 
 # === State Definition ===
@@ -81,7 +81,24 @@ async def knowledge_retrieval_node(state: AgentState) -> dict:
 
     await send_to_client({"type": "trace", "phase": "knowledge_retrieval", "event_type": "start", "content": "检索历史经验..."})
 
-    knowledge_context = await knowledge_store.search(user_message, limit=3)
+    try:
+        knowledge_context = await knowledge_store.search(user_message, limit=3)
+    except KnowledgeSearchError as e:
+        await send_to_client({
+            "type": "trace",
+            "phase": "knowledge_retrieval",
+            "event_type": "failure",
+            "content": f"知识检索失败: {e}",
+        })
+        await audit_logger.log(
+            session_id,
+            AuditPhase.KNOWLEDGE_RETRIEVAL,
+            AuditEventType.FAILURE,
+            "知识检索失败",
+            {"error": str(e)},
+        )
+        return {"knowledge_hint": ""}
+
     knowledge_hint = ""
     if knowledge_context:
         knowledge_hint = "\n\n## 历史经验参考\n"
@@ -114,6 +131,8 @@ async def reasoning_node(state: AgentState) -> dict:
     max_iterations = 10
     iteration = 0
     write_tools_called = 0  # Count of WRITE/DESTRUCTIVE tools genuinely invoked this turn
+    write_tools_succeeded = 0
+    write_tool_failures: list[str] = []
     hallucination_retry_done = False  # Guard so we only retry once
 
     while iteration < max_iterations:
@@ -200,12 +219,18 @@ async def reasoning_node(state: AgentState) -> dict:
                         before_change_state = _capture_pre_change_state(tool_name, tool_args, backup_record)
 
                     result = tool_def.function(**tool_args)
+                    result_success = bool(getattr(result, "success", True))
+                    result_error = getattr(result, "error", None)
                     if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
                         write_tools_called += 1
+                        if result_success:
+                            write_tools_succeeded += 1
+                        else:
+                            write_tool_failures.append(f"{tool_name}: {result_error or 'success=False'}")
                     tool_result_str = json.dumps(result.__dict__ if hasattr(result, '__dict__') else result, ensure_ascii=False, default=str)
 
                     # Post-action verification for write operations
-                    if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
+                    if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE) and result_success:
                         verification = _verify_tool_result(tool_name, tool_args, result)
                         if verification:
                             await send_to_client({"type": "trace", "phase": "verification", "event_type": verification["status"], "content": verification["message"]})
@@ -215,8 +240,13 @@ async def reasoning_node(state: AgentState) -> dict:
                         if change_diff:
                             await send_to_client({"type": "trace", "phase": "verification", "event_type": "success", "content": f"变更对比:\n{change_diff}"})
 
-                    await audit_logger.log(session_id, AuditPhase.EXECUTION, AuditEventType.SUCCESS, f"工具执行成功: {tool_name}")
-                    await send_to_client({"type": "trace", "phase": "execution", "event_type": "success", "content": f"执行成功: {tool_name}"})
+                    if result_success:
+                        await audit_logger.log(session_id, AuditPhase.EXECUTION, AuditEventType.SUCCESS, f"工具执行成功: {tool_name}")
+                        await send_to_client({"type": "trace", "phase": "execution", "event_type": "success", "content": f"执行成功: {tool_name}"})
+                    else:
+                        failure_message = result_error or "工具返回 success=False"
+                        await audit_logger.log(session_id, AuditPhase.EXECUTION, AuditEventType.FAILURE, f"工具执行失败: {tool_name} - {failure_message}")
+                        await send_to_client({"type": "trace", "phase": "execution", "event_type": "failure", "content": f"执行失败: {tool_name} - {failure_message}"})
 
                 except Exception as e:
                     tool_result_str = json.dumps({"error": str(e)})
@@ -270,6 +300,43 @@ async def reasoning_node(state: AgentState) -> dict:
                     ),
                 })
                 continue  # Retry one more LLM round with reminder in context
+            if (
+                not hallucination_retry_done
+                and write_tool_failures
+                and write_tools_succeeded == 0
+                and _has_write_intent(user_message)
+                and _claims_write_completion(final_content)
+            ):
+                hallucination_retry_done = True
+                failure_summary = "; ".join(write_tool_failures)[:500]
+                logger.warning(
+                    f"Hallucination guard triggered: LLM claimed completion after "
+                    f"failed write tools. Failures: {failure_summary!r}"
+                )
+                await audit_logger.log(
+                    session_id,
+                    AuditPhase.RESPONSE,
+                    AuditEventType.FAILURE,
+                    "幻觉守卫: 写工具返回失败但模型声称完成，强制重试",
+                    {"tool_failures": write_tool_failures[:5], "original_response": final_content[:500]},
+                )
+                await send_to_client({
+                    "type": "trace",
+                    "phase": "response",
+                    "event_type": "failure",
+                    "content": "⚠️ 写操作工具返回失败，但模型声称已完成，已强制重新分析",
+                })
+                messages.append({"role": "assistant", "content": final_content})
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[系统强制纠正] 本轮写操作工具已经真实调用，但返回失败："
+                        f"{failure_summary}。你上一条回复却声称操作已完成。"
+                        "请重新生成回复：必须明确说明操作未成功/未完成，并基于工具错误给出下一步建议；"
+                        "除非再次调用工具并得到 success=True，否则绝不能说已完成。"
+                    ),
+                })
+                continue
             break
 
     final_response = llm_response.get("content", "") or "分析完成，请查看推理链路了解详情。"

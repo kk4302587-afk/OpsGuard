@@ -1,9 +1,10 @@
 """Knowledge base API endpoints."""
 
 import aiosqlite
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app.database import get_knowledge_db_path
+from app.knowledge.store import KnowledgeSearchError, knowledge_store
 
 router = APIRouter()
 
@@ -24,13 +25,8 @@ async def list_knowledge():
 @router.get("/search")
 async def search_knowledge(q: str):
     """Search knowledge base by problem description."""
-    async with aiosqlite.connect(get_knowledge_db_path()) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT id, problem_signature, diagnosis_path, solution, tools_used, success_count "
-            "FROM knowledge_entries WHERE problem_signature LIKE ? ORDER BY success_count DESC LIMIT 10",
-            (f"%{q}%",),
-        )
-        rows = await cursor.fetchall()
-        entries = [dict(row) for row in rows]
+    try:
+        entries = await knowledge_store.search(q, limit=10)
+    except KnowledgeSearchError as e:
+        raise HTTPException(status_code=500, detail=f"Knowledge search failed: {e}") from e
     return {"entries": entries}
