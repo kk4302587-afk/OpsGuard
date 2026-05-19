@@ -375,6 +375,65 @@ else:
 - Tool test proving failed sources are preserved in `source_status`.
 - Agent node test proving trace evidence and prompt context are produced.
 
+## Scenario: Incident-Memory Knowledge Entries
+
+### 1. Scope / Trigger
+- Trigger: any change to knowledge schema, knowledge save/search, Agent
+  knowledge extraction, or knowledge retrieval trace formatting.
+- Goal: historical experience should be structured incident memory with
+  evidence, applicability, and reuse safety, not vague free-form advice.
+
+### 2. Signatures
+- Schema helper: `ensure_knowledge_schema(db: aiosqlite.Connection) -> None`
+- Save: `save_resolution(problem_signature, diagnosis_path, solution, tools_used, incident_memory=None)`
+- Search: `knowledge_store.search(query, limit=5) -> list[dict]`
+- Structured fields:
+  - `symptoms`
+  - `root_cause`
+  - `evidence`
+  - `successful_actions`
+  - `failed_attempts`
+  - `validation_method`
+  - `applicability_conditions`
+  - `non_applicability_conditions`
+  - `source_incident_id`
+  - `confidence`
+
+### 3. Contracts
+- Existing `knowledge_entries` tables must migrate with safe
+  `ALTER TABLE ... ADD COLUMN`; legacy rows remain searchable.
+- JSON/list fields are stored as JSON text and parsed at API/search boundaries.
+- Search scoring includes both legacy text fields and structured incident-memory
+  fields.
+- Search results include `match_score`, `match_reason`, structured fields, and
+  `safe_to_reuse`.
+- `safe_to_reuse` requires validation and applicability data; historical write
+  actions still require fresh checks and approval.
+- Knowledge search failures must raise/emit failure and must not be reported as
+  "no related history".
+
+### 4. Validation & Error Matrix
+- Legacy table -> migration adds structured columns without dropping rows.
+- Structured save -> fields persist and update on repeated problem signatures.
+- Legacy row search -> returns empty structured lists/defaults, not crashes.
+- Search backend failure -> `KnowledgeSearchError`, trace failure.
+- Historical write action -> prompt says it is reference only until fresh
+  execution and approval.
+
+### 5. Good/Base/Bad Cases
+- Good: nginx 502 history returns root cause, evidence, validation method,
+  applicability, and match reason.
+- Base: old `problem/solution` row still matches and returns
+  `safe_to_reuse: false`.
+- Bad: Agent directly replays a historical `restart_service` action without
+  fresh tool execution and approval.
+
+### 6. Tests Required
+- Legacy schema migration test.
+- Structured save/search test.
+- Legacy compatibility search test.
+- Agent knowledge trace formatting test.
+
 ---
 
 ## Testing

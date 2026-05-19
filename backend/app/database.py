@@ -38,18 +38,9 @@ async def init_db():
 
     # Initialize knowledge database
     async with aiosqlite.connect(settings.knowledge.db_path) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS knowledge_entries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                problem_signature TEXT NOT NULL,
-                diagnosis_path TEXT NOT NULL,
-                solution TEXT NOT NULL,
-                tools_used TEXT,
-                success_count INTEGER DEFAULT 1,
-                last_used DATETIME DEFAULT CURRENT_TIMESTAMP,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+        from app.knowledge.store import ensure_knowledge_schema
+
+        await ensure_knowledge_schema(db)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,

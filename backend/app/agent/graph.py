@@ -33,6 +33,7 @@ from app.knowledge.store import KnowledgeSearchError, knowledge_store
 class AgentState(TypedDict):
     """State maintained throughout the Agent workflow."""
     session_id: str
+    incident_id: str
     user_message: str
     messages: list  # Conversation history (OpenAI format)
     final_response: str
@@ -161,17 +162,20 @@ async def knowledge_retrieval_node(state: AgentState) -> dict:
     if knowledge_context:
         knowledge_hint = "\n\n## 历史经验参考\n"
         for entry in knowledge_context:
-            knowledge_hint += f"- 问题: {entry['problem_signature']}\n  解决: {entry['solution']}\n"
+            knowledge_hint += _format_knowledge_entry_for_prompt(entry)
         await send_to_client(trace_event(
             phase="knowledge_retrieval",
             event_type="success",
-            content=f"找到 {len(knowledge_context)} 条相关经验",
+            content=_format_knowledge_entries_for_trace(knowledge_context),
             evidence=knowledge_evidence(
                 len(knowledge_context),
                 [
                     {
                         "problem": entry.get("problem_signature"),
-                        "score": entry.get("score"),
+                        "score": entry.get("match_score"),
+                        "match_reason": entry.get("match_reason"),
+                        "root_cause": entry.get("root_cause"),
+                        "safe_to_reuse": entry.get("safe_to_reuse"),
                     }
                     for entry in knowledge_context
                 ],
@@ -311,6 +315,7 @@ async def recent_changes_node(state: AgentState) -> dict:
 async def reasoning_node(state: AgentState) -> dict:
     """Node 4: LLM reasoning with tool calling loop."""
     session_id = state["session_id"]
+    incident_id = state.get("incident_id", "")
     user_message = state["user_message"]
     send_to_client = state["send_to_client"]
     risk_warning = state.get("risk_warning", "")
@@ -758,6 +763,18 @@ async def knowledge_save_node(state: AgentState) -> dict:
             diagnosis_path=diagnosis,
             solution=solution,
             tools_used=["agent"],
+            incident_memory={
+                "symptoms": summary_data.get("symptoms") or [],
+                "root_cause": summary_data.get("root_cause") or "",
+                "evidence": summary_data.get("evidence") or [],
+                "successful_actions": summary_data.get("successful_actions") or [],
+                "failed_attempts": summary_data.get("failed_attempts") or [],
+                "validation_method": summary_data.get("validation_method") or "",
+                "applicability_conditions": summary_data.get("applicability_conditions") or [],
+                "non_applicability_conditions": summary_data.get("non_applicability_conditions") or [],
+                "source_incident_id": incident_id,
+                "confidence": summary_data.get("confidence") or "medium",
+            },
         )
         await send_to_client({"type": "trace", "phase": "knowledge_save", "event_type": "success", "content": f"经验已保存: {problem[:30]}"})
     except Exception as e:
@@ -883,6 +900,7 @@ async def run_agent(
 
     initial_state: AgentState = {
         "session_id": session_id,
+        "incident_id": incident_id or "",
         "user_message": user_message,
         "messages": conversation_history,
         "final_response": "",
@@ -941,6 +959,55 @@ async def run_agent(
 
 
 # === Helper Functions ===
+
+def _format_knowledge_entry_for_prompt(entry: dict) -> str:
+    """Format structured incident memory for LLM context."""
+    lines = [
+        f"- 问题: {entry.get('problem_signature')}",
+        f"  匹配: {entry.get('match_reason') or '历史文本相似'} (score={entry.get('match_score')})",
+    ]
+    if entry.get("symptoms"):
+        lines.append(f"  症状: {', '.join(map(str, entry.get('symptoms') or []))}")
+    if entry.get("root_cause"):
+        lines.append(f"  根因: {entry.get('root_cause')}")
+    if entry.get("evidence"):
+        evidence_preview = "; ".join(map(str, (entry.get("evidence") or [])[:3]))
+        lines.append(f"  证据: {evidence_preview}")
+    if entry.get("successful_actions"):
+        actions_preview = "; ".join(map(str, (entry.get("successful_actions") or [])[:3]))
+        lines.append(f"  有效动作: {actions_preview}")
+    if entry.get("failed_attempts"):
+        failed_preview = "; ".join(map(str, (entry.get("failed_attempts") or [])[:3]))
+        lines.append(f"  无效尝试: {failed_preview}")
+    if entry.get("validation_method"):
+        lines.append(f"  验证方法: {entry.get('validation_method')}")
+    if entry.get("applicability_conditions"):
+        lines.append(f"  适用条件: {', '.join(map(str, entry.get('applicability_conditions') or []))}")
+    if entry.get("non_applicability_conditions"):
+        lines.append(f"  不适用条件: {', '.join(map(str, entry.get('non_applicability_conditions') or []))}")
+    lines.append(
+        "  复用安全性: "
+        + ("可作为参考，但写操作仍需重新检查和审批" if entry.get("safe_to_reuse") else "仅供参考，不能直接复用写操作")
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _format_knowledge_entries_for_trace(entries: list[dict]) -> str:
+    """Format knowledge hits for the trace panel."""
+    lines = [f"找到 {len(entries)} 条相关事故记忆"]
+    for entry in entries:
+        lines.append(
+            f"- {entry.get('problem_signature')} "
+            f"(score={entry.get('match_score')}, safe_to_reuse={entry.get('safe_to_reuse')})"
+        )
+        if entry.get("match_reason"):
+            lines.append(f"  match_reason: {entry.get('match_reason')}")
+        if entry.get("root_cause"):
+            lines.append(f"  root_cause: {entry.get('root_cause')}")
+        if entry.get("validation_method"):
+            lines.append(f"  validation: {entry.get('validation_method')}")
+    return "\n".join(lines)
+
 
 async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_to_client) -> str | None:
     """Pre-execution impact assessment for high-risk operations."""
@@ -1222,8 +1289,23 @@ async def _extract_resolution_summary(messages: list, final_response: str) -> di
                 "禁止使用\"继续\"、\"执行\"、\"完成上一步\"等依赖上下文的指代词。\n"
                 "3. 如果对话没有形成实质性的问题解决（用户只是闲聊；agent 没真正调用任何工具；"
                 "或问题不明确无法概括），回复字符串 null。\n\n"
+                "4. 结构化字段只能来自对话和真实工具结果；如果没有证据，字段用空数组或空字符串，不要编造。\n"
+                "5. 历史写操作不能被描述为可直接复用；必须强调需要 fresh check 和审批。\n\n"
                 "严格按以下 JSON 之一回复，不要任何解释文字：\n"
-                "{\"problem\": \"自包含的问题简述(≤30字)\", \"diagnosis\": \"诊断步骤简述\", \"solution\": \"解决方案简述\"}\n"
+                "{"
+                "\"problem\": \"自包含的问题简述(≤30字)\", "
+                "\"diagnosis\": \"诊断步骤简述\", "
+                "\"solution\": \"解决方案简述\", "
+                "\"symptoms\": [\"症状/告警/用户可观察现象\"], "
+                "\"root_cause\": \"已确认根因；未确认则为空字符串\", "
+                "\"evidence\": [\"真实工具输出/日志/状态/配置证据摘要\"], "
+                "\"successful_actions\": [\"成功执行且有工具结果支持的动作\"], "
+                "\"failed_attempts\": [\"失败或被拒绝/跳过的尝试\"], "
+                "\"validation_method\": \"如何验证已解决；未验证则为空字符串\", "
+                "\"applicability_conditions\": [\"什么条件下可参考该经验\"], "
+                "\"non_applicability_conditions\": [\"什么条件下不应复用\"], "
+                "\"confidence\": \"low|medium|high\""
+                "}\n"
                 "或：\n"
                 "null"
             ),
