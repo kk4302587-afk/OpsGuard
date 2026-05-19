@@ -170,3 +170,36 @@ Added session-aware topology RCA annotations from incident/audit evidence, merge
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: Implement automated handoff and postmortem drafts
+
+**Date**: 2026-05-19
+**Task**: Implement automated handoff and postmortem drafts
+**Branch**: `main`
+
+### Summary
+
+Added deterministic incident handoff and postmortem Markdown draft generation from incident timeline evidence, exposed incident draft endpoints, added OpsReport draft actions, and verified confirmed facts stay separate from inferred hypotheses/placeholders.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `292deee` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
