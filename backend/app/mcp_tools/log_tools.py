@@ -4,7 +4,7 @@ Atomic tools for system and service log analysis.
 """
 
 import subprocess
-from app.mcp_tools.process_tools import ToolResult
+from app.mcp_tools.process_tools import ToolResult, command_error
 
 
 def get_journal_logs(
@@ -32,6 +32,8 @@ def get_journal_logs(
             cmd.extend(["-p", priority])
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -47,6 +49,8 @@ def get_recent_errors(lines: int = 30) -> ToolResult:
     try:
         cmd = ["journalctl", "--no-pager", "-p", "err", "-n", str(lines), "--since", "24h ago"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -103,8 +107,12 @@ def search_logs(pattern: str, filepath: str | None = None, lines: int = 30) -> T
             cmd = ["journalctl", "--no-pager", "-g", pattern, "-n", str(lines), "--since", "24h ago"]
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode not in (0, 1):
+            return ToolResult(success=False, data="", error=command_error(result))
 
         output_lines = result.stdout.strip().split("\n")[:lines]
+        if output_lines == [""]:
+            output_lines = []
         return ToolResult(
             success=True,
             data={"matches": output_lines, "count": len(output_lines)},
@@ -118,6 +126,8 @@ def get_boot_logs() -> ToolResult:
     try:
         cmd = ["journalctl", "--no-pager", "-b", "0", "-p", "warning", "-n", "100"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))

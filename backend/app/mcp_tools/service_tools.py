@@ -4,7 +4,7 @@ Atomic tools for inspecting and managing system services.
 """
 
 import subprocess
-from app.mcp_tools.process_tools import ToolResult
+from app.mcp_tools.process_tools import ToolResult, command_error
 
 
 def list_services(state: str | None = None) -> ToolResult:
@@ -19,6 +19,8 @@ def list_services(state: str | None = None) -> ToolResult:
             cmd.extend([f"--state={state}"])
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -33,6 +35,8 @@ def get_service_status(service: str) -> ToolResult:
     try:
         cmd = ["systemctl", "status", service, "--no-pager"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0 and "could not be found" in (result.stdout + result.stderr).lower():
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -43,6 +47,8 @@ def get_failed_services() -> ToolResult:
     try:
         cmd = ["systemctl", "--failed", "--no-pager"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -113,6 +119,8 @@ def get_service_logs(service: str, lines: int = 50) -> ToolResult:
     try:
         cmd = ["journalctl", "-u", service, "--no-pager", "-n", str(lines)]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))

@@ -4,7 +4,7 @@ Atomic tools for disk space analysis and file management.
 """
 
 import subprocess
-from app.mcp_tools.process_tools import ToolResult
+from app.mcp_tools.process_tools import ToolResult, command_error
 
 
 def get_disk_usage(path: str = "/") -> ToolResult:
@@ -16,6 +16,8 @@ def get_disk_usage(path: str = "/") -> ToolResult:
     try:
         cmd = ["df", "-h", path]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -32,8 +34,12 @@ def find_large_files(path: str = "/", min_size: str = "100M", limit: int = 20) -
     try:
         cmd = ["find", path, "-type", "f", "-size", f"+{min_size}", "-exec", "ls", "-lh", "{}", ";"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
 
         files = result.stdout.strip().split("\n")[:limit]
+        if files == [""]:
+            files = []
         return ToolResult(success=True, data={"files": files, "count": len(files)})
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -48,6 +54,8 @@ def get_directory_size(path: str) -> ToolResult:
     try:
         cmd = ["du", "-sh", path]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -58,6 +66,8 @@ def get_inode_usage() -> ToolResult:
     try:
         cmd = ["df", "-i"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -73,6 +83,8 @@ def check_file_info(filepath: str) -> ToolResult:
         # File stat
         cmd = ["stat", filepath]
         stat_result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if stat_result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(stat_result))
 
         # Check what processes have the file open
         lsof_cmd = ["lsof", filepath]

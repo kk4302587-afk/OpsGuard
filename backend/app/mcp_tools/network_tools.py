@@ -4,7 +4,7 @@ Atomic tools for network status and connection analysis.
 """
 
 import subprocess
-from app.mcp_tools.process_tools import ToolResult
+from app.mcp_tools.process_tools import ToolResult, command_error
 
 
 def get_listening_ports() -> ToolResult:
@@ -12,6 +12,8 @@ def get_listening_ports() -> ToolResult:
     try:
         cmd = ["ss", "-tlnp"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -26,6 +28,8 @@ def get_connections(state: str = "established") -> ToolResult:
     try:
         cmd = ["ss", "-tnp", "state", state]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -36,6 +40,8 @@ def get_connection_count() -> ToolResult:
     try:
         cmd = ["ss", "-s"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -50,6 +56,8 @@ def check_port(port: int) -> ToolResult:
     try:
         cmd = ["ss", "-tlnp", f"sport = :{port}"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -67,6 +75,8 @@ def ping_host(host: str, count: int = 4) -> ToolResult:
     try:
         cmd = ["ping", "-c", str(count), "-W", "3", host]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=count * 4 + 5)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))

@@ -7,7 +7,7 @@ import subprocess
 import hashlib
 from pathlib import Path
 
-from app.mcp_tools.process_tools import ToolResult
+from app.mcp_tools.process_tools import ToolResult, command_error
 
 
 def read_config_file(filepath: str) -> ToolResult:
@@ -60,14 +60,28 @@ def check_config_syntax(filepath: str) -> ToolResult:
         elif filepath.endswith(".json"):
             cmd = ["python3", "-c", f"import json; json.load(open('{filepath}'))"]
         else:
-            return ToolResult(success=True, data="No syntax checker available for this file type")
+            return ToolResult(
+                success=True,
+                data={
+                    "checked": False,
+                    "valid": None,
+                    "message": "No syntax checker available for this file type",
+                },
+            )
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
         if result.returncode == 0:
-            return ToolResult(success=True, data="Syntax OK")
-        else:
-            return ToolResult(success=True, data={"errors": result.stderr.strip()})
+            return ToolResult(success=True, data={"checked": True, "valid": True, "message": "Syntax OK"})
+        return ToolResult(
+            success=True,
+            data={
+                "checked": True,
+                "valid": False,
+                "errors": result.stderr.strip() or result.stdout.strip(),
+                "exit_code": result.returncode,
+            },
+        )
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
 
@@ -131,6 +145,8 @@ def list_config_files(directory: str = "/etc") -> ToolResult:
     try:
         cmd = ["find", directory, "-maxdepth", "2", "-name", "*.conf", "-o", "-name", "*.cfg", "-o", "-name", "*.yaml", "-o", "-name", "*.yml"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode not in (0, 1):
+            return ToolResult(success=False, data="", error=command_error(result))
 
         files = [f for f in result.stdout.strip().split("\n") if f]
         return ToolResult(success=True, data={"files": files, "count": len(files)})

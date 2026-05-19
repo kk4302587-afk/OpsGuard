@@ -29,6 +29,7 @@ class DynamicEdge(BaseModel):
     source: str
     target: str
     relation: str
+    inferred: bool = False
 
 
 class DynamicUpdate(BaseModel):
@@ -62,11 +63,11 @@ async def get_topology_graph():
                 "highlight": False,
             })
 
-    def add_edge(source: str, target: str, relation: str):
+    def add_edge(source: str, target: str, relation: str, inferred: bool = False):
         edge_key = f"{source}->{target}:{relation}"
         if edge_key not in seen_edges:
             seen_edges.add(edge_key)
-            edges.append({"source": source, "target": target, "relation": relation})
+            edges.append({"source": source, "target": target, "relation": relation, "inferred": inferred})
 
     # Collect listening processes and their ports
     try:
@@ -135,7 +136,7 @@ async def get_topology_graph():
                             if node["category"] == "process":
                                 proc_name_lower = node["name"].split(" ")[0].lower()  # e.g. "nginx" from "nginx (PID:123)"
                                 if proc_name_lower == svc_name.lower() or proc_name_lower.startswith(svc_name.lower()):
-                                    add_edge(svc_id, node["id"], "manages")
+                                    add_edge(svc_id, node["id"], "manages", inferred=True)
         except (FileNotFoundError, Exception):
             pass
 
@@ -153,7 +154,7 @@ async def get_topology_graph():
                 add_node(conf_id, conf_path.split("/")[-1], "config")
                 svc_id = f"svc_{svc_name}"
                 if svc_id in seen_nodes:
-                    add_edge(svc_id, conf_id, "configured_by")
+                    add_edge(svc_id, conf_id, "configured_by", inferred=True)
 
     # Categories
     categories = [
@@ -197,6 +198,7 @@ async def get_topology_with_diagnosis(session_id: str):
                 "source": edge.source,
                 "target": edge.target,
                 "relation": edge.relation,
+                "inferred": edge.inferred,
             })
 
         # Mark fault nodes

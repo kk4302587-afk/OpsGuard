@@ -10,6 +10,7 @@
 - Docstrings on all public functions and classes
 - `async def` for all I/O operations (DB, network, subprocess)
 - `subprocess.run(..., timeout=N)` — always set timeout
+- Check `CompletedProcess.returncode` before returning `ToolResult(success=True)` for subprocess-backed tools. Handle documented non-zero data cases explicitly.
 - `ToolResult` return type for all MCP tools
 - Risk level annotation for all registered tools
 
@@ -37,6 +38,8 @@
 - Protected paths list checked before any write operation
 - Before/after change diffs must use a live pre-execution snapshot captured immediately before the write tool runs. Never hardcode "Before" values from assumptions.
 - Write-completion hallucination guards must consider the user's current write intent, not only completion-looking words in the final response. Read-only analysis may legitimately describe system state with phrases such as "已启动".
+- Firewall writes must verify reload/runtime state before returning success.
+- Inferred topology relationships must be marked with `inferred: true`; observed runtime relationships should use `inferred: false`.
 
 ---
 
@@ -45,5 +48,6 @@
 - Manual testing via API calls and browser
 - `python -c "from app.main import app"` — smoke test for import chain
 - `python backend/test_write_guard.py` — focused regression for write-completion guard false positives
+- `python backend/test_fake_success_outputs.py` — focused regression for fake success / inferred-output handling
 - Security rules tested via `test_rules.py` pattern (create, run, delete)
 - TypeScript `npx tsc --noEmit` for frontend

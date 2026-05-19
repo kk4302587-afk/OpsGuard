@@ -5,7 +5,7 @@ Tools for managing system users, groups, and access control.
 
 import subprocess
 
-from app.mcp_tools.process_tools import ToolResult
+from app.mcp_tools.process_tools import ToolResult, command_error
 
 
 def list_users() -> ToolResult:
@@ -13,6 +13,8 @@ def list_users() -> ToolResult:
     try:
         cmd = ["cat", "/etc/passwd"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
 
         users = []
         for line in result.stdout.strip().split("\n"):
@@ -39,6 +41,8 @@ def list_groups() -> ToolResult:
     try:
         cmd = ["cat", "/etc/group"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
 
         groups = []
         for line in result.stdout.strip().split("\n"):

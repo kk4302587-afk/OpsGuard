@@ -5,7 +5,7 @@ Tools for viewing, creating, and managing cron jobs.
 
 import subprocess
 
-from app.mcp_tools.process_tools import ToolResult
+from app.mcp_tools.process_tools import ToolResult, command_error
 
 
 def list_cron_jobs(user: str = "") -> ToolResult:
@@ -42,6 +42,8 @@ def list_system_timers() -> ToolResult:
     try:
         cmd = ["systemctl", "list-timers", "--all", "--no-pager"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
@@ -67,7 +69,12 @@ def add_cron_job(schedule: str, command: str, user: str = "") -> ToolResult:
             get_cmd.extend(["-u", user])
 
         existing = subprocess.run(get_cmd, capture_output=True, text=True, timeout=5)
-        current_crontab = existing.stdout if existing.returncode == 0 else ""
+        if existing.returncode == 0:
+            current_crontab = existing.stdout
+        elif "no crontab" in existing.stderr.lower():
+            current_crontab = ""
+        else:
+            return ToolResult(success=False, data="", error=command_error(existing))
 
         # Append new job
         new_line = f"{schedule} {command}"

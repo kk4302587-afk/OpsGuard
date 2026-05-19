@@ -7,7 +7,7 @@ Supports apt (Debian/Ubuntu/Kylin) and yum/dnf (RHEL/CentOS).
 import subprocess
 import platform
 
-from app.mcp_tools.process_tools import ToolResult
+from app.mcp_tools.process_tools import ToolResult, command_error
 
 
 def _detect_package_manager() -> str:
@@ -40,6 +40,8 @@ def list_installed_packages(filter_name: str = "") -> ToolResult:
             return ToolResult(success=False, data="", error="未检测到支持的包管理器")
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         lines = result.stdout.strip().split("\n")
 
         if filter_name:
@@ -68,6 +70,8 @@ def search_package(name: str) -> ToolResult:
             return ToolResult(success=False, data="", error="未检测到支持的包管理器")
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         lines = result.stdout.strip().split("\n")[:20]
         return ToolResult(success=True, data={"results": lines, "count": len(lines)})
     except Exception as e:
@@ -129,7 +133,9 @@ def check_package_updates() -> ToolResult:
     pm = _detect_package_manager()
     try:
         if pm == "apt":
-            subprocess.run(["sudo", "apt-get", "update", "-qq"], capture_output=True, timeout=60)
+            update = subprocess.run(["sudo", "apt-get", "update", "-qq"], capture_output=True, text=True, timeout=60)
+            if update.returncode != 0:
+                return ToolResult(success=False, data="", error=command_error(update))
             cmd = ["apt", "list", "--upgradable"]
         elif pm == "dnf":
             cmd = ["dnf", "check-update", "--quiet"]
@@ -139,6 +145,12 @@ def check_package_updates() -> ToolResult:
             return ToolResult(success=False, data="", error="未检测到支持的包管理器")
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if pm in ("dnf", "yum"):
+            # dnf/yum use exit code 100 to mean updates are available.
+            if result.returncode not in (0, 100):
+                return ToolResult(success=False, data="", error=command_error(result))
+        elif result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         lines = [l for l in result.stdout.strip().split("\n") if l.strip()]
         return ToolResult(success=True, data={"updates_available": lines[:30], "count": len(lines)})
     except Exception as e:

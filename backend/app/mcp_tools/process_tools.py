@@ -15,6 +15,14 @@ class ToolResult:
     error: str | None = None
 
 
+def command_error(result: subprocess.CompletedProcess, fallback: str = "Command failed") -> str:
+    """Format a subprocess failure without losing stderr/stdout context."""
+    stderr = result.stderr.strip() if isinstance(result.stderr, str) else ""
+    stdout = result.stdout.strip() if isinstance(result.stdout, str) else ""
+    detail = stderr or stdout or fallback
+    return f"{detail} (exit code {result.returncode})"
+
+
 def list_processes(sort_by: str = "cpu", limit: int = 20) -> ToolResult:
     """List running processes sorted by resource usage.
 
@@ -43,6 +51,8 @@ def find_zombie_processes() -> ToolResult:
     try:
         cmd = ["ps", "aux"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
 
         zombies = [
             line for line in result.stdout.split("\n") if "Z" in line.split()[7:8] or "defunct" in line

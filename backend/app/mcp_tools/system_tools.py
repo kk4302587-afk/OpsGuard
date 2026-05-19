@@ -6,7 +6,7 @@ These are convenience tools - the Agent can always use atomic tools instead.
 
 import subprocess
 import platform
-from app.mcp_tools.process_tools import ToolResult
+from app.mcp_tools.process_tools import ToolResult, command_error
 
 
 def system_overview() -> ToolResult:
@@ -32,16 +32,22 @@ def system_overview() -> ToolResult:
         # Memory
         cmd = ["free", "-h"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         data["memory"] = result.stdout.strip()
 
         # Disk
         cmd = ["df", "-h", "/"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         data["disk_root"] = result.stdout.strip()
 
         # CPU info
         cmd = ["nproc"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         data["cpu_cores"] = result.stdout.strip()
 
         # Kernel
@@ -66,6 +72,8 @@ def health_check() -> ToolResult:
         # Check disk usage
         cmd = ["df", "--output=pcent,target", "-x", "tmpfs", "-x", "devtmpfs"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         for line in result.stdout.strip().split("\n")[1:]:
             parts = line.strip().split()
             if parts and int(parts[0].rstrip("%")) > 90:
@@ -74,6 +82,8 @@ def health_check() -> ToolResult:
         # Check memory
         cmd = ["free", "--bytes"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         lines = result.stdout.strip().split("\n")
         if len(lines) > 1:
             mem_parts = lines[1].split()
@@ -86,6 +96,8 @@ def health_check() -> ToolResult:
         # Check for zombie processes
         cmd = ["ps", "aux"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         zombies = [l for l in result.stdout.split("\n") if " Z " in l or "defunct" in l]
         if zombies:
             issues.append({"type": "zombie", "severity": "medium", "detail": f"{len(zombies)} zombie processes"})
@@ -93,6 +105,8 @@ def health_check() -> ToolResult:
         # Check failed services
         cmd = ["systemctl", "--failed", "--no-pager", "--plain"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         if "0 loaded" not in result.stdout:
             failed_lines = [l for l in result.stdout.split("\n") if ".service" in l]
             if failed_lines:
@@ -137,6 +151,8 @@ def get_user_sessions() -> ToolResult:
     try:
         cmd = ["who"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))

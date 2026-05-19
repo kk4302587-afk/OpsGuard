@@ -113,6 +113,8 @@ async def execute_runbook(
             session_id, AuditPhase.TOOL_CALL, AuditEventType.START,
             f"Runbook step {idx}: {tool_name}", {"args": tool_args},
         )
+        before_change_state = None
+        backup_record = None
 
         # === Rule-engine command check (re-run because patterns may have evolved) ===
         cmd_check = _guardrail.check_command(json.dumps(tool_args))
@@ -174,14 +176,20 @@ async def execute_runbook(
                 from app.mcp_tools.backup import backup_manager
                 target_path = tool_args.get("filepath") or tool_args.get("path") or tool_args.get("service")
                 if target_path and isinstance(target_path, str):
-                    rec = backup_manager.backup_file(target_path, operation=f"runbook:{tool_name}")
-                    if rec:
+                    backup_record = backup_manager.backup_file(target_path, operation=f"runbook:{tool_name}")
+                    if backup_record:
                         await send_to_client({
                             "type": "trace", "phase": "execution", "event_type": "start",
                             "content": f"{step_header} 已备份 {target_path}",
                         })
             except Exception as e:
                 logger.debug(f"Runbook backup skipped: {e}")
+
+            try:
+                from app.agent.graph import _capture_pre_change_state
+                before_change_state = _capture_pre_change_state(tool_name, tool_args, backup_record)
+            except Exception as e:
+                logger.debug(f"Runbook pre-change snapshot skipped: {e}")
 
         # === Execute ===
         try:
@@ -191,11 +199,49 @@ async def execute_runbook(
             success = (
                 result_repr.get("success", True) if isinstance(result_repr, dict) else True
             )
+            verification_error: str | None = None
 
             executed.append({
                 "step": idx, "tool": tool_name,
                 "success": success, "preview": result_str[:200],
             })
+
+            if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
+                try:
+                    from app.agent.graph import _capture_change_diff, _verify_tool_result
+
+                    verification = _verify_tool_result(tool_name, tool_args, result)
+                    if verification:
+                        await send_to_client({
+                            "type": "trace",
+                            "phase": "verification",
+                            "event_type": verification["status"],
+                            "content": f"{step_header} {verification['message']}",
+                        })
+                        if verification["status"] == "failure":
+                            success = False
+                            verification_error = verification["message"]
+                            executed[-1]["success"] = False
+
+                    change_diff = _capture_change_diff(tool_name, tool_args, backup_record, before_change_state)
+                    if change_diff:
+                        await send_to_client({
+                            "type": "trace",
+                            "phase": "verification",
+                            "event_type": "success",
+                            "content": f"{step_header} 变更对比:\n{change_diff}",
+                        })
+                except Exception as e:
+                    logger.warning(f"Runbook verification failed for step {idx}: {e}")
+                    success = False
+                    verification_error = f"验证异常: {e}"
+                    executed[-1]["success"] = False
+                    await send_to_client({
+                        "type": "trace",
+                        "phase": "verification",
+                        "event_type": "failure",
+                        "content": f"{step_header} 验证异常: {e}",
+                    })
 
             if success:
                 await audit_logger.log(
@@ -208,7 +254,7 @@ async def execute_runbook(
                 })
             else:
                 err_msg = (
-                    result_repr.get("error", "工具返回 success=False")
+                    verification_error or result_repr.get("error", "工具返回 success=False")
                     if isinstance(result_repr, dict) else "工具返回失败"
                 )
                 await audit_logger.log(
