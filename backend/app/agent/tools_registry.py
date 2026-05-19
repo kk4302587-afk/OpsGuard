@@ -97,6 +97,8 @@ _DISPLAY_NAMES: dict[str, str] = {
     "list_system_timers": "systemd 定时器",
     "add_cron_job": "添加定时任务",
     "remove_cron_job": "删除定时任务",
+    "list_backups": "备份列表",
+    "rollback_backup": "恢复备份",
 }
 
 
@@ -115,6 +117,10 @@ class ToolDefinition:
     risk_level: RiskLevel
     category: str  # process, disk, network, log, service, config, system, ...
     display_name: str = field(default="")
+    supports_preview: bool = False
+    preview_strategy: str = "none"
+    supports_rollback: bool = False
+    rollback_strategy: str = "none"
 
 
 class ToolsRegistry:
@@ -588,6 +594,24 @@ class ToolsRegistry:
             "required": ["pattern"],
         }, cron_tools.remove_cron_job, RiskLevel.WRITE, "cron")
 
+        from app.mcp_tools import backup
+
+        self._register("list_backups", "List OpsGuard backup and rollback points", {
+            "type": "object",
+            "properties": {
+                "filepath": {"type": "string", "description": "Optional original file path filter", "default": ""},
+                "limit": {"type": "integer", "description": "Maximum records to return", "default": 20},
+            },
+        }, backup.list_backups, RiskLevel.READ, "backup")
+
+        self._register("rollback_backup", "Restore a file or directory by backup id. Requires approval.", {
+            "type": "object",
+            "properties": {
+                "backup_id": {"type": "string", "description": "Backup record id"},
+            },
+            "required": ["backup_id"],
+        }, backup.rollback_backup, RiskLevel.DESTRUCTIVE, "backup")
+
         logger.info(f"Tools registry loaded: {len(self._tools)} tools")
 
     def _register(
@@ -601,6 +625,8 @@ class ToolsRegistry:
     ):
         """Register a single tool. display_name is auto-looked-up from
         ``_DISPLAY_NAMES``; falls back to ``name`` if not registered there."""
+        supports_preview, preview_strategy = self._preview_capability(name, category)
+        supports_rollback, rollback_strategy = self._rollback_capability(name, category)
         self._tools[name] = ToolDefinition(
             name=name,
             description=description,
@@ -609,7 +635,27 @@ class ToolsRegistry:
             risk_level=risk_level,
             category=category,
             display_name=_DISPLAY_NAMES.get(name, name),
+            supports_preview=supports_preview,
+            preview_strategy=preview_strategy,
+            supports_rollback=supports_rollback,
+            rollback_strategy=rollback_strategy,
         )
+
+    def _preview_capability(self, name: str, category: str) -> tuple[bool, str]:
+        """Return best-known preview support for a tool."""
+        if name in {"diff_config", "check_config_syntax"}:
+            return True, "diff" if name == "diff_config" else "check_mode"
+        if category in {"file", "service", "process", "package", "firewall", "cron", "user", "backup"}:
+            return False, "impact_only"
+        return False, "none"
+
+    def _rollback_capability(self, name: str, category: str) -> tuple[bool, str]:
+        """Return best-known rollback support for a tool."""
+        if name in {"write_file", "delete_file", "delete_directory", "move_file", "change_permissions", "change_owner"}:
+            return True, "backup"
+        if name == "rollback_backup":
+            return False, "manual"
+        return False, "none"
 
     def get_tool(self, name: str) -> ToolDefinition | None:
         """Get a tool by name."""

@@ -13,6 +13,7 @@ from pathlib import Path
 from loguru import logger
 
 from app.config import settings
+from app.mcp_tools.process_tools import ToolResult
 
 
 class BackupManager:
@@ -213,3 +214,33 @@ class BackupManager:
 
 # Global backup manager instance
 backup_manager = BackupManager()
+
+
+def list_backups(filepath: str = "", limit: int = 20) -> ToolResult:
+    """List real backup records from the backup manifest."""
+    try:
+        records = backup_manager.get_backups(filepath=filepath or None, limit=limit)
+        return ToolResult(success=True, data={"backups": records, "count": len(records)})
+    except Exception as e:
+        return ToolResult(success=False, data="", error=str(e))
+
+
+def rollback_backup(backup_id: str) -> ToolResult:
+    """Restore a backup by id."""
+    try:
+        record = next((r for r in backup_manager.get_backups(limit=1000) if r.get("id") == backup_id), None)
+        if not record:
+            return ToolResult(success=False, data="", error=f"Backup not found: {backup_id}")
+        ok = backup_manager.rollback(backup_id)
+        if not ok:
+            return ToolResult(success=False, data="", error=f"Rollback failed or already restored: {backup_id}")
+        return ToolResult(
+            success=True,
+            data={
+                "backup_id": backup_id,
+                "restored_path": record.get("original_path"),
+                "strategy": "backup",
+            },
+        )
+    except Exception as e:
+        return ToolResult(success=False, data="", error=str(e))

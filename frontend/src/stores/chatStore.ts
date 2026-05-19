@@ -69,6 +69,9 @@ interface ChatStore {
     risk_level: string
     description: string
     impact?: string
+    rollback_strategy?: string
+    supports_rollback?: boolean
+    preview_strategy?: string
   } | null
   clearApproval: () => void
 
@@ -394,6 +397,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               risk_level: data.risk_level,
               description: data.description || '',
               impact: data.impact || undefined,
+              rollback_strategy: data.rollback_strategy,
+              supports_rollback: data.supports_rollback,
+              preview_strategy: data.preview_strategy,
             },
             messages: [
               ...state.messages,

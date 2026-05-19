@@ -282,6 +282,9 @@ async def reasoning_node(state: AgentState) -> dict:
                         "risk_level": tool_def.risk_level,
                         "description": tool_def.description,
                         "impact": impact_text,
+                        "rollback_strategy": tool_def.rollback_strategy,
+                        "supports_rollback": tool_def.supports_rollback,
+                        "preview_strategy": tool_def.preview_strategy,
                     })
                     await send_to_client(trace_event(
                         phase="approval_request",
@@ -408,6 +411,27 @@ async def reasoning_node(state: AgentState) -> dict:
                             ))
 
                     if result_success:
+                        if backup_record:
+                            await send_to_client(trace_event(
+                                phase="execution",
+                                event_type="success",
+                                content=(
+                                    "Rollback point created:\n"
+                                    f"- rollback_id: {backup_record.get('id')}\n"
+                                    f"- target: {backup_record.get('original_path')}\n"
+                                    "- strategy: backup\n"
+                                    f"- created_at: {backup_record.get('timestamp')}\n"
+                                    "- restore: available through rollback_backup or /api/backups/{id}/rollback"
+                                ),
+                                evidence=build_evidence(
+                                    claim=f"Rollback point is available for {tool_name}",
+                                    evidence_type="config",
+                                    source="BackupManager.backup_file",
+                                    observed=backup_record,
+                                    confidence="high",
+                                    execution_state="executed",
+                                ),
+                            ))
                         await audit_logger.log(session_id, AuditPhase.EXECUTION, AuditEventType.SUCCESS, f"工具执行成功: {tool_name}")
                         await send_to_client(trace_event(
                             phase="execution",
@@ -733,6 +757,18 @@ async def run_agent(
 async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_to_client) -> str | None:
     """Pre-execution impact assessment for high-risk operations."""
     impact_lines = []
+    tool_def = tools_registry.get_tool(tool_name)
+    target = (
+        tool_args.get("filepath")
+        or tool_args.get("dirpath")
+        or tool_args.get("path")
+        or tool_args.get("service")
+        or tool_args.get("pid")
+        or tool_args.get("username")
+        or tool_args.get("backup_id")
+        or "current system"
+    )
+    impact_lines.append(f"Target: {target}")
 
     if tool_name == "kill_process":
         import psutil
@@ -764,8 +800,29 @@ async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_t
             impact_lines.append(f"操作: {action} {service}")
             impact_lines.append("影响: 服务状态将发生变化")
 
+    elif tool_name == "rollback_backup":
+        impact_lines.append("Operation: restore a previous backup")
+        impact_lines.append("Impact: target file/directory will be overwritten by the selected backup")
+
+    elif tool_name in ("write_file", "delete_file", "delete_directory", "move_file", "change_permissions", "change_owner"):
+        impact_lines.append(f"Operation: {tool_name}")
+        impact_lines.append("Impact: file system content or metadata may change")
+
+    if tool_def:
+        preview_text = (
+            f"Preview: {tool_def.preview_strategy}"
+            if tool_def.supports_preview
+            else f"Preview: impact estimate only ({tool_def.preview_strategy})"
+        )
+        impact_lines.append(preview_text)
+        if tool_def.supports_rollback:
+            impact_lines.append(f"Rollback: {tool_def.rollback_strategy} strategy, high confidence when backup creation succeeds")
+        else:
+            impact_lines.append("Rollback: no reliable automated rollback will be claimed")
+        impact_lines.append(f"Verification: post-action check will run when supported for {tool_name}")
+
     if impact_lines:
-        impact_text = "\n".join(impact_lines)
+        impact_text = "\n".join(dict.fromkeys(impact_lines))
         await send_to_client(trace_event(
             phase="planning",
             event_type="start",

@@ -24,6 +24,10 @@
 - Runbook persistence, health, validation, and replay bookkeeping must go
   through `app.agent.runbook_governance`. Do not create or update the
   `runbooks` table inline from API, Agent, or executor code.
+- Write/destructive approval payloads must state preview and rollback coverage
+  truthfully. Only file/directory operations with a real backup may claim
+  backup-based rollback; service/process/package/firewall operations must not
+  claim reliable automated rollback unless implemented by a real inverse action.
 - `ToolResult` return type for all MCP tools
 - Risk level annotation for all registered tools
 
@@ -197,6 +201,71 @@ await record_runbook_result(
     succeeded=failed_step is None,
     failure_reason=abort_reason,
 )
+```
+
+## Scenario: Rollback Visibility and Manual Restore
+
+### 1. Scope / Trigger
+- Trigger: any change to write/destructive tools, approval payloads, backup
+  manager, or rollback APIs/tools.
+- Goal: users can see whether rollback is actually available before approval
+  and can restore backed-up file/directory changes through a controlled path.
+
+### 2. Signatures
+- Tool metadata fields:
+  - `supports_preview: bool`
+  - `preview_strategy: str`
+  - `supports_rollback: bool`
+  - `rollback_strategy: str`
+- APIs:
+  - `GET /api/backups?filepath=&limit=`
+  - `POST /api/backups/{backup_id}/rollback`
+- MCP tools:
+  - `list_backups(filepath="", limit=20) -> ToolResult`
+  - `rollback_backup(backup_id: str) -> ToolResult`
+
+### 3. Contracts
+- `rollback_backup` is `RiskLevel.DESTRUCTIVE`; it must go through the same
+  approval path as other destructive tools.
+- Approval request payloads include `preview_strategy`, `supports_rollback`,
+  and `rollback_strategy`.
+- A successful backed-up write emits a trace rollback point with backup id,
+  target, strategy, created time, and restore availability.
+- Service/process operations may include impact-only previews, but must say no
+  reliable automated rollback exists.
+
+### 4. Validation & Error Matrix
+- Backup id missing -> rollback returns `success=False`.
+- Backup already restored -> rollback returns `success=False`.
+- Backup file missing -> rollback returns `success=False`.
+- File write/delete with successful backup -> rollback point trace is emitted.
+- File write/delete without existing target -> no backup id is claimed.
+
+### 5. Good/Base/Bad Cases
+- Good: writing `/etc/nginx/nginx.conf` creates a backup and trace shows its
+  rollback id.
+- Base: restarting nginx says impact-only preview and no reliable rollback.
+- Bad: claiming a service restart can be rolled back by backup when no inverse
+  action was executed.
+
+### 6. Tests Required
+- Backup list and restore operate on a real temporary file.
+- `rollback_backup` is registered as destructive.
+- Impact text distinguishes file backup rollback from service no-rollback.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```python
+impact_lines.append("Rollback: available")
+```
+
+#### Correct
+```python
+if tool_def.supports_rollback:
+    impact_lines.append(f"Rollback: {tool_def.rollback_strategy} strategy")
+else:
+    impact_lines.append("Rollback: no reliable automated rollback will be claimed")
 ```
 
 ---

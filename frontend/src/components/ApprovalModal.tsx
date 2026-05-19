@@ -17,6 +17,9 @@ interface ApprovalModalProps {
     risk_level: string
     description: string
     impact?: string
+    rollback_strategy?: string
+    supports_rollback?: boolean
+    preview_strategy?: string
   } | null
   onClose: () => void
 }
@@ -99,6 +102,14 @@ function ApprovalModal({ visible, request, onClose }: ApprovalModalProps) {
           </Descriptions.Item>
           <Descriptions.Item label="操作描述">
             <Text>{request.description}</Text>
+          </Descriptions.Item>
+          <Descriptions.Item label="预览/回滚">
+            <Space direction="vertical" size={2}>
+              <Text>预览: {request.preview_strategy || 'impact_only'}</Text>
+              <Text>
+                回滚: {request.supports_rollback ? `${request.rollback_strategy || 'backup'} 可用` : '无可靠自动回滚'}
+              </Text>
+            </Space>
           </Descriptions.Item>
           <Descriptions.Item label="执行命令">
             <Paragraph
