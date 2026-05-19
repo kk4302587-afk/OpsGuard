@@ -38,3 +38,36 @@ Added persistent incidents and timeline events sourced from real Agent/Runbook t
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: Implement change-aware RCA
+
+**Date**: 2026-05-19
+**Task**: Implement change-aware RCA
+**Branch**: `main`
+
+### Summary
+
+Added a read-only recent changes collector, registered get_recent_changes, integrated automatic Agent RCA trace/context evidence, updated progress mapping and backend spec, and added regression tests for real changes and failed source semantics.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `44adad4` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
