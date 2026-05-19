@@ -1,2 +1,0 @@
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Backend smoke and quality checks for changed service tooling"}
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify failure paths remain client-safe and ToolResult-based"}

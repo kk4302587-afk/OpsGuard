@@ -1,3 +1,0 @@
-{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Backend module boundaries for agent and MCP tool changes"}
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Subprocess, type hint, and tool quality requirements"}
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "MCP ToolResult and agent error handling patterns"}
