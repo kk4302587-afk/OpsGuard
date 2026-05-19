@@ -21,6 +21,9 @@
 - Runbook replay traces must include a user-facing execution plan, per-step
   purpose/risk/result summaries, and keep raw tool calls as secondary technical
   detail. Do not make users infer intent from tool names alone.
+- Runbook persistence, health, validation, and replay bookkeeping must go
+  through `app.agent.runbook_governance`. Do not create or update the
+  `runbooks` table inline from API, Agent, or executor code.
 - `ToolResult` return type for all MCP tools
 - Risk level annotation for all registered tools
 
@@ -124,6 +127,76 @@ await send_to_client(trace_event(
         result=result,
     ),
 ))
+```
+
+## Scenario: Runbook Governance Metadata
+
+### 1. Scope / Trigger
+- Trigger: any change to Runbook creation, listing, matching, replay, validation,
+  or database initialization.
+- Goal: saved Runbooks must expose reliability and freshness before users replay
+  them.
+
+### 2. Signatures
+- Schema helper: `ensure_runbook_schema(db: aiosqlite.Connection) -> None`
+- Save/update: `save_or_update_runbook(db, name, description, trigger_pattern, steps, session_id=None) -> tuple[str, bool]`
+- Replay bookkeeping: `record_runbook_result(db, runbook_id, succeeded, failure_reason=None) -> None`
+- API validation: `POST /api/runbooks/{runbook_id}/validate`
+
+### 3. Contracts
+- Runbook API responses include:
+  - `version`
+  - `success_count`
+  - `failure_count`
+  - `last_success`
+  - `last_failure`
+  - `last_failure_reason`
+  - `staleness_status`
+  - `updated_from_session_id`
+  - `success_rate`
+- `staleness_status` is one of `fresh`, `warning`, or `stale`.
+- Validation is read-only. It may check tool existence, path existence, parent
+  directories, and service availability, but it must not execute write or
+  destructive steps.
+
+### 4. Validation & Error Matrix
+- Missing registered tool -> validation `invalid`, staleness `stale`.
+- Repeated failures >= 3 -> staleness `stale`.
+- Any recent failure -> staleness at least `warning`.
+- No success in 30 days -> `warning`.
+- No success in 90 days -> `stale`.
+- Successful full replay -> increment `success_count` and set `last_success`.
+- Partial failure/rejection/exception -> increment `failure_count`, set
+  `last_failure`, and record the exact failure reason.
+
+### 5. Good/Base/Bad Cases
+- Good: Runbook replay fails at step 3 and stores `last_failure_reason` with the
+  failing step and tool error.
+- Base: new never-run Runbook is `fresh` unless a tool is missing.
+- Bad: API manually runs `CREATE TABLE runbooks (...)` without governance columns.
+
+### 6. Tests Required
+- Schema migration from legacy Runbook table.
+- Save/update increments `version` while preserving execution statistics.
+- Replay success/failure updates counters truthfully.
+- Validation detects missing tools or missing targets without executing steps.
+- Frontend build verifies new health fields are typed and rendered.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```python
+await db.execute("UPDATE runbooks SET run_count = run_count + 1 WHERE id = ?", (runbook_id,))
+```
+
+#### Correct
+```python
+await record_runbook_result(
+    db,
+    runbook_id=runbook_id,
+    succeeded=failed_step is None,
+    failure_reason=abort_reason,
+)
 ```
 
 ---

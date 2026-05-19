@@ -79,6 +79,12 @@ interface ChatStore {
     description: string
     step_count: number
     match_ratio: number
+    version: number
+    success_count: number
+    failure_count: number
+    success_rate?: number | null
+    staleness_status: 'fresh' | 'warning' | 'stale'
+    last_failure_reason?: string | null
     original_message: string
   } | null
   acceptRunbookSuggestion: () => void
@@ -412,6 +418,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               description: data.description || '',
               step_count: data.step_count || 0,
               match_ratio: data.match_ratio || 0,
+              version: data.version || 1,
+              success_count: data.success_count || 0,
+              failure_count: data.failure_count || 0,
+              success_rate: data.success_rate,
+              staleness_status: data.staleness_status || 'fresh',
+              last_failure_reason: data.last_failure_reason || null,
               original_message: data.original_message || '',
             },
             messages: [
@@ -419,7 +431,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               {
                 id: crypto.randomUUID(),
                 role: 'assistant',
-                content: `[Runbook建议] ${data.name}\n步骤数: ${data.step_count}\n相似度: ${Math.round((data.match_ratio || 0) * 100)}%\n${data.description || ''}`,
+                content: `[Runbook建议] ${data.name}\n步骤数: ${data.step_count}\n版本: v${data.version || 1}\n健康: ${data.staleness_status || 'fresh'}\n成功/失败: ${data.success_count || 0}/${data.failure_count || 0}\n相似度: ${Math.round((data.match_ratio || 0) * 100)}%${data.last_failure_reason ? '\n最近失败: ' + data.last_failure_reason : ''}\n${data.description || ''}`,
                 timestamp: new Date().toISOString(),
               },
             ],

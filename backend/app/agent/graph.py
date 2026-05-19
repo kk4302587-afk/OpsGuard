@@ -630,7 +630,8 @@ async def knowledge_save_node(state: AgentState) -> dict:
 
     if len(tool_call_sequence) >= 2:
         try:
-            import aiosqlite, uuid as _uuid
+            import aiosqlite
+            from app.agent.runbook_governance import save_or_update_runbook
             from app.database import get_knowledge_db_path
 
             runbook_steps = []
@@ -642,33 +643,16 @@ async def knowledge_save_node(state: AgentState) -> dict:
             if runbook_steps:
                 runbook_name = problem[:40]
                 trigger_pattern = problem[:100]
-                steps_json = json.dumps(runbook_steps, ensure_ascii=False)
-                now_iso = datetime.now().isoformat()
-
                 async with aiosqlite.connect(get_knowledge_db_path()) as db:
-                    await db.execute("CREATE TABLE IF NOT EXISTS runbooks (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, trigger_pattern TEXT, steps TEXT NOT NULL, run_count INTEGER DEFAULT 0, last_run TEXT, created_at TEXT NOT NULL)")
-
-                    # Dedup by semantic problem name — same problem solved twice
-                    # refreshes the existing runbook with the latest tool sequence.
-                    cursor = await db.execute(
-                        "SELECT id FROM runbooks WHERE name = ? LIMIT 1",
-                        (runbook_name,),
+                    _, updated = await save_or_update_runbook(
+                        db,
+                        name=runbook_name,
+                        description="auto generated",
+                        trigger_pattern=trigger_pattern,
+                        steps=runbook_steps,
+                        session_id=session_id,
                     )
-                    existing = await cursor.fetchone()
-
-                    if existing:
-                        await db.execute(
-                            "UPDATE runbooks SET steps = ?, last_run = ?, trigger_pattern = ? WHERE id = ?",
-                            (steps_json, now_iso, trigger_pattern, existing[0]),
-                        )
-                        msg_text = f"Runbook 已更新: {runbook_name}"
-                    else:
-                        await db.execute(
-                            "INSERT INTO runbooks (id, name, description, trigger_pattern, steps, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                            (str(_uuid.uuid4()), runbook_name, "自动生成", trigger_pattern, steps_json, now_iso),
-                        )
-                        msg_text = f"Runbook 已保存: {runbook_name}"
-                    await db.commit()
+                    msg_text = f"Runbook {'updated' if updated else 'saved'}: {runbook_name}"
                 await send_to_client({"type": "trace", "phase": "knowledge_save", "event_type": "success", "content": msg_text})
         except Exception as e:
             logger.warning(f"Runbook generation failed: {e}")

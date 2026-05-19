@@ -9,12 +9,12 @@ The match uses `difflib.SequenceMatcher.ratio()` against both the runbook's
 keeping the bar low and the matching transparent.
 """
 
-import json
 from difflib import SequenceMatcher
 
 import aiosqlite
 from loguru import logger
 
+from app.agent.runbook_governance import ensure_runbook_schema, serialize_runbook
 from app.database import get_knowledge_db_path
 
 # Default similarity threshold. Tuned conservatively: false negatives (the
@@ -57,10 +57,10 @@ async def find_matching_runbook(
 
     try:
         async with aiosqlite.connect(get_knowledge_db_path()) as db:
+            await ensure_runbook_schema(db)
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT id, name, description, trigger_pattern, steps, "
-                "       run_count, last_run, created_at "
+                "SELECT * "
                 "FROM runbooks ORDER BY run_count DESC, last_run DESC LIMIT ?",
                 (top_n,),
             )
@@ -88,20 +88,6 @@ async def find_matching_runbook(
     if best is None or best_ratio < min_ratio:
         return None
 
-    try:
-        steps = json.loads(best["steps"]) if best["steps"] else []
-    except Exception:
-        steps = []
-
-    return {
-        "id": best["id"],
-        "name": best["name"],
-        "description": best["description"],
-        "trigger_pattern": best["trigger_pattern"],
-        "steps": steps,
-        "step_count": len(steps),
-        "run_count": best["run_count"],
-        "last_run": best["last_run"],
-        "created_at": best["created_at"],
-        "match_ratio": round(best_ratio, 3),
-    }
+    result = serialize_runbook(best)
+    result["match_ratio"] = round(best_ratio, 3)
+    return result

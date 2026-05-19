@@ -164,6 +164,12 @@ async def _send_runtime_snapshot(websocket: WebSocket, session_id: str, state: d
             "description": suggestion.get("description") or "",
             "step_count": suggestion.get("step_count", 0),
             "match_ratio": suggestion.get("match_ratio", 0.0),
+            "version": suggestion.get("version", 1),
+            "success_count": suggestion.get("success_count", 0),
+            "failure_count": suggestion.get("failure_count", 0),
+            "success_rate": suggestion.get("success_rate"),
+            "staleness_status": suggestion.get("staleness_status", "fresh"),
+            "last_failure_reason": suggestion.get("last_failure_reason"),
             "original_message": suggestion.get("original_message") or "",
             "timestamp": datetime.now().isoformat(),
         })
@@ -213,6 +219,12 @@ async def handle_user_message(session_id: str, message: dict):
             "description": match.get("description") or "",
             "step_count": match.get("step_count", 0),
             "match_ratio": match.get("match_ratio", 0.0),
+            "version": match.get("version", 1),
+            "success_count": match.get("success_count", 0),
+            "failure_count": match.get("failure_count", 0),
+            "success_rate": match.get("success_rate"),
+            "staleness_status": match.get("staleness_status", "fresh"),
+            "last_failure_reason": match.get("last_failure_reason"),
             "original_message": content,
         }
         await _send_to_session(session_id, {
@@ -222,6 +234,12 @@ async def handle_user_message(session_id: str, message: dict):
             "description": match.get("description") or "",
             "step_count": match.get("step_count", 0),
             "match_ratio": match.get("match_ratio", 0.0),
+            "version": match.get("version", 1),
+            "success_count": match.get("success_count", 0),
+            "failure_count": match.get("failure_count", 0),
+            "success_rate": match.get("success_rate"),
+            "staleness_status": match.get("staleness_status", "fresh"),
+            "last_failure_reason": match.get("last_failure_reason"),
             "original_message": content,
             "timestamp": datetime.now().isoformat(),
         })

@@ -5,14 +5,19 @@ executed successfully. Users can save a diagnosis flow as a runbook
 and replay it later (still subject to approval for write operations).
 """
 
-import json
-import uuid
 from datetime import datetime
 
 import aiosqlite
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from app.agent.runbook_governance import (
+    ensure_runbook_schema,
+    record_runbook_result,
+    save_or_update_runbook,
+    serialize_runbook,
+    validate_runbook,
+)
 from app.database import get_knowledge_db_path
 
 router = APIRouter()
@@ -38,110 +43,69 @@ class CreateRunbookRequest(BaseModel):
 async def list_runbooks():
     """List all saved runbooks."""
     async with aiosqlite.connect(get_knowledge_db_path()) as db:
-        # Ensure table exists
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS runbooks (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT,
-                trigger_pattern TEXT,
-                steps TEXT NOT NULL,
-                run_count INTEGER DEFAULT 0,
-                last_run TEXT,
-                created_at TEXT NOT NULL
-            )
-        """)
-        await db.commit()
-
+        await ensure_runbook_schema(db)
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT id, name, description, trigger_pattern, steps, run_count, last_run, created_at "
-            "FROM runbooks ORDER BY run_count DESC"
+            "SELECT * FROM runbooks ORDER BY run_count DESC, last_run DESC"
         )
         rows = await cursor.fetchall()
-        runbooks = []
-        for row in rows:
-            runbooks.append({
-                "id": row["id"],
-                "name": row["name"],
-                "description": row["description"],
-                "trigger_pattern": row["trigger_pattern"],
-                "steps": json.loads(row["steps"]),
-                "step_count": len(json.loads(row["steps"])),
-                "run_count": row["run_count"],
-                "last_run": row["last_run"],
-                "created_at": row["created_at"],
-            })
+        runbooks = [serialize_runbook(row) for row in rows]
     return {"runbooks": runbooks}
 
 
 @router.post("/")
 async def create_runbook(request: CreateRunbookRequest):
     """Create a new runbook from a sequence of tool calls."""
-    runbook_id = str(uuid.uuid4())
     now = datetime.now().isoformat()
 
     async with aiosqlite.connect(get_knowledge_db_path()) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS runbooks (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT,
-                trigger_pattern TEXT,
-                steps TEXT NOT NULL,
-                run_count INTEGER DEFAULT 0,
-                last_run TEXT,
-                created_at TEXT NOT NULL
-            )
-        """)
-        await db.execute(
-            "INSERT INTO runbooks (id, name, description, trigger_pattern, steps, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (runbook_id, request.name, request.description, request.trigger_pattern,
-             json.dumps([s.model_dump() for s in request.steps], ensure_ascii=False), now),
+        runbook_id, updated = await save_or_update_runbook(
+            db,
+            name=request.name,
+            description=request.description,
+            trigger_pattern=request.trigger_pattern,
+            steps=[s.model_dump() for s in request.steps],
         )
-        await db.commit()
 
-    return {"id": runbook_id, "name": request.name, "created_at": now}
+    return {"id": runbook_id, "name": request.name, "created_at": now, "updated": updated}
 
 
 @router.get("/{runbook_id}")
 async def get_runbook(runbook_id: str):
     """Get a specific runbook with full step details."""
     async with aiosqlite.connect(get_knowledge_db_path()) as db:
+        await ensure_runbook_schema(db)
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT * FROM runbooks WHERE id = ?", (runbook_id,))
         row = await cursor.fetchone()
         if not row:
             return {"error": "Runbook not found"}
-        return {
-            "id": row["id"],
-            "name": row["name"],
-            "description": row["description"],
-            "trigger_pattern": row["trigger_pattern"],
-            "steps": json.loads(row["steps"]),
-            "run_count": row["run_count"],
-            "last_run": row["last_run"],
-            "created_at": row["created_at"],
-        }
+        return serialize_runbook(row)
 
 
 @router.delete("/{runbook_id}")
 async def delete_runbook(runbook_id: str):
     """Delete a runbook."""
     async with aiosqlite.connect(get_knowledge_db_path()) as db:
+        await ensure_runbook_schema(db)
         await db.execute("DELETE FROM runbooks WHERE id = ?", (runbook_id,))
         await db.commit()
     return {"status": "deleted"}
 
 
+@router.post("/{runbook_id}/validate")
+async def validate_runbook_endpoint(runbook_id: str):
+    """Validate a runbook using read-only checks."""
+    return await validate_runbook(runbook_id)
+
+
 @router.post("/{runbook_id}/run")
 async def record_run(runbook_id: str):
     """Record that a runbook was executed (increment counter)."""
-    now = datetime.now().isoformat()
     async with aiosqlite.connect(get_knowledge_db_path()) as db:
-        await db.execute(
-            "UPDATE runbooks SET run_count = run_count + 1, last_run = ? WHERE id = ?",
-            (now, runbook_id),
+        await record_runbook_result(
+            db,
+            runbook_id=runbook_id,
+            succeeded=True,
         )
-        await db.commit()
     return {"status": "recorded"}

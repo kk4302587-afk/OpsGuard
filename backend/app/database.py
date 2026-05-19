@@ -73,6 +73,9 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_messages_session
             ON messages(session_id)
         """)
+        from app.agent.runbook_governance import ensure_runbook_schema
+
+        await ensure_runbook_schema(db)
         await db.commit()
 
     logger.info("Database initialized successfully")

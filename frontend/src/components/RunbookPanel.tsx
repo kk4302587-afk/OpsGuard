@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Card, Tag, Space, Typography, Empty, Button, Steps, Badge, Popconfirm, message as antdMessage } from 'antd'
+import { Card, Tag, Space, Typography, Empty, Button, Steps, Badge, Popconfirm, message as antdMessage, Alert } from 'antd'
 import {
   PlayCircleOutlined,
   ThunderboltOutlined,
@@ -8,6 +8,9 @@ import {
   ToolOutlined,
   FileTextOutlined,
   CaretRightOutlined,
+  SyncOutlined,
+  CheckCircleOutlined,
+  WarningOutlined,
 } from '@ant-design/icons'
 import { useChatStore } from '../stores/chatStore'
 
@@ -30,6 +33,20 @@ interface Runbook {
   run_count: number
   last_run: string | null
   created_at: string
+  version: number
+  success_count: number
+  failure_count: number
+  success_rate?: number | null
+  staleness_status: 'fresh' | 'warning' | 'stale'
+  last_success?: string | null
+  last_failure?: string | null
+  last_failure_reason?: string | null
+}
+
+interface ValidationResult {
+  status: 'valid' | 'warning' | 'invalid'
+  issues: Array<{ level: string; step?: string; message: string }>
+  checked_at: string
 }
 
 const riskColors: Record<string, string> = {
@@ -45,13 +62,15 @@ function RunbookPanel() {
   const [runbooks, setRunbooks] = useState<Runbook[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [validatingId, setValidatingId] = useState<string | null>(null)
+  const [validationResults, setValidationResults] = useState<Record<string, ValidationResult>>({})
 
   const runRunbookDirectly = useChatStore((s) => s.runRunbookDirectly)
   const activeSessionId = useChatStore((s) => s.activeSessionId)
   const isThinking = useChatStore((s) => s.isThinking)
   const ws = useChatStore((s) => s.ws)
 
-  const handleRunNow = (runbookId: string, name: string) => {
+  const handleRunNow = (runbook: Runbook) => {
     if (!activeSessionId || !ws || ws.readyState !== WebSocket.OPEN) {
       antdMessage.warning('请先打开一个聊天会话再执行 Runbook')
       return
@@ -60,8 +79,47 @@ function RunbookPanel() {
       antdMessage.info('当前还有任务在进行，请等待完成')
       return
     }
-    runRunbookDirectly(runbookId)
-    antdMessage.success(`已开始执行 Runbook「${name}」，请切换到聊天视图查看进度`)
+    runRunbookDirectly(runbook.id)
+    antdMessage.success(`已开始执行 Runbook「${runbook.name}」，请切换到聊天视图查看进度`)
+  }
+
+  const validateRunbook = async (runbookId: string) => {
+    setValidatingId(runbookId)
+    try {
+      const res = await fetch(`/api/runbooks/${runbookId}/validate`, { method: 'POST' })
+      if (res.ok) {
+        const result = await res.json()
+        setValidationResults((prev) => ({ ...prev, [runbookId]: result }))
+        antdMessage.success('Runbook 校验完成')
+      } else {
+        antdMessage.error('Runbook 校验失败')
+      }
+    } catch (err) {
+      console.error('Failed to validate runbook:', err)
+      antdMessage.error('Runbook 校验失败')
+    } finally {
+      setValidatingId(null)
+      fetchRunbooks()
+    }
+  }
+
+  const getHealthColor = (status: string) => {
+    if (status === 'fresh') return 'green'
+    if (status === 'warning') return 'orange'
+    if (status === 'stale') return 'red'
+    return 'default'
+  }
+
+  const getHealthLabel = (status: string) => {
+    if (status === 'fresh') return '健康'
+    if (status === 'warning') return '需关注'
+    if (status === 'stale') return '已过期'
+    return status
+  }
+
+  const formatSuccessRate = (rate?: number | null) => {
+    if (rate === null || rate === undefined) return '暂无'
+    return `${Math.round(rate * 100)}%`
   }
 
   useEffect(() => {
@@ -131,6 +189,10 @@ function RunbookPanel() {
                     <FileTextOutlined style={{ color: 'var(--accent-green)' }} />
                     <Text strong style={{ fontSize: 14 }}>{runbook.name}</Text>
                     <Tag>{runbook.step_count} 步</Tag>
+                    <Tag color="blue">v{runbook.version || 1}</Tag>
+                    <Tag color={getHealthColor(runbook.staleness_status)}>
+                      {getHealthLabel(runbook.staleness_status)}
+                    </Tag>
                   </Space>
                   <Paragraph style={{ color: 'var(--text-secondary)', fontSize: 12, margin: '4px 0 0 22px' }}>
                     {runbook.description}
@@ -139,10 +201,14 @@ function RunbookPanel() {
                 <Space>
                   <Popconfirm
                     title={`立即执行 Runbook「${runbook.name}」？`}
-                    description="每个写操作步骤仍需逐条审批，可随时拒绝中止。"
+                    description={
+                      runbook.staleness_status === 'fresh'
+                        ? '每个写操作步骤仍需逐条审批，可随时拒绝中止。'
+                        : `此 Runbook 状态为「${getHealthLabel(runbook.staleness_status)}」，建议先校验后再执行。`
+                    }
                     okText="执行"
                     cancelText="取消"
-                    onConfirm={() => handleRunNow(runbook.id, runbook.name)}
+                    onConfirm={() => handleRunNow(runbook)}
                   >
                     <Button
                       size="small"
@@ -153,6 +219,14 @@ function RunbookPanel() {
                       立即执行
                     </Button>
                   </Popconfirm>
+                  <Button
+                    size="small"
+                    icon={<SyncOutlined spin={validatingId === runbook.id} />}
+                    onClick={() => validateRunbook(runbook.id)}
+                    disabled={validatingId === runbook.id}
+                  >
+                    校验
+                  </Button>
                   <Button
                     size="small"
                     type="text"
@@ -177,6 +251,13 @@ function RunbookPanel() {
                   <PlayCircleOutlined style={{ marginRight: 4 }} />
                   执行次数: {runbook.run_count}
                 </Text>
+                <Text style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  <CheckCircleOutlined style={{ marginRight: 4 }} />
+                  成功率: {formatSuccessRate(runbook.success_rate)}
+                </Text>
+                <Text style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  成功/失败: {runbook.success_count}/{runbook.failure_count}
+                </Text>
                 {runbook.last_run && (
                   <Text style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     <ClockCircleOutlined style={{ marginRight: 4 }} />
@@ -184,6 +265,30 @@ function RunbookPanel() {
                   </Text>
                 )}
               </div>
+
+              {runbook.last_failure_reason && (
+                <Alert
+                  type={runbook.staleness_status === 'stale' ? 'error' : 'warning'}
+                  showIcon
+                  icon={<WarningOutlined />}
+                  message={`最近失败: ${runbook.last_failure_reason}`}
+                  style={{ marginLeft: 22, marginBottom: 8, padding: '6px 10px' }}
+                />
+              )}
+
+              {validationResults[runbook.id] && (
+                <Alert
+                  type={validationResults[runbook.id].status === 'valid' ? 'success' : validationResults[runbook.id].status === 'warning' ? 'warning' : 'error'}
+                  showIcon
+                  message={`校验结果: ${validationResults[runbook.id].status}`}
+                  description={
+                    validationResults[runbook.id].issues.length
+                      ? validationResults[runbook.id].issues.map((issue) => issue.message).join('；')
+                      : '工具存在，未发现明显目标不可用问题。'
+                  }
+                  style={{ marginLeft: 22, marginBottom: 8, padding: '6px 10px' }}
+                />
+              )}
 
               {/* Expanded steps */}
               {expandedId === runbook.id && (

@@ -17,13 +17,13 @@ which runbook to suggest; once the user confirms, this module does the work.
 import asyncio
 import json
 import uuid
-from datetime import datetime
 from typing import Callable
 
 import aiosqlite
 from loguru import logger
 
 from app.agent.tools_registry import tools_registry, RiskLevel
+from app.agent.runbook_governance import ensure_runbook_schema, record_runbook_result
 from app.agent.trace_evidence import (
     build_evidence,
     inference_evidence,
@@ -257,9 +257,10 @@ async def execute_runbook(
     # === Load the runbook ===
     try:
         async with aiosqlite.connect(get_knowledge_db_path()) as db:
+            await ensure_runbook_schema(db)
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT id, name, description, steps FROM runbooks WHERE id = ?",
+                "SELECT * FROM runbooks WHERE id = ?",
                 (runbook_id,),
             )
             row = await cursor.fetchone()
@@ -662,16 +663,17 @@ async def execute_runbook(
             })
             break
 
-    # === Bookkeeping: increment run_count even on partial failure ===
+    # === Bookkeeping: update success/failure governance metadata ===
     try:
         async with aiosqlite.connect(get_knowledge_db_path()) as db:
-            await db.execute(
-                "UPDATE runbooks SET run_count = run_count + 1, last_run = ? WHERE id = ?",
-                (datetime.now().isoformat(), runbook_id),
+            await record_runbook_result(
+                db,
+                runbook_id=runbook_id,
+                succeeded=failed_step is None,
+                failure_reason=abort_reason,
             )
-            await db.commit()
     except Exception as e:
-        logger.warning(f"Runbook run_count bump failed: {e}")
+        logger.warning(f"Runbook governance bookkeeping failed: {e}")
 
     # === Final summary message ===
     if failed_step is None:
