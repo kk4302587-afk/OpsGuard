@@ -14,6 +14,9 @@
 - Agent/runbook trace success must follow the tool's real `ToolResult.success`
   value. A tool function returning normally with `success=False` is still an
   execution failure, not a successful trace event.
+- Runbook replay traces must include a user-facing execution plan, per-step
+  purpose/risk/result summaries, and keep raw tool calls as secondary technical
+  detail. Do not make users infer intent from tool names alone.
 - `ToolResult` return type for all MCP tools
 - Risk level annotation for all registered tools
 
@@ -57,5 +60,6 @@
 - `python backend/test_fake_success_outputs.py` — focused regression for fake success / inferred-output handling
 - `python backend/test_knowledge_retrieval.py` — focused regression for DB-backed knowledge retrieval semantics
 - `python backend/test_agent_trace_truthfulness.py` — focused regression for Agent trace success/failure truthfulness
+- `python backend/test_runbook_visibility.py` — focused regression for Runbook replay plan/result readability
 - Security rules tested via `test_rules.py` pattern (create, run, delete)
 - TypeScript `npx tsc --noEmit` for frontend
