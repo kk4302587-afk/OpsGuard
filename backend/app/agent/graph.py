@@ -234,6 +234,7 @@ async def reasoning_node(state: AgentState) -> dict:
             if (
                 not hallucination_retry_done
                 and write_tools_called == 0
+                and _has_write_intent(user_message)
                 and _claims_write_completion(final_content)
             ):
                 hallucination_retry_done = True
@@ -732,6 +733,30 @@ _WRITE_COMPLETION_PATTERNS = (
     "已执行完毕", "已为您执行", "已为你执行", "执行完毕", "已经执行",
     "已添加", "已配置", "已开启", "已关闭", "已禁用", "已启用",
 )
+
+
+_WRITE_INTENT_PATTERNS = (
+    # Explicit operation requests, including common Chinese polite prefixes.
+    r"(帮我|请|执行|开始|给我|把|将|立即|现在).{0,20}(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|配置)",
+    # Bare imperative-style operation plus an object. Avoid matching read-only
+    # phrases like "查看 nginx 启动状态" where the verb describes state.
+    r"(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加).{0,20}(服务|进程|文件|目录|配置|端口|用户|软件|包|nginx|mysql|redis|apache|systemd)",
+    # English operation requests.
+    r"\b(start|restart|stop|delete|remove|clean|modify|write|save|apply|enable|disable|install|uninstall)\b.{0,40}\b(service|process|file|directory|config|port|user|package|nginx|mysql|redis|apache)\b",
+    # Follow-up confirmations after the assistant proposed a write operation.
+    r"^(执行|确认|确定|批准|同意|开始执行|继续|好的|好|可以|那就这样|那就执行)$",
+)
+
+
+def _has_write_intent(text: str) -> bool:
+    """Return whether the current user message is likely requesting a write."""
+    if not text:
+        return False
+
+    import re
+
+    normalized = text.strip()
+    return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in _WRITE_INTENT_PATTERNS)
 
 
 def _claims_write_completion(text: str) -> bool:

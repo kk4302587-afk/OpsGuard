@@ -36,6 +36,7 @@
 - API keys loaded from config, never hardcoded
 - Protected paths list checked before any write operation
 - Before/after change diffs must use a live pre-execution snapshot captured immediately before the write tool runs. Never hardcode "Before" values from assumptions.
+- Write-completion hallucination guards must consider the user's current write intent, not only completion-looking words in the final response. Read-only analysis may legitimately describe system state with phrases such as "已启动".
 
 ---
 
