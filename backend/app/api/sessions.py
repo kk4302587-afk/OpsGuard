@@ -1,6 +1,7 @@
 """Session management API endpoints."""
 
 import uuid
+import json
 from datetime import datetime
 
 import aiosqlite
@@ -111,13 +112,17 @@ async def get_session_trace(session_id: str):
             (session_id,),
         )
         rows = await cursor.fetchall()
-        trace = [
-            {
+        trace = []
+        for row in rows:
+            metadata = json.loads(row["metadata"]) if row["metadata"] else None
+            event = {
                 "timestamp": row["timestamp"],
                 "phase": row["phase"],
                 "event_type": row["event_type"],
                 "content": row["content"],
+                "metadata": metadata,
             }
-            for row in rows
-        ]
+            if isinstance(metadata, dict) and isinstance(metadata.get("evidence"), dict):
+                event.update(metadata["evidence"])
+            trace.append(event)
     return {"trace": trace}

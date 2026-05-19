@@ -66,6 +66,9 @@ def test_tool_result_failure_is_traced_as_failure() -> None:
                 event["phase"] == "execution"
                 and event["event_type"] == "failure"
                 and "real command failed" in event["content"]
+                and event.get("execution_state") == "failed"
+                and event.get("source") == "fake_check"
+                and "real command failed" in event.get("failure_reason", "")
                 for event in events
             )
             assert not any(

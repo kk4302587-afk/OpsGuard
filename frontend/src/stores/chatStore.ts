@@ -27,6 +27,14 @@ interface TraceEvent {
   content: string
   timestamp: string
   metadata?: Record<string, unknown>
+  claim?: string
+  evidence_type?: 'command' | 'log' | 'config' | 'metric' | 'topology' | 'knowledge' | 'user input'
+  source?: string
+  observed?: string
+  confidence?: 'low' | 'medium' | 'high'
+  execution_state?: 'executed' | 'inferred' | 'skipped' | 'failed'
+  failure_reason?: string
+  next_check?: string
 }
 
 interface Session {
@@ -320,6 +328,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 content: data.content,
                 timestamp: data.timestamp || new Date().toISOString(),
                 metadata: data.metadata,
+                claim: data.claim,
+                evidence_type: data.evidence_type,
+                source: data.source,
+                observed: data.observed,
+                confidence: data.confidence,
+                execution_state: data.execution_state,
+                failure_reason: data.failure_reason,
+                next_check: data.next_check,
               },
             ]
 

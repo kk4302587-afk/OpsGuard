@@ -12,6 +12,15 @@ from loguru import logger
 from langgraph.graph import StateGraph, END
 
 from app.agent.llm import call_llm, SYSTEM_PROMPT
+from app.agent.trace_evidence import (
+    build_evidence,
+    inference_evidence,
+    knowledge_evidence,
+    tool_plan_evidence,
+    tool_result_evidence,
+    trace_event,
+    verification_evidence,
+)
 from app.agent.tools_registry import tools_registry, RiskLevel
 from app.safety.guardrail import SafetyGuardrail
 from app.audit.logger import audit_logger, AuditPhase, AuditEventType
@@ -46,14 +55,32 @@ async def safety_check_node(state: AgentState) -> dict:
     user_message = state["user_message"]
     send_to_client = state["send_to_client"]
 
-    await send_to_client({"type": "trace", "phase": "safety_check", "event_type": "start", "content": "正在进行安全校验..."})
+    await send_to_client(trace_event(
+        phase="safety_check",
+        event_type="start",
+        content="正在进行安全校验...",
+        evidence=inference_evidence("User request is being checked by safety rules", "SafetyGuardrail", user_message[:200]),
+    ))
     await audit_logger.log(session_id, AuditPhase.SAFETY_CHECK, AuditEventType.START, f"检查输入: {user_message[:100]}")
 
     safety_result = _guardrail.check_input(user_message)
 
     if not safety_result.is_safe:
         await audit_logger.log(session_id, AuditPhase.SAFETY_CHECK, AuditEventType.BLOCKED, f"输入被拦截: {safety_result.detail}")
-        await send_to_client({"type": "trace", "phase": "safety_check", "event_type": "blocked", "content": safety_result.detail})
+        await send_to_client(trace_event(
+            phase="safety_check",
+            event_type="blocked",
+            content=safety_result.detail,
+            evidence=build_evidence(
+                claim="Safety guardrail blocked the request",
+                evidence_type="user input",
+                source="SafetyGuardrail.check_input",
+                observed=safety_result.detail,
+                confidence="high",
+                execution_state="failed",
+                failure_reason=safety_result.detail,
+            ),
+        ))
         return {
             "is_blocked": True,
             "block_reason": safety_result.detail,
@@ -61,14 +88,31 @@ async def safety_check_node(state: AgentState) -> dict:
         }
 
     await audit_logger.log(session_id, AuditPhase.SAFETY_CHECK, AuditEventType.SUCCESS, "安全校验通过")
-    await send_to_client({"type": "trace", "phase": "safety_check", "event_type": "success", "content": f"安全校验通过 ({', '.join(safety_result.layers_checked)})"})
+    await send_to_client(trace_event(
+        phase="safety_check",
+        event_type="success",
+        content=f"安全校验通过 ({', '.join(safety_result.layers_checked)})",
+        evidence=build_evidence(
+            claim="Safety guardrail allowed the request",
+            evidence_type="user input",
+            source="SafetyGuardrail.check_input",
+            observed={"layers_checked": safety_result.layers_checked},
+            confidence="high",
+            execution_state="executed",
+        ),
+    ))
 
     # Check high-risk intent
     risk_warning = ""
     intent_result = _guardrail.check_high_risk_intent(user_message)
     if intent_result.is_warning:
         risk_warning = f"\n\n系统检测到此请求涉及高风险操作（{intent_result.detail}）。请务必在执行前向用户确认，并详细说明影响范围。"
-        await send_to_client({"type": "trace", "phase": "safety_check", "event_type": "start", "content": f"高风险意图警告: {intent_result.detail}"})
+        await send_to_client(trace_event(
+            phase="safety_check",
+            event_type="start",
+            content=f"高风险意图警告: {intent_result.detail}",
+            evidence=inference_evidence("High-risk intent was detected", "SafetyGuardrail.check_high_risk_intent", intent_result.detail),
+        ))
 
     return {"is_blocked": False, "risk_warning": risk_warning}
 
@@ -79,17 +123,29 @@ async def knowledge_retrieval_node(state: AgentState) -> dict:
     user_message = state["user_message"]
     send_to_client = state["send_to_client"]
 
-    await send_to_client({"type": "trace", "phase": "knowledge_retrieval", "event_type": "start", "content": "检索历史经验..."})
+    await send_to_client(trace_event(
+        phase="knowledge_retrieval",
+        event_type="start",
+        content="检索历史经验...",
+        evidence=build_evidence(
+            claim="Knowledge search has been requested",
+            evidence_type="knowledge",
+            source="knowledge_store.search",
+            observed=user_message[:200],
+            confidence="medium",
+            execution_state="skipped",
+        ),
+    ))
 
     try:
         knowledge_context = await knowledge_store.search(user_message, limit=3)
     except KnowledgeSearchError as e:
-        await send_to_client({
-            "type": "trace",
-            "phase": "knowledge_retrieval",
-            "event_type": "failure",
-            "content": f"知识检索失败: {e}",
-        })
+        await send_to_client(trace_event(
+            phase="knowledge_retrieval",
+            event_type="failure",
+            content=f"知识检索失败: {e}",
+            evidence=knowledge_evidence(0, str(e), failed=True),
+        ))
         await audit_logger.log(
             session_id,
             AuditPhase.KNOWLEDGE_RETRIEVAL,
@@ -104,9 +160,28 @@ async def knowledge_retrieval_node(state: AgentState) -> dict:
         knowledge_hint = "\n\n## 历史经验参考\n"
         for entry in knowledge_context:
             knowledge_hint += f"- 问题: {entry['problem_signature']}\n  解决: {entry['solution']}\n"
-        await send_to_client({"type": "trace", "phase": "knowledge_retrieval", "event_type": "success", "content": f"找到 {len(knowledge_context)} 条相关经验"})
+        await send_to_client(trace_event(
+            phase="knowledge_retrieval",
+            event_type="success",
+            content=f"找到 {len(knowledge_context)} 条相关经验",
+            evidence=knowledge_evidence(
+                len(knowledge_context),
+                [
+                    {
+                        "problem": entry.get("problem_signature"),
+                        "score": entry.get("score"),
+                    }
+                    for entry in knowledge_context
+                ],
+            ),
+        ))
     else:
-        await send_to_client({"type": "trace", "phase": "knowledge_retrieval", "event_type": "success", "content": "无相关历史经验"})
+        await send_to_client(trace_event(
+            phase="knowledge_retrieval",
+            event_type="success",
+            content="无相关历史经验",
+            evidence=knowledge_evidence(0, "search completed; no matching entries"),
+        ))
 
     return {"knowledge_hint": knowledge_hint}
 
@@ -119,7 +194,12 @@ async def reasoning_node(state: AgentState) -> dict:
     risk_warning = state.get("risk_warning", "")
     knowledge_hint = state.get("knowledge_hint", "")
 
-    await send_to_client({"type": "trace", "phase": "planning", "event_type": "start", "content": "正在分析问题并制定方案..."})
+    await send_to_client(trace_event(
+        phase="planning",
+        event_type="start",
+        content="正在分析问题并制定方案...",
+        evidence=inference_evidence("The agent is planning next checks or actions", "LLM", user_message[:200]),
+    ))
     await audit_logger.log(session_id, AuditPhase.PLANNING, AuditEventType.START, "开始推理")
 
     # Build messages
@@ -152,7 +232,12 @@ async def reasoning_node(state: AgentState) -> dict:
                     messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": f"Error: Unknown tool '{tool_name}'"})
                     continue
 
-                await send_to_client({"type": "trace", "phase": "tool_call", "event_type": "start", "content": f"调用工具: {tool_name}({json.dumps(tool_args, ensure_ascii=False)})"})
+                await send_to_client(trace_event(
+                    phase="tool_call",
+                    event_type="start",
+                    content=f"调用工具: {tool_name}({json.dumps(tool_args, ensure_ascii=False)})",
+                    evidence=tool_plan_evidence(tool_name, tool_args),
+                ))
                 await audit_logger.log(session_id, AuditPhase.TOOL_CALL, AuditEventType.START, f"工具调用: {tool_name}", {"args": tool_args})
 
                 # Approval for write operations
@@ -163,7 +248,20 @@ async def reasoning_node(state: AgentState) -> dict:
                             {"id": tool_call.get("id", ""), "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}
                         ]})
                         messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": f"BLOCKED: {cmd_check.detail}"})
-                        await send_to_client({"type": "trace", "phase": "tool_call", "event_type": "blocked", "content": f"被拦截: {cmd_check.detail}"})
+                        await send_to_client(trace_event(
+                            phase="tool_call",
+                            event_type="blocked",
+                            content=f"被拦截: {cmd_check.detail}",
+                            evidence=build_evidence(
+                                claim=f"Guardrail blocked {tool_name} before execution",
+                                evidence_type="command",
+                                source="SafetyGuardrail.check_command",
+                                observed=cmd_check.detail,
+                                confidence="high",
+                                execution_state="skipped",
+                                failure_reason=cmd_check.detail,
+                            ),
+                        ))
                         continue
 
                     # Request approval
@@ -185,7 +283,19 @@ async def reasoning_node(state: AgentState) -> dict:
                         "description": tool_def.description,
                         "impact": impact_text,
                     })
-                    await send_to_client({"type": "trace", "phase": "approval_request", "event_type": "pending", "content": f"等待用户审批: {tool_name}"})
+                    await send_to_client(trace_event(
+                        phase="approval_request",
+                        event_type="pending",
+                        content=f"等待用户审批: {tool_name}",
+                        evidence=build_evidence(
+                            claim=f"{tool_name} requires user approval before execution",
+                            evidence_type="user input",
+                            source="approval_manager",
+                            observed=impact_text or tool_args,
+                            confidence="high",
+                            execution_state="skipped",
+                        ),
+                    ))
 
                     try:
                         approved = await _asyncio.wait_for(approval_future, timeout=300.0)
@@ -199,10 +309,35 @@ async def reasoning_node(state: AgentState) -> dict:
                             {"id": tool_call.get("id", ""), "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}
                         ]})
                         messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": "REJECTED: User denied this operation"})
-                        await send_to_client({"type": "trace", "phase": "approval_response", "event_type": "failure", "content": "用户拒绝了操作"})
+                        await send_to_client(trace_event(
+                            phase="approval_response",
+                            event_type="failure",
+                            content="用户拒绝了操作",
+                            evidence=build_evidence(
+                                claim=f"{tool_name} was not executed because approval was rejected or timed out",
+                                evidence_type="user input",
+                                source="approval_manager",
+                                observed="rejected_or_timeout",
+                                confidence="high",
+                                execution_state="skipped",
+                                failure_reason="User approval was not granted",
+                            ),
+                        ))
                         continue
 
-                    await send_to_client({"type": "trace", "phase": "approval_response", "event_type": "success", "content": "用户已批准"})
+                    await send_to_client(trace_event(
+                        phase="approval_response",
+                        event_type="success",
+                        content="用户已批准",
+                        evidence=build_evidence(
+                            claim=f"{tool_name} was approved by the user",
+                            evidence_type="user input",
+                            source="approval_manager",
+                            observed="approved",
+                            confidence="high",
+                            execution_state="executed",
+                        ),
+                    ))
 
                 # Execute tool
                 try:
@@ -215,7 +350,19 @@ async def reasoning_node(state: AgentState) -> dict:
                         if target_path and isinstance(target_path, str):
                             backup_record = backup_manager.backup_file(target_path, operation=f"{tool_name}")
                             if backup_record:
-                                await send_to_client({"type": "trace", "phase": "execution", "event_type": "start", "content": f"已备份: {target_path}"})
+                                await send_to_client(trace_event(
+                                    phase="execution",
+                                    event_type="start",
+                                    content=f"已备份: {target_path}",
+                                    evidence=build_evidence(
+                                        claim=f"Backup was created before {tool_name}",
+                                        evidence_type="config",
+                                        source="BackupManager.backup_file",
+                                        observed=backup_record,
+                                        confidence="high",
+                                        execution_state="executed",
+                                    ),
+                                ))
                         before_change_state = _capture_pre_change_state(tool_name, tool_args, backup_record)
 
                     result = tool_def.function(**tool_args)
@@ -233,24 +380,78 @@ async def reasoning_node(state: AgentState) -> dict:
                     if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE) and result_success:
                         verification = _verify_tool_result(tool_name, tool_args, result)
                         if verification:
-                            await send_to_client({"type": "trace", "phase": "verification", "event_type": verification["status"], "content": verification["message"]})
+                            await send_to_client(trace_event(
+                                phase="verification",
+                                event_type=verification["status"],
+                                content=verification["message"],
+                                evidence=verification_evidence(
+                                    claim=f"Post-action verification for {tool_name}",
+                                    source=tool_name,
+                                    observed=verification["message"],
+                                    success=verification["status"] == "success",
+                                ),
+                            ))
 
                         # Before/After change diff
                         change_diff = _capture_change_diff(tool_name, tool_args, backup_record, before_change_state)
                         if change_diff:
-                            await send_to_client({"type": "trace", "phase": "verification", "event_type": "success", "content": f"变更对比:\n{change_diff}"})
+                            await send_to_client(trace_event(
+                                phase="verification",
+                                event_type="success",
+                                content=f"变更对比:\n{change_diff}",
+                                evidence=verification_evidence(
+                                    claim=f"Before/after comparison captured for {tool_name}",
+                                    source=tool_name,
+                                    observed=change_diff,
+                                    success=True,
+                                ),
+                            ))
 
                     if result_success:
                         await audit_logger.log(session_id, AuditPhase.EXECUTION, AuditEventType.SUCCESS, f"工具执行成功: {tool_name}")
-                        await send_to_client({"type": "trace", "phase": "execution", "event_type": "success", "content": f"执行成功: {tool_name}"})
+                        await send_to_client(trace_event(
+                            phase="execution",
+                            event_type="success",
+                            content=f"执行成功: {tool_name}",
+                            evidence=tool_result_evidence(
+                                tool_name=tool_name,
+                                tool_args=tool_args,
+                                tool_def=tool_def,
+                                result=result,
+                            ),
+                        ))
                     else:
                         failure_message = result_error or "工具返回 success=False"
                         await audit_logger.log(session_id, AuditPhase.EXECUTION, AuditEventType.FAILURE, f"工具执行失败: {tool_name} - {failure_message}")
-                        await send_to_client({"type": "trace", "phase": "execution", "event_type": "failure", "content": f"执行失败: {tool_name} - {failure_message}"})
+                        await send_to_client(trace_event(
+                            phase="execution",
+                            event_type="failure",
+                            content=f"执行失败: {tool_name} - {failure_message}",
+                            evidence=tool_result_evidence(
+                                tool_name=tool_name,
+                                tool_args=tool_args,
+                                tool_def=tool_def,
+                                result=result,
+                            ),
+                        ))
 
                 except Exception as e:
                     tool_result_str = json.dumps({"error": str(e)})
-                    await send_to_client({"type": "trace", "phase": "execution", "event_type": "failure", "content": f"执行失败: {tool_name} - {e}"})
+                    await send_to_client(trace_event(
+                        phase="execution",
+                        event_type="failure",
+                        content=f"执行失败: {tool_name} - {e}",
+                        evidence=build_evidence(
+                            claim=f"{tool_name} raised an exception during execution",
+                            evidence_type="command",
+                            source=tool_name,
+                            observed=str(e),
+                            confidence="high",
+                            execution_state="failed",
+                            failure_reason=str(e),
+                            next_check="Inspect tool arguments and retry with a read-only check if possible.",
+                        ),
+                    ))
 
                 messages.append({"role": "assistant", "content": None, "tool_calls": [
                     {"id": tool_call.get("id", ""), "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}
@@ -279,12 +480,21 @@ async def reasoning_node(state: AgentState) -> dict:
                     "幻觉守卫: 模型声称完成写操作但未调用工具，强制重试",
                     {"original_response": final_content[:500]},
                 )
-                await send_to_client({
-                    "type": "trace",
-                    "phase": "response",
-                    "event_type": "failure",
-                    "content": "⚠️ 检测到模型声称已完成写操作但未真实调用工具，已强制重新分析",
-                })
+                await send_to_client(trace_event(
+                    phase="response",
+                    event_type="failure",
+                    content="⚠️ 检测到模型声称已完成写操作但未真实调用工具，已强制重新分析",
+                    evidence=build_evidence(
+                        claim="Model response claimed a write completion without executed write evidence",
+                        evidence_type="user input",
+                        source="write_completion_guard",
+                        observed=final_content[:500],
+                        confidence="high",
+                        execution_state="failed",
+                        failure_reason="No write/destructive tool was called in this turn",
+                        next_check="Force the agent to either execute an approved tool or retract the claim.",
+                    ),
+                ))
                 # Inject the assistant's bogus message so the LLM sees its own claim,
                 # then a strong system-role correction.
                 messages.append({"role": "assistant", "content": final_content})
@@ -320,12 +530,21 @@ async def reasoning_node(state: AgentState) -> dict:
                     "幻觉守卫: 写工具返回失败但模型声称完成，强制重试",
                     {"tool_failures": write_tool_failures[:5], "original_response": final_content[:500]},
                 )
-                await send_to_client({
-                    "type": "trace",
-                    "phase": "response",
-                    "event_type": "failure",
-                    "content": "⚠️ 写操作工具返回失败，但模型声称已完成，已强制重新分析",
-                })
+                await send_to_client(trace_event(
+                    phase="response",
+                    event_type="failure",
+                    content="⚠️ 写操作工具返回失败，但模型声称已完成，已强制重新分析",
+                    evidence=build_evidence(
+                        claim="Model response claimed a write completion after tool failure",
+                        evidence_type="command",
+                        source="write_completion_guard",
+                        observed=failure_summary,
+                        confidence="high",
+                        execution_state="failed",
+                        failure_reason=failure_summary,
+                        next_check="Regenerate the answer from the failed tool output.",
+                    ),
+                ))
                 messages.append({"role": "assistant", "content": final_content})
                 messages.append({
                     "role": "system",
@@ -341,7 +560,12 @@ async def reasoning_node(state: AgentState) -> dict:
 
     final_response = llm_response.get("content", "") or "分析完成，请查看推理链路了解详情。"
     await audit_logger.log(session_id, AuditPhase.RESPONSE, AuditEventType.SUCCESS, f"生成回复: {final_response[:200]}")
-    await send_to_client({"type": "trace", "phase": "response", "event_type": "success", "content": "回复已生成"})
+    await send_to_client(trace_event(
+        phase="response",
+        event_type="success",
+        content="回复已生成",
+        evidence=inference_evidence("Final response was generated from prior evidence and messages", "LLM", final_response[:500]),
+    ))
 
     return {"final_response": final_response, "messages": messages, "iteration": iteration}
 
@@ -558,7 +782,19 @@ async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_t
 
     if impact_lines:
         impact_text = "\n".join(impact_lines)
-        await send_to_client({"type": "trace", "phase": "planning", "event_type": "start", "content": f"影响评估:\n{impact_text}"})
+        await send_to_client(trace_event(
+            phase="planning",
+            event_type="start",
+            content=f"影响评估:\n{impact_text}",
+            evidence=build_evidence(
+                claim=f"Estimated operational impact for {tool_name}",
+                evidence_type="user input",
+                source="assess_impact",
+                observed=impact_text,
+                confidence="medium",
+                execution_state="inferred",
+            ),
+        ))
         return impact_text
     return None
 

@@ -16,12 +16,131 @@ import { useChatStore } from '../stores/chatStore'
 
 const { Text, Title } = Typography
 
+interface TraceEvidence {
+  claim?: string
+  evidence_type?: string
+  source?: string
+  observed?: string
+  confidence?: string
+  execution_state?: string
+  failure_reason?: string
+  next_check?: string
+}
+
 /**
  * Right panel showing the reasoning trace (ThoughtChain).
  * Visualizes: input → safety check → plan → tool calls → verify → respond
  */
 function TracePanel() {
   const { traceEvents, sendMessage } = useChatStore()
+
+  const getEvidenceStateColor = (state?: string): string => {
+    switch (state) {
+      case 'executed': return 'green'
+      case 'failed': return 'red'
+      case 'skipped': return 'orange'
+      case 'inferred': return 'blue'
+      default: return 'default'
+    }
+  }
+
+  const getConfidenceColor = (confidence?: string): string => {
+    switch (confidence) {
+      case 'high': return 'green'
+      case 'medium': return 'blue'
+      case 'low': return 'orange'
+      default: return 'default'
+    }
+  }
+
+  const getEvidenceLabel = (key: string, value?: string) => {
+    const labels: Record<string, string> = {
+      command: '命令',
+      log: '日志',
+      config: '配置',
+      metric: '指标',
+      topology: '拓扑',
+      knowledge: '知识库',
+      'user input': '用户输入',
+      executed: '已执行',
+      inferred: '推断',
+      skipped: '未执行',
+      failed: '失败',
+      high: '高',
+      medium: '中',
+      low: '低',
+    }
+    return labels[value || key] || value || key
+  }
+
+  const renderEvidence = (event: TraceEvidence) => {
+    if (!event.claim && !event.source && !event.observed && !event.execution_state) return null
+
+    return (
+      <div
+        style={{
+          marginTop: 8,
+          padding: '8px 10px',
+          border: '1px solid var(--border-color)',
+          borderRadius: 6,
+          background: 'rgba(255, 255, 255, 0.03)',
+        }}
+      >
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 6 }}>
+          {event.execution_state && (
+            <Tag color={getEvidenceStateColor(event.execution_state)} style={{ fontSize: 10, margin: 0 }}>
+              {getEvidenceLabel('execution_state', event.execution_state)}
+            </Tag>
+          )}
+          {event.evidence_type && (
+            <Tag color="geekblue" style={{ fontSize: 10, margin: 0 }}>
+              {getEvidenceLabel('evidence_type', event.evidence_type)}
+            </Tag>
+          )}
+          {event.confidence && (
+            <Tag color={getConfidenceColor(event.confidence)} style={{ fontSize: 10, margin: 0 }}>
+              置信度 {getEvidenceLabel('confidence', event.confidence)}
+            </Tag>
+          )}
+        </div>
+        {event.claim && (
+          <Text style={{ display: 'block', fontSize: 11, color: 'var(--text-primary)', marginBottom: 4 }}>
+            {event.claim}
+          </Text>
+        )}
+        {event.source && (
+          <Text style={{ display: 'block', fontSize: 10, color: 'var(--text-muted)', wordBreak: 'break-all' }}>
+            来源: {event.source}
+          </Text>
+        )}
+        {event.observed && (
+          <Text
+            style={{
+              display: 'block',
+              marginTop: 4,
+              fontSize: 10,
+              color: 'var(--text-secondary)',
+              fontFamily: 'var(--font-mono)',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {event.observed}
+          </Text>
+        )}
+        {event.failure_reason && (
+          <Text style={{ display: 'block', marginTop: 4, fontSize: 10, color: 'var(--accent-red)' }}>
+            失败原因: {event.failure_reason}
+          </Text>
+        )}
+        {event.next_check && (
+          <Text style={{ display: 'block', marginTop: 4, fontSize: 10, color: 'var(--text-muted)' }}>
+            下一步: {event.next_check}
+          </Text>
+        )}
+      </div>
+    )
+  }
 
   const getPhaseIcon = (phase: string, eventType: string) => {
     const iconStyle = { fontSize: 14 }
@@ -128,6 +247,7 @@ function TracePanel() {
                 >
                   {event.content}
                 </Text>
+                {renderEvidence(event)}
                 {event.phase === 'tool_call' && event.content.includes('调用工具') && (
                   <Button
                     size="small"

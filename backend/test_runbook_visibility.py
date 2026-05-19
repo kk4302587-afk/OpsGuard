@@ -122,6 +122,13 @@ def test_runbook_replay_streams_plan_step_summaries_and_report() -> None:
         assert "技术细节: get_directory_size" in contents
         assert "结果摘要: 目录占用: 128M" in contents
         assert "结果摘要: 找到 1 个候选大文件" in contents
+        execution_events = [
+            event for event in events
+            if event.get("phase") == "execution" and event.get("event_type") == "success"
+        ]
+        assert execution_events
+        assert all(event.get("execution_state") == "executed" for event in execution_events)
+        assert all(event.get("source") in {"get_directory_size", "find_large_files"} for event in execution_events)
         assert "执行概览" in summary
         assert "系统影响: 本次只执行读取/检查步骤，没有修改系统。" in summary
         assert "下一步建议" in summary

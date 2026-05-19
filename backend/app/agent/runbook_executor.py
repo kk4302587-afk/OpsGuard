@@ -24,6 +24,14 @@ import aiosqlite
 from loguru import logger
 
 from app.agent.tools_registry import tools_registry, RiskLevel
+from app.agent.trace_evidence import (
+    build_evidence,
+    inference_evidence,
+    tool_plan_evidence,
+    tool_result_evidence,
+    trace_event,
+    verification_evidence,
+)
 from app.audit.logger import audit_logger, AuditPhase, AuditEventType
 from app.database import get_knowledge_db_path
 from app.safety.guardrail import SafetyGuardrail
@@ -301,12 +309,16 @@ async def execute_runbook(
         plan_steps.append(step_info)
 
     # === Announce ===
-    await send_to_client({
-        "type": "trace",
-        "phase": "planning",
-        "event_type": "start",
-        "content": _format_plan(runbook_name, plan_steps),
-    })
+    await send_to_client(trace_event(
+        phase="planning",
+        event_type="start",
+        content=_format_plan(runbook_name, plan_steps),
+        evidence=inference_evidence(
+            f"Runbook {runbook_name} execution plan prepared",
+            "runbook_executor",
+            {"runbook_id": runbook_id, "step_count": len(plan_steps)},
+        ),
+    ))
     await audit_logger.log(
         session_id, AuditPhase.PLANNING, AuditEventType.START,
         f"Runbook replay started: {runbook_name}",
@@ -326,10 +338,21 @@ async def execute_runbook(
         step_header = f"[步骤 {idx}/{len(steps)}] {step_info['action']}"
 
         if not tool_def:
-            await send_to_client({
-                "type": "trace", "phase": "tool_call", "event_type": "failure",
-                "content": f"{step_header}\n结果摘要: 工具不存在，Runbook 中止\n技术细节: {step_info['technical']}",
-            })
+            await send_to_client(trace_event(
+                phase="tool_call",
+                event_type="failure",
+                content=f"{step_header}\n结果摘要: 工具不存在，Runbook 中止\n技术细节: {step_info['technical']}",
+                evidence=build_evidence(
+                    claim=f"Runbook step {idx} cannot execute because the tool is missing",
+                    evidence_type="command",
+                    source=tool_name or "runbook",
+                    observed=step_info["technical"],
+                    confidence="high",
+                    execution_state="failed",
+                    failure_reason="Tool is not registered",
+                    next_check="Validate or update the runbook before replaying it.",
+                ),
+            ))
             failed_step = idx
             abort_reason = f"工具不存在: {tool_name}"
             executed.append({
@@ -343,10 +366,12 @@ async def execute_runbook(
             })
             break
 
-        await send_to_client({
-            "type": "trace", "phase": "tool_call", "event_type": "start",
-            "content": _format_step_trace(step_info),
-        })
+        await send_to_client(trace_event(
+            phase="tool_call",
+            event_type="start",
+            content=_format_step_trace(step_info),
+            evidence=tool_plan_evidence(tool_name, tool_args),
+        ))
         await audit_logger.log(
             session_id, AuditPhase.TOOL_CALL, AuditEventType.START,
             f"Runbook step {idx}: {tool_name}", {"args": tool_args},
@@ -357,10 +382,20 @@ async def execute_runbook(
         # === Rule-engine command check (re-run because patterns may have evolved) ===
         cmd_check = _guardrail.check_command(json.dumps(tool_args))
         if not cmd_check.is_safe:
-            await send_to_client({
-                "type": "trace", "phase": "tool_call", "event_type": "blocked",
-                "content": f"{step_header} 被规则引擎拦截: {cmd_check.detail}",
-            })
+            await send_to_client(trace_event(
+                phase="tool_call",
+                event_type="blocked",
+                content=f"{step_header} 被规则引擎拦截: {cmd_check.detail}",
+                evidence=build_evidence(
+                    claim=f"Runbook step {idx} was blocked before execution",
+                    evidence_type="command",
+                    source="SafetyGuardrail.check_command",
+                    observed=cmd_check.detail,
+                    confidence="high",
+                    execution_state="skipped",
+                    failure_reason=cmd_check.detail,
+                ),
+            ))
             failed_step = idx
             abort_reason = f"规则引擎拦截: {cmd_check.detail}"
             break
@@ -383,10 +418,19 @@ async def execute_runbook(
                 "description": tool_def.description,
                 "impact": f"Runbook「{runbook_name}」步骤 {idx}/{len(steps)}: {step_info['action']}",
             })
-            await send_to_client({
-                "type": "trace", "phase": "approval_request", "event_type": "pending",
-                "content": f"等待用户审批 {step_header}\n技术细节: {step_info['technical']}",
-            })
+            await send_to_client(trace_event(
+                phase="approval_request",
+                event_type="pending",
+                content=f"等待用户审批 {step_header}\n技术细节: {step_info['technical']}",
+                evidence=build_evidence(
+                    claim=f"Runbook step {idx} requires approval before execution",
+                    evidence_type="user input",
+                    source="approval_manager",
+                    observed=step_info["technical"],
+                    confidence="high",
+                    execution_state="skipped",
+                ),
+            ))
 
             try:
                 approved = await asyncio.wait_for(approval_future, timeout=approval_timeout)
@@ -396,10 +440,20 @@ async def execute_runbook(
                 approval_manager.remove_pending(request_id)
 
             if not approved:
-                await send_to_client({
-                    "type": "trace", "phase": "approval_response", "event_type": "failure",
-                    "content": f"{step_header} 被拒绝，Runbook 中止",
-                })
+                await send_to_client(trace_event(
+                    phase="approval_response",
+                    event_type="failure",
+                    content=f"{step_header} 被拒绝，Runbook 中止",
+                    evidence=build_evidence(
+                        claim=f"Runbook step {idx} was not executed because approval was rejected",
+                        evidence_type="user input",
+                        source="approval_manager",
+                        observed="rejected_or_timeout",
+                        confidence="high",
+                        execution_state="skipped",
+                        failure_reason="User approval was not granted",
+                    ),
+                ))
                 failed_step = idx
                 abort_reason = "用户拒绝执行"
                 executed.append({
@@ -413,10 +467,19 @@ async def execute_runbook(
                 })
                 break
 
-            await send_to_client({
-                "type": "trace", "phase": "approval_response", "event_type": "success",
-                "content": f"{step_header} 已批准",
-            })
+            await send_to_client(trace_event(
+                phase="approval_response",
+                event_type="success",
+                content=f"{step_header} 已批准",
+                evidence=build_evidence(
+                    claim=f"Runbook step {idx} was approved by the user",
+                    evidence_type="user input",
+                    source="approval_manager",
+                    observed="approved",
+                    confidence="high",
+                    execution_state="executed",
+                ),
+            ))
 
             # Backup (best-effort; ignore failures, the file may not be a path)
             try:
@@ -425,10 +488,19 @@ async def execute_runbook(
                 if target_path and isinstance(target_path, str):
                     backup_record = backup_manager.backup_file(target_path, operation=f"runbook:{tool_name}")
                     if backup_record:
-                        await send_to_client({
-                            "type": "trace", "phase": "execution", "event_type": "start",
-                            "content": f"{step_header} 已备份 {target_path}",
-                        })
+                        await send_to_client(trace_event(
+                            phase="execution",
+                            event_type="start",
+                            content=f"{step_header} 已备份 {target_path}",
+                            evidence=build_evidence(
+                                claim=f"Backup was created before runbook step {idx}",
+                                evidence_type="config",
+                                source="BackupManager.backup_file",
+                                observed=backup_record,
+                                confidence="high",
+                                execution_state="executed",
+                            ),
+                        ))
             except Exception as e:
                 logger.debug(f"Runbook backup skipped: {e}")
 
@@ -465,12 +537,17 @@ async def execute_runbook(
 
                     verification = _verify_tool_result(tool_name, tool_args, result)
                     if verification:
-                        await send_to_client({
-                            "type": "trace",
-                            "phase": "verification",
-                            "event_type": verification["status"],
-                            "content": f"{step_header}\n验证结果: {verification['message']}",
-                        })
+                        await send_to_client(trace_event(
+                            phase="verification",
+                            event_type=verification["status"],
+                            content=f"{step_header}\n验证结果: {verification['message']}",
+                            evidence=verification_evidence(
+                                claim=f"Post-action verification for runbook step {idx}",
+                                source=tool_name,
+                                observed=verification["message"],
+                                success=verification["status"] == "success",
+                            ),
+                        ))
                         if verification["status"] == "failure":
                             success = False
                             verification_error = verification["message"]
@@ -479,34 +556,52 @@ async def execute_runbook(
 
                     change_diff = _capture_change_diff(tool_name, tool_args, backup_record, before_change_state)
                     if change_diff:
-                        await send_to_client({
-                            "type": "trace",
-                            "phase": "verification",
-                            "event_type": "success",
-                            "content": f"{step_header}\n变更对比:\n{change_diff}",
-                        })
+                        await send_to_client(trace_event(
+                            phase="verification",
+                            event_type="success",
+                            content=f"{step_header}\n变更对比:\n{change_diff}",
+                            evidence=verification_evidence(
+                                claim=f"Before/after comparison captured for runbook step {idx}",
+                                source=tool_name,
+                                observed=change_diff,
+                                success=True,
+                            ),
+                        ))
                 except Exception as e:
                     logger.warning(f"Runbook verification failed for step {idx}: {e}")
                     success = False
                     verification_error = f"验证异常: {e}"
                     executed[-1]["success"] = False
                     executed[-1]["summary"] = verification_error
-                    await send_to_client({
-                        "type": "trace",
-                        "phase": "verification",
-                        "event_type": "failure",
-                        "content": f"{step_header}\n验证异常: {e}",
-                    })
+                    await send_to_client(trace_event(
+                        phase="verification",
+                        event_type="failure",
+                        content=f"{step_header}\n验证异常: {e}",
+                        evidence=verification_evidence(
+                            claim=f"Verification raised for runbook step {idx}",
+                            source=tool_name,
+                            observed=str(e),
+                            success=False,
+                        ),
+                    ))
 
             if success:
                 await audit_logger.log(
                     session_id, AuditPhase.EXECUTION, AuditEventType.SUCCESS,
                     f"Runbook step {idx} succeeded: {tool_name}",
                 )
-                await send_to_client({
-                    "type": "trace", "phase": "execution", "event_type": "success",
-                    "content": _format_step_trace(step_info, result_summary),
-                })
+                await send_to_client(trace_event(
+                    phase="execution",
+                    event_type="success",
+                    content=_format_step_trace(step_info, result_summary),
+                    evidence=tool_result_evidence(
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        tool_def=tool_def,
+                        result=result,
+                        claim=f"Runbook step {idx} executed successfully",
+                    ),
+                ))
             else:
                 err_msg = (
                     verification_error or result_repr.get("error", "工具返回 success=False")
@@ -517,10 +612,18 @@ async def execute_runbook(
                     session_id, AuditPhase.EXECUTION, AuditEventType.FAILURE,
                     f"Runbook step {idx} returned failure: {err_msg}",
                 )
-                await send_to_client({
-                    "type": "trace", "phase": "execution", "event_type": "failure",
-                    "content": _format_step_trace(step_info, err_msg),
-                })
+                await send_to_client(trace_event(
+                    phase="execution",
+                    event_type="failure",
+                    content=_format_step_trace(step_info, err_msg),
+                    evidence=tool_result_evidence(
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        tool_def=tool_def,
+                        result=result,
+                        claim=f"Runbook step {idx} failed",
+                    ),
+                ))
                 failed_step = idx
                 abort_reason = f"步骤返回失败: {err_msg}"
                 break
@@ -531,10 +634,21 @@ async def execute_runbook(
                 session_id, AuditPhase.EXECUTION, AuditEventType.FAILURE,
                 f"Runbook step {idx} raised: {e}",
             )
-            await send_to_client({
-                "type": "trace", "phase": "execution", "event_type": "failure",
-                "content": f"{step_header}\n结果摘要: 异常: {e}\n技术细节: {step_info['technical']}",
-            })
+            await send_to_client(trace_event(
+                phase="execution",
+                event_type="failure",
+                content=f"{step_header}\n结果摘要: 异常: {e}\n技术细节: {step_info['technical']}",
+                evidence=build_evidence(
+                    claim=f"Runbook step {idx} raised an exception",
+                    evidence_type="command",
+                    source=tool_name,
+                    observed=str(e),
+                    confidence="high",
+                    execution_state="failed",
+                    failure_reason=str(e),
+                    next_check="Inspect the runbook step arguments and retry with a read-only validation first.",
+                ),
+            ))
             failed_step = idx
             abort_reason = f"步骤异常: {e}"
             executed.append({
@@ -562,16 +676,36 @@ async def execute_runbook(
     # === Final summary message ===
     if failed_step is None:
         summary = _format_final_summary(runbook_name, plan_steps, executed, failed_step, abort_reason)
-        await send_to_client({
-            "type": "trace", "phase": "response", "event_type": "success",
-            "content": f"Runbook 完成: {len(steps)} 步全部成功\n系统影响: {'包含已审批的变更步骤' if any(step['risk_level'] in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE) for step in plan_steps) else '仅检查，未修改系统'}",
-        })
+        await send_to_client(trace_event(
+            phase="response",
+            event_type="success",
+            content=f"Runbook 完成: {len(steps)} 步全部成功\n系统影响: {'包含已审批的变更步骤' if any(step['risk_level'] in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE) for step in plan_steps) else '仅检查，未修改系统'}",
+            evidence=build_evidence(
+                claim=f"Runbook {runbook_name} completed",
+                evidence_type="command",
+                source="runbook_executor",
+                observed={"executed_steps": len(executed), "failed_step": None},
+                confidence="high",
+                execution_state="executed",
+            ),
+        ))
     else:
         summary = _format_final_summary(runbook_name, plan_steps, executed, failed_step, abort_reason)
-        await send_to_client({
-            "type": "trace", "phase": "response", "event_type": "failure",
-            "content": f"Runbook 中止于步骤 {failed_step}: {abort_reason}",
-        })
+        await send_to_client(trace_event(
+            phase="response",
+            event_type="failure",
+            content=f"Runbook 中止于步骤 {failed_step}: {abort_reason}",
+            evidence=build_evidence(
+                claim=f"Runbook {runbook_name} stopped before completing all steps",
+                evidence_type="command",
+                source="runbook_executor",
+                observed={"executed_steps": len(executed), "failed_step": failed_step, "abort_reason": abort_reason},
+                confidence="high",
+                execution_state="failed",
+                failure_reason=abort_reason or "Runbook did not complete",
+                next_check="Review the failing step evidence before replaying or editing the runbook.",
+            ),
+        ))
 
     await audit_logger.log(
         session_id, AuditPhase.RESPONSE, AuditEventType.SUCCESS,
