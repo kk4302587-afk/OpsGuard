@@ -21,6 +21,7 @@ _CATEGORY_EVIDENCE_TYPES = {
     "user": "command",
     "firewall": "command",
     "cron": "command",
+    "recent_changes": "command",
 }
 
 

@@ -326,6 +326,55 @@ else:
   appends an incident reference.
 - Runbook integration test proving step traces become incident events.
 
+## Scenario: Change-Aware RCA Evidence
+
+### 1. Scope / Trigger
+- Trigger: any change to recent-change collectors, Agent RCA pre-reasoning
+  nodes, trace evidence payloads, or tools in category `recent_changes`.
+- Goal: recent system changes should be surfaced as candidate RCA evidence
+  without implying causality or hiding unavailable data sources.
+
+### 2. Signatures
+- MCP tool: `get_recent_changes(window_hours=24, limit=30) -> ToolResult`
+- Agent graph node: `recent_changes_node(state: AgentState) -> dict`
+- Context field: `recent_changes_hint: str`
+
+### 3. Contracts
+- `get_recent_changes` is read-only and registered as `RiskLevel.READ`.
+- The tool returns structured `changes`, `source_status`, `summary`, and
+  `window_hours`.
+- Each change includes `source`, `change_type`, `target`, `timestamp`,
+  `detail`, and `confidence`.
+- Missing commands, missing files, permission issues, and command failures are
+  represented in `source_status`; they must not be collapsed into "no changes".
+- Agent automatically emits a `recent_changes` trace event before LLM
+  reasoning and injects a compact context block.
+- Recent changes are candidate evidence only. The LLM must not claim root cause
+  from recency alone without corroborating checks.
+
+### 4. Validation & Error Matrix
+- Collector found changes -> trace `event_type: success`,
+  `execution_state: executed`, source `get_recent_changes`.
+- Collector found zero changes with all sources inspected -> success with an
+  explicit zero-change summary.
+- Collector source unavailable or failed -> success may still be returned, but
+  `source_status` must show `unavailable`, `partial`, or `failed`.
+- Tool-level exception -> `ToolResult(success=False)` or Agent trace failure;
+  never report "no recent changes".
+
+### 5. Good/Base/Bad Cases
+- Good: `/etc/nginx/nginx.conf` mtime within the lookback window appears as a
+  `config_file_modified` change with timestamp and hash.
+- Base: package history logs do not exist; `source_status.package_history` says
+  unavailable.
+- Bad: journalctl fails and the Agent tells the user no service changes were
+  found without mentioning the failed source.
+
+### 6. Tests Required
+- Tool test for a real temp config mtime.
+- Tool test proving failed sources are preserved in `source_status`.
+- Agent node test proving trace evidence and prompt context are produced.
+
 ---
 
 ## Testing

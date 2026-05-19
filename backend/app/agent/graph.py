@@ -40,6 +40,7 @@ class AgentState(TypedDict):
     block_reason: str
     risk_warning: str
     knowledge_hint: str
+    recent_changes_hint: str
     iteration: int
     send_to_client: object  # Callable, not serializable but used in-memory
 
@@ -187,13 +188,134 @@ async def knowledge_retrieval_node(state: AgentState) -> dict:
     return {"knowledge_hint": knowledge_hint}
 
 
+async def recent_changes_node(state: AgentState) -> dict:
+    """Node 3: Collect recent system changes as RCA evidence."""
+    session_id = state["session_id"]
+    send_to_client = state["send_to_client"]
+
+    tool_def = tools_registry.get_tool("get_recent_changes")
+    if not tool_def:
+        await send_to_client(trace_event(
+            phase="recent_changes",
+            event_type="failure",
+            content="最近变更检查不可用: get_recent_changes 工具未注册",
+            evidence=build_evidence(
+                claim="Recent change check could not run because the tool is missing",
+                evidence_type="command",
+                source="get_recent_changes",
+                observed="tool not registered",
+                confidence="high",
+                execution_state="failed",
+                failure_reason="Tool is not registered",
+            ),
+        ))
+        return {"recent_changes_hint": ""}
+
+    await send_to_client(trace_event(
+        phase="recent_changes",
+        event_type="start",
+        content="检查近期系统变更...",
+        evidence=build_evidence(
+            claim="Recent change collection has been requested",
+            evidence_type="command",
+            source="get_recent_changes",
+            observed={"window_hours": 24, "limit": 30},
+            confidence="medium",
+            execution_state="skipped",
+        ),
+    ))
+
+    try:
+        result = tool_def.function(window_hours=24, limit=30)
+    except Exception as e:
+        await send_to_client(trace_event(
+            phase="recent_changes",
+            event_type="failure",
+            content=f"近期变更检查异常: {e}",
+            evidence=build_evidence(
+                claim="Recent change collection raised an exception",
+                evidence_type="command",
+                source="get_recent_changes",
+                observed=str(e),
+                confidence="high",
+                execution_state="failed",
+                failure_reason=str(e),
+            ),
+        ))
+        await audit_logger.log(
+            session_id,
+            AuditPhase.PLANNING,
+            AuditEventType.FAILURE,
+            "近期变更检查异常",
+            {"error": str(e)},
+        )
+        return {"recent_changes_hint": ""}
+
+    result_success = bool(getattr(result, "success", True))
+    result_data = getattr(result, "data", "")
+    result_error = getattr(result, "error", None)
+
+    if not result_success:
+        await send_to_client(trace_event(
+            phase="recent_changes",
+            event_type="failure",
+            content=f"近期变更检查失败: {result_error or 'success=False'}",
+            evidence=tool_result_evidence(
+                tool_name="get_recent_changes",
+                tool_args={"window_hours": 24, "limit": 30},
+                tool_def=tool_def,
+                result=result,
+            ),
+        ))
+        await audit_logger.log(
+            session_id,
+            AuditPhase.PLANNING,
+            AuditEventType.FAILURE,
+            "近期变更检查失败",
+            {"error": result_error},
+        )
+        return {"recent_changes_hint": ""}
+
+    from app.mcp_tools.recent_changes import compact_recent_changes
+
+    summary = compact_recent_changes(result_data) if isinstance(result_data, dict) else str(result_data)
+    change_count = len(result_data.get("changes") or []) if isinstance(result_data, dict) else 0
+    await send_to_client(trace_event(
+        phase="recent_changes",
+        event_type="success",
+        content=summary,
+        evidence=tool_result_evidence(
+            tool_name="get_recent_changes",
+            tool_args={"window_hours": 24, "limit": 30},
+            tool_def=tool_def,
+            result=result,
+            claim=f"Recent change check returned {change_count} candidate changes",
+        ),
+    ))
+    await audit_logger.log(
+        session_id,
+        AuditPhase.PLANNING,
+        AuditEventType.SUCCESS,
+        f"近期变更检查完成: {change_count} 条",
+    )
+
+    return {
+        "recent_changes_hint": (
+            "\n\n## Recent Change Evidence\n"
+            "Use this as candidate RCA evidence only; do not claim causality without supporting checks.\n"
+            f"{summary}\n"
+        )
+    }
+
+
 async def reasoning_node(state: AgentState) -> dict:
-    """Node 3: LLM reasoning with tool calling loop."""
+    """Node 4: LLM reasoning with tool calling loop."""
     session_id = state["session_id"]
     user_message = state["user_message"]
     send_to_client = state["send_to_client"]
     risk_warning = state.get("risk_warning", "")
     knowledge_hint = state.get("knowledge_hint", "")
+    recent_changes_hint = state.get("recent_changes_hint", "")
 
     await send_to_client(trace_event(
         phase="planning",
@@ -205,7 +327,7 @@ async def reasoning_node(state: AgentState) -> dict:
 
     # Build messages
     messages = list(state.get("messages", []))
-    user_content = user_message + knowledge_hint + risk_warning
+    user_content = user_message + knowledge_hint + recent_changes_hint + risk_warning
     messages.append({"role": "user", "content": user_content})
 
     all_tools = tools_registry.get_all_tools_for_llm()
@@ -703,6 +825,7 @@ def build_agent_graph():
     # Add nodes
     workflow.add_node("safety_check", safety_check_node)
     workflow.add_node("knowledge_retrieval", knowledge_retrieval_node)
+    workflow.add_node("recent_changes", recent_changes_node)
     workflow.add_node("reasoning", reasoning_node)
     workflow.add_node("knowledge_save", knowledge_save_node)
 
@@ -711,7 +834,8 @@ def build_agent_graph():
 
     # Add edges
     workflow.add_conditional_edges("safety_check", should_continue_after_safety)
-    workflow.add_edge("knowledge_retrieval", "reasoning")
+    workflow.add_edge("knowledge_retrieval", "recent_changes")
+    workflow.add_edge("recent_changes", "reasoning")
     workflow.add_edge("reasoning", "knowledge_save")
     workflow.add_edge("knowledge_save", END)
 
@@ -766,6 +890,7 @@ async def run_agent(
         "block_reason": "",
         "risk_warning": "",
         "knowledge_hint": "",
+        "recent_changes_hint": "",
         "iteration": 0,
         "send_to_client": send_to_client,
     }

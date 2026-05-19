@@ -99,6 +99,7 @@ _DISPLAY_NAMES: dict[str, str] = {
     "remove_cron_job": "删除定时任务",
     "list_backups": "备份列表",
     "rollback_backup": "恢复备份",
+    "get_recent_changes": "最近变更",
 }
 
 
@@ -611,6 +612,16 @@ class ToolsRegistry:
             },
             "required": ["backup_id"],
         }, backup.rollback_backup, RiskLevel.DESTRUCTIVE, "backup")
+
+        from app.mcp_tools import recent_changes
+
+        self._register("get_recent_changes", "Collect recent local system changes for RCA. Read-only.", {
+            "type": "object",
+            "properties": {
+                "window_hours": {"type": "integer", "description": "Lookback window in hours", "default": 24},
+                "limit": {"type": "integer", "description": "Maximum change records to return", "default": 30},
+            },
+        }, recent_changes.get_recent_changes, RiskLevel.READ, "recent_changes")
 
         logger.info(f"Tools registry loaded: {len(self._tools)} tools")
 

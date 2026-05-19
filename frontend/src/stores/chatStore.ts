@@ -356,6 +356,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               const phaseToStep: Record<string, number> = {
                 'safety_check': 0,
                 'knowledge_retrieval': 1,
+                'recent_changes': 1,
                 'planning': 2,
                 'tool_call': 3,
                 'execution': 3,
