@@ -502,6 +502,80 @@ if tool_def.risk_level != RiskLevel.READ:
     return skipped_check("webhook auto-triage is read-only")
 ```
 
+## Scenario: Topology RCA Annotations
+
+### 1. Scope / Trigger
+- Trigger: any change to topology graph APIs, dynamic diagnosis updates, trace
+  evidence parsing, or frontend topology RCA rendering.
+- Goal: topology highlights must come from persisted trace/incident evidence and
+  must distinguish observed runtime facts from inferred relationships.
+
+### 2. Signatures
+- API: `GET /api/topology/graph`
+- API: `GET /api/topology/graph/{session_id}`
+- Helper: `build_topology_annotations(session_id: str) -> list[dict]`
+- Annotation fields:
+  - `target_id`
+  - `target_type`: `service | port | process | config | host | unknown`
+  - `rca_role`: `affected | suspected_root_cause | downstream_impact | evidence`
+  - `evidence_summary`
+  - `source`
+  - `phase`
+  - `event_type`
+  - `execution_state`
+  - `inferred`
+
+### 3. Contracts
+- `/graph` remains backward-compatible and returns static nodes, edges, and
+  categories.
+- `/graph/{session_id}` returns the same graph shape plus optional
+  `annotations`; annotated nodes include `highlight`, `rca_role`, and
+  `annotations`.
+- Annotation extraction prefers `incident_events` because they preserve live
+  trace evidence. Audit logs are fallback only.
+- A topology annotation may claim execution only when trace evidence has
+  `execution_state` of `executed` or `failed`.
+- Relationship edges added solely from co-occurring evidence must set
+  `inferred: true`.
+
+### 4. Validation & Error Matrix
+- Session has no trace/incident evidence -> return graph with empty annotations.
+- Evidence has `execution_state: inferred` or `skipped` -> do not create an
+  execution annotation.
+- Recent-change evidence references a config path -> annotate config as a
+  suspected root-cause candidate, but mark service relationship inferred.
+- Listening-port evidence with pid -> annotate both `port_<port>` and
+  `proc_<pid>`.
+- Missing base topology node -> add a lightweight evidence node rather than
+  dropping the annotation.
+
+### 5. Good/Base/Bad Cases
+- Good: nginx diagnosis with service status, listening ports, and recent config
+  changes highlights `svc_nginx`, `port_80`, `proc_<pid>`, and `conf_nginx`.
+- Base: no active session shows the normal static topology graph.
+- Bad: LLM planning text creates a suspected root-cause node, or an inferred
+  evidence edge is rendered as an observed runtime relationship.
+
+### 6. Tests Required
+- Annotation extraction from incident events for service, port, process, and
+  config targets.
+- Graph merge test proving highlights, RCA roles, added missing nodes, and
+  inferred evidence edges.
+- Frontend build proving the optional annotation fields are typed.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```python
+node["highlight"] = "nginx" in user_message
+```
+
+#### Correct
+```python
+if evidence.get("execution_state") in {"executed", "failed"}:
+    annotations.append(annotation_from_evidence(evidence))
+```
+
 ---
 
 ## Testing

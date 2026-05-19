@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import ReactECharts from 'echarts-for-react'
 import { Button, Spin, Empty, Typography, Space, Tag } from 'antd'
 import { ApartmentOutlined, ReloadOutlined, NodeIndexOutlined } from '@ant-design/icons'
+import { useChatStore } from '../stores/chatStore'
 
 const { Title, Text } = Typography
 
@@ -10,18 +11,38 @@ interface TopologyNode {
   name: string
   category: string
   value?: string
+  highlight?: boolean
+  rca_role?: RcaRole
+  annotations?: TopologyAnnotation[]
 }
 
 interface TopologyEdge {
   source: string
   target: string
   relation: string
+  inferred?: boolean
+  annotations?: TopologyAnnotation[]
+}
+
+type RcaRole = 'affected' | 'suspected_root_cause' | 'downstream_impact' | 'evidence'
+
+interface TopologyAnnotation {
+  target_id: string
+  target_type: string
+  rca_role: RcaRole
+  evidence_summary: string
+  source: string
+  phase: string
+  event_type: string
+  execution_state: 'executed' | 'failed'
+  inferred?: boolean
 }
 
 interface TopologyData {
   nodes: TopologyNode[]
   edges: TopologyEdge[]
   categories: { name: string; itemStyle: { color: string } }[]
+  annotations?: TopologyAnnotation[]
 }
 
 const categoryLabels: Record<string, string> = {
@@ -30,6 +51,21 @@ const categoryLabels: Record<string, string> = {
   service: '服务',
   config: '配置',
   remote: '远程连接',
+  log: 'Log',
+}
+
+const roleLabels: Record<RcaRole, string> = {
+  affected: 'Affected',
+  suspected_root_cause: 'Suspected RCA',
+  downstream_impact: 'Impact',
+  evidence: 'Evidence',
+}
+
+const roleColors: Record<RcaRole, string> = {
+  affected: '#e06c75',
+  suspected_root_cause: '#d19a66',
+  downstream_impact: '#e5c07b',
+  evidence: '#00d4aa',
 }
 
 /**
@@ -37,17 +73,19 @@ const categoryLabels: Record<string, string> = {
  * Visualizes relationships between processes, ports, services, configs.
  */
 function TopologyGraph() {
+  const activeSessionId = useChatStore((state) => state.activeSessionId)
   const [data, setData] = useState<TopologyData | null>(null)
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     fetchTopology()
-  }, [])
+  }, [activeSessionId])
 
   const fetchTopology = async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/topology/graph')
+      const endpoint = activeSessionId ? `/api/topology/graph/${activeSessionId}` : '/api/topology/graph'
+      const res = await fetch(endpoint)
       if (res.ok) {
         const result = await res.json()
         setData(result)
@@ -92,10 +130,17 @@ function TopologyGraph() {
       formatter: (params: any) => {
         if (params.dataType === 'node') {
           const cat = data.categories[params.data.category]?.name || ''
-          return `<strong>${params.data.name}</strong><br/><span style="color:#8b929a">${categoryLabels[cat] || cat}</span>${params.data.value ? `<br/>${params.data.value}` : ''}`
+          const annotations = (params.data.annotations || []) as TopologyAnnotation[]
+          const annotationText = annotations.slice(0, 3).map((item) => (
+            `<br/><span style="color:${roleColors[item.rca_role] || '#8b929a'}">${roleLabels[item.rca_role] || item.rca_role}</span>` +
+            `<br/><span style="color:#8b929a">${item.source} / ${item.execution_state}</span>` +
+            `<br/>${item.evidence_summary}`
+          )).join('')
+          return `<strong>${params.data.name}</strong><br/><span style="color:#8b929a">${categoryLabels[cat] || cat}</span>${params.data.value ? `<br/>${params.data.value}` : ''}${annotationText}`
         }
         if (params.dataType === 'edge') {
-          return `<span style="color:#8b929a">${params.data.relation || ''}</span>`
+          const inferred = params.data.inferred ? '<br/><span style="color:#d19a66">inferred relationship</span>' : ''
+          return `<span style="color:#8b929a">${params.data.relation || ''}</span>${inferred}`
         }
         return ''
       },
@@ -148,20 +193,28 @@ function TopologyGraph() {
           else if (node.category === 'config') size = 20
 
           const catColor = data.categories[categoryMap[node.category]]?.itemStyle.color || '#8b929a'
+          const role = node.rca_role
+          const roleColor = role ? roleColors[role] : catColor
+          const isAnnotated = Boolean(node.highlight || node.annotations?.length)
 
           return {
+            id: node.id,
             name: node.name,
             value: node.value,
             category: categoryMap[node.category] ?? 0,
+            annotations: node.annotations || [],
+            rca_role: role,
             symbolSize: size,
             label: {
-              show: node.category === 'process' || node.category === 'service',
+              show: isAnnotated || node.category === 'process' || node.category === 'service',
+              color: isAnnotated ? '#e4e7eb' : '#8b929a',
+              fontWeight: isAnnotated ? 700 : 400,
             },
             itemStyle: {
-              shadowBlur: (node as any).highlight ? 24 : 6,
-              shadowColor: (node as any).highlight ? '#e06c75' : catColor + '30',
-              borderColor: (node as any).highlight ? '#e06c75' : catColor + '80',
-              borderWidth: (node as any).highlight ? 3 : 1.5,
+              shadowBlur: isAnnotated ? 24 : 6,
+              shadowColor: isAnnotated ? roleColor + '80' : catColor + '30',
+              borderColor: isAnnotated ? roleColor : catColor + '80',
+              borderWidth: isAnnotated ? 3 : 1.5,
             },
           }
         }),
@@ -172,12 +225,14 @@ function TopologyGraph() {
             source: sourceNode?.name || edge.source,
             target: targetNode?.name || edge.target,
             relation: edge.relation,
+            inferred: edge.inferred,
+            annotations: edge.annotations || [],
             lineStyle: {
-              color: '#3d4450',
-              width: edge.relation === 'connects_to' ? 1 : 2,
+              color: edge.relation === 'evidence_link' ? '#d19a66' : '#3d4450',
+              width: edge.relation === 'evidence_link' ? 2.5 : edge.relation === 'connects_to' ? 1 : 2,
               curveness: 0.2,
-              opacity: 0.7,
-              type: edge.relation === 'connects_to' ? 'dashed' as const : 'solid' as const,
+              opacity: edge.relation === 'evidence_link' ? 0.9 : 0.7,
+              type: edge.inferred || edge.relation === 'connects_to' ? 'dashed' as const : 'solid' as const,
             },
           }
         }),
@@ -215,6 +270,15 @@ function TopologyGraph() {
             <NodeIndexOutlined style={{ marginRight: 4 }} />
             {data.nodes.length} 节点 / {data.edges.length} 关系
           </Tag>
+          {activeSessionId && (
+            <Tag color={(data.annotations?.length || 0) > 0 ? 'orange' : 'default'}>
+              RCA {data.annotations?.length || 0}
+            </Tag>
+          )}
+          <Tag color="red">Affected</Tag>
+          <Tag color="orange">Suspected</Tag>
+          <Tag color="gold">Impact</Tag>
+          <Tag>Dashed=inferred</Tag>
         </Space>
         <Button icon={<ReloadOutlined />} onClick={fetchTopology} loading={loading}>
           刷新
