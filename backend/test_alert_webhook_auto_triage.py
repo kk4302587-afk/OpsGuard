@@ -151,7 +151,7 @@ def test_service_down_webhook_creates_session_incident_and_read_only_trace() -> 
             "get_recent_changes",
         ]
         assert result["report"]
-        assert "诊断追踪" in result["report"]
+        assert "诊断追踪" not in result["report"]
         assert len(events) >= 6
         execution_events = [event for event in events if event["phase"] == "execution"]
         assert execution_events

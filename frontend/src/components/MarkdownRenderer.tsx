@@ -10,6 +10,7 @@ interface MarkdownRendererProps {
 }
 
 const OPS_COMMAND_PATTERN = /^(sudo\s+)?(systemctl|service|journalctl|cat|tail|grep|awk|sed|find|ls|df|du|free|top|ps|ss|netstat|lsof|ping|curl|wget|dig|nslookup|ip|iptables|firewall-cmd|nginx|apachectl|docker|kubectl|crontab|chmod|chown|mkdir|cp|mv|rm|tar|gzip|mount|umount|rsync|scp|hostnamectl|timedatectl|getenforce|setenforce)\b/
+const INLINE_VALUE_PATTERN = /(^\/|\.service$|^[\w.-]+$)/
 
 function nodeToText(node: ReactNode): string {
   if (node === null || node === undefined || typeof node === 'boolean') return ''
@@ -50,7 +51,13 @@ function CopyButton({ text, compact = false }: { text: string; compact?: boolean
 
 function isLikelyOpsCommand(text: string): boolean {
   const normalized = text.trim()
-  return normalized.length >= 3 && normalized.length <= 180 && OPS_COMMAND_PATTERN.test(normalized)
+  return (
+    normalized.length >= 3
+    && normalized.length <= 180
+    && /\s/.test(normalized)
+    && !INLINE_VALUE_PATTERN.test(normalized)
+    && OPS_COMMAND_PATTERN.test(normalized)
+  )
 }
 
 const markdownComponents: Components = {

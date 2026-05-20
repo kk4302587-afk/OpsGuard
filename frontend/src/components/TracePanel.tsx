@@ -33,6 +33,7 @@ interface TraceEvidence {
  */
 function TracePanel() {
   const { traceEvents, sendMessage } = useChatStore()
+  const visibleTraceEvents = traceEvents.filter((event) => event.phase !== 'recent_changes')
 
   const getEvidenceStateColor = (state?: string): string => {
     switch (state) {
@@ -151,7 +152,6 @@ function TracePanel() {
     switch (phase) {
       case 'safety_check': return <SafetyOutlined style={{ ...iconStyle, color: 'var(--accent-green)' }} />
       case 'knowledge_retrieval': return <SearchOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
-      case 'recent_changes': return <SearchOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
       case 'planning': return <BulbOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
       case 'tool_call': return <ToolOutlined style={{ ...iconStyle, color: 'var(--accent-purple)' }} />
       case 'execution': return <LoadingOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
@@ -180,7 +180,6 @@ function TracePanel() {
       input_received: '接收指令',
       safety_check: '安全校验',
       knowledge_retrieval: '知识检索',
-      recent_changes: '近期变更',
       planning: '推理规划',
       tool_call: '工具调用',
       approval_request: '审批请求',
@@ -196,9 +195,6 @@ function TracePanel() {
 
   const getDisplayContent = (event: TraceEvidence & { phase?: string; content?: string }) => {
     const content = event.content || ''
-    if (event.phase === 'recent_changes' && content.length > 420) {
-      return `${content.slice(0, 420)}\n...（内容较长，已截断；新版近期变更会显示中文摘要）`
-    }
     return content
   }
 
@@ -209,7 +205,7 @@ function TracePanel() {
         推理链路
       </Title>
 
-      {traceEvents.length === 0 ? (
+      {visibleTraceEvents.length === 0 ? (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Empty
             description={<Text style={{ color: 'var(--text-muted)', fontSize: 12 }}>发送消息后查看推理过程</Text>}
@@ -218,7 +214,7 @@ function TracePanel() {
         </div>
       ) : (
         <div style={{ flex: 1, overflow: 'auto' }}>
-          {traceEvents.map((event, index) => (
+          {visibleTraceEvents.map((event, index) => (
             <div
               key={index}
               style={{
@@ -226,7 +222,7 @@ function TracePanel() {
                 gap: 10,
                 marginBottom: 12,
                 paddingBottom: 12,
-                borderBottom: index < traceEvents.length - 1 ? '1px solid var(--border-color)' : 'none',
+                borderBottom: index < visibleTraceEvents.length - 1 ? '1px solid var(--border-color)' : 'none',
               }}
             >
               {/* Icon */}

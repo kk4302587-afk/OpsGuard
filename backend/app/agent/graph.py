@@ -879,7 +879,6 @@ def build_agent_graph():
     # Add nodes
     workflow.add_node("safety_check", safety_check_node)
     workflow.add_node("knowledge_retrieval", knowledge_retrieval_node)
-    workflow.add_node("recent_changes", recent_changes_node)
     workflow.add_node("reasoning", reasoning_node)
 
     # Set entry point
@@ -887,8 +886,7 @@ def build_agent_graph():
 
     # Add edges
     workflow.add_conditional_edges("safety_check", should_continue_after_safety)
-    workflow.add_edge("knowledge_retrieval", "recent_changes")
-    workflow.add_edge("recent_changes", "reasoning")
+    workflow.add_edge("knowledge_retrieval", "reasoning")
     workflow.add_edge("reasoning", END)
 
     return workflow.compile()

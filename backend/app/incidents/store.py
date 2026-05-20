@@ -287,24 +287,13 @@ async def append_incident_reference(
     *,
     db_path: str | None = None,
 ) -> str:
-    """Append a compact incident reference block to an assistant response."""
-    summary = await get_incident_summary(incident_id, db_path=db_path)
-    if not summary:
-        return response
-    status_label = {
-        "open": "处理中",
-        "resolved": "已解决",
-        "failed": "失败",
-    }.get(str(summary.get("status") or ""), str(summary.get("status") or "未知"))
-    block = (
-        "\n\n---\n"
-        "诊断追踪\n"
-        f"- 追踪ID：{summary['id']}\n"
-        f"- 状态：{status_label}\n"
-        f"- 事件数：{summary['event_count']}，工具结果：{summary['tool_result_count']}，失败数：{summary['failure_count']}\n"
-        f"- 明细接口：GET /api/incidents/{summary['id']}/events"
-    )
-    return response + block
+    """Return the assistant response without appending internal incident metadata.
+
+    Incident records are still persisted and available through the incident APIs,
+    but normal chat replies should not expose trace ids, event counts, or debug
+    endpoints to operators by default.
+    """
+    return response
 
 
 async def get_incidents(

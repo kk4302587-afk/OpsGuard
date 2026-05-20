@@ -170,11 +170,57 @@ def test_recent_changes_node_emits_trace_and_context() -> None:
     asyncio.run(scenario())
 
 
+def test_agent_graph_does_not_auto_emit_recent_changes_trace() -> None:
+    """Normal Agent runs no longer add recent-change events to the trace panel."""
+    async def scenario() -> None:
+        events: list[dict] = []
+        original_get_path = graph.incident_store.get_knowledge_db_path
+        original_call_llm = graph.call_llm
+        original_search = graph.knowledge_store.search
+        original_log = graph.audit_logger.log
+
+        async def fake_call_llm(messages, tools=None):
+            return {"content": "检查完成。", "tool_calls": []}
+
+        async def fake_search(query: str, limit: int = 3):
+            return []
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "knowledge.db")
+            try:
+                graph.incident_store.get_knowledge_db_path = lambda: db_path
+                graph.call_llm = fake_call_llm
+                graph.knowledge_store.search = fake_search
+                graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+
+                await graph.run_agent(
+                    session_id="recent-disabled",
+                    user_message="检查系统状态",
+                    conversation_history=[],
+                    send_to_client=capture_event,
+                )
+            finally:
+                graph.incident_store.get_knowledge_db_path = original_get_path
+                graph.call_llm = original_call_llm
+                graph.knowledge_store.search = original_search
+                graph.audit_logger.log = original_log
+
+        assert not any(event.get("phase") == "recent_changes" for event in events)
+        assert any(event.get("phase") == "knowledge_retrieval" for event in events)
+        assert any(event.get("phase") == "planning" for event in events)
+
+    asyncio.run(scenario())
+
+
 def main() -> None:
     test_recent_changes_reports_real_config_mtime()
     test_recent_changes_preserves_failed_source_status()
     test_tool_registry_exposes_recent_changes_as_read_only()
     test_recent_changes_node_emits_trace_and_context()
+    test_agent_graph_does_not_auto_emit_recent_changes_trace()
     print("recent changes regression OK")
 
 

@@ -112,6 +112,10 @@ def test_incident_store_records_real_trace_evidence() -> None:
                 incident_id,
                 db_path=db_path,
             )
+            summary = await incident_store.get_incident_summary(
+                incident_id,
+                db_path=db_path,
+            )
 
         assert len(incidents) == 1
         assert incidents[0]["status"] == "resolved"
@@ -121,12 +125,14 @@ def test_incident_store_records_real_trace_evidence() -> None:
         assert execution["evidence"]["source"] == "get_service_status"
         approval = [event for event in events if event["phase"] == "approval_request"][0]
         assert approval["evidence"]["execution_state"] == "skipped"
-        assert f"/api/incidents/{incident_id}/events" in response
+        assert response == "done"
+        assert summary is not None
+        assert summary["event_count"] == 3
 
     asyncio.run(scenario())
 
 
-def test_agent_run_creates_incident_and_appends_reference() -> None:
+def test_agent_run_creates_incident_without_appending_reference() -> None:
     async def scenario() -> None:
         events: list[dict] = []
         original_get_path = graph.incident_store.get_knowledge_db_path
@@ -171,7 +177,7 @@ def test_agent_run_creates_incident_and_appends_reference() -> None:
                 graph.knowledge_store.search = original_search
                 graph.audit_logger.log = original_log
 
-        assert "诊断追踪" in response
+        assert "诊断追踪" not in response
         assert len(incidents) == 1
         assert incidents[0]["status"] == "resolved"
         assert any(event["phase"] == "knowledge_retrieval" for event in incident_events)
@@ -231,7 +237,7 @@ def test_runbook_execution_creates_incident_from_real_step_events() -> None:
                 runbook_executor.tools_registry.get_tool = original_get_tool
                 runbook_executor.audit_logger.log = original_log
 
-        assert "诊断追踪" in summary
+        assert "诊断追踪" not in summary
         assert len(incidents) == 1
         assert incidents[0]["status"] == "resolved"
         execution = [event for event in incident_events if event["phase"] == "execution"]
@@ -245,7 +251,7 @@ def test_runbook_execution_creates_incident_from_real_step_events() -> None:
 
 def main() -> None:
     test_incident_store_records_real_trace_evidence()
-    test_agent_run_creates_incident_and_appends_reference()
+    test_agent_run_creates_incident_without_appending_reference()
     test_runbook_execution_creates_incident_from_real_step_events()
     print("incident timeline regression OK")
 

@@ -111,7 +111,6 @@ const createDefaultProgressSteps = (): ProgressStep[] => [
 const phaseToProgressStep: Record<string, number> = {
   safety_check: 0,
   knowledge_retrieval: 1,
-  recent_changes: 1,
   planning: 2,
   tool_call: 3,
   execution: 3,
@@ -186,6 +185,7 @@ const traceKey = (event: TraceEvent): string => [
 const mergeTraceEvents = (existing: TraceEvent[], incoming: TraceEvent[]): TraceEvent[] => {
   const seen = new Set<string>()
   return [...existing, ...incoming]
+    .filter((event) => event.phase !== 'recent_changes')
     .filter((event) => {
       const key = traceKey(event)
       if (seen.has(key)) return false
@@ -468,7 +468,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               const phaseToStep: Record<string, number> = {
                 'safety_check': 0,
                 'knowledge_retrieval': 1,
-                'recent_changes': 1,
                 'planning': 2,
                 'tool_call': 3,
                 'execution': 3,
