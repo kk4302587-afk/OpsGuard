@@ -540,14 +540,16 @@ async def execute_runbook(
             # Backup (best-effort; ignore failures, the file may not be a path)
             try:
                 from app.mcp_tools.backup import backup_manager
+                from app.agent.graph import _effective_rollback_capability
                 target_path = tool_args.get("filepath") or tool_args.get("path") or tool_args.get("service")
-                if target_path and isinstance(target_path, str):
+                can_backup_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
+                if can_backup_rollback and rollback_strategy == "backup" and target_path and isinstance(target_path, str):
                     backup_record = backup_manager.backup_file(target_path, operation=f"runbook:{tool_name}")
                     if backup_record:
                         await send_to_client(trace_event(
                             phase="execution",
                             event_type="start",
-                            content=f"{step_header} 已备份 {target_path}",
+                            content=f"{step_header} 已创建回滚备份：{target_path}",
                             evidence=build_evidence(
                                 claim=f"Backup was created before runbook step {idx}",
                                 evidence_type="config",

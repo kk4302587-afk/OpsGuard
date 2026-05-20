@@ -9,7 +9,7 @@ os.chdir(Path(__file__).parent)
 
 from app.agent.graph import assess_impact
 from app.agent.tools_registry import RiskLevel, tools_registry
-from app.mcp_tools import backup
+from app.mcp_tools import backup, file_tools
 
 
 def _isolate_backup_manager(tmpdir: str) -> None:
@@ -54,20 +54,63 @@ def test_impact_text_is_truthful_about_rollback() -> None:
 
         service_text = await assess_impact("restart_service", {"service": "nginx"}, "s", capture)
         assert service_text is not None
-        assert "no reliable automated rollback" in service_text
+        assert "回滚：无可靠自动回滚" in service_text
+        assert "预览：仅影响评估" in service_text
 
-        file_text = await assess_impact("write_file", {"filepath": "/tmp/example.conf"}, "s", capture)
-        assert file_text is not None
-        assert "Rollback: backup strategy" in file_text
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "example.conf"
+            target.write_text("before", encoding="utf-8")
+            file_text = await assess_impact("write_file", {"filepath": str(target)}, "s", capture)
+            assert file_text is not None
+            assert "回滚：支持备份回滚" in file_text
+
+            new_file_text = await assess_impact("create_file", {"filepath": str(Path(tmpdir) / "new.conf")}, "s", capture)
+            assert new_file_text is not None
+            assert "操作：创建文件" in new_file_text
+            assert "回滚：无可靠自动回滚" in new_file_text
+
+            overwrite_text = await assess_impact(
+                "create_file",
+                {"filepath": str(target), "overwrite": True},
+                "s",
+                capture,
+            )
+            assert overwrite_text is not None
+            assert "回滚：支持备份回滚" in overwrite_text
         assert any(event.get("phase") == "planning" for event in events)
 
     asyncio.run(scenario())
+
+
+def test_create_file_tool_creates_real_file_without_overwriting_by_default() -> None:
+    tool = tools_registry.get_tool("create_file")
+    assert tool is not None
+    assert tool.risk_level == RiskLevel.WRITE
+    assert tool.display_name == "创建文件"
+    assert tool.supports_rollback is True
+    assert tool.rollback_strategy == "backup"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target = Path(tmpdir) / "created.conf"
+
+        created = file_tools.create_file(str(target), "hello")
+        assert created.success is True
+        assert target.read_text(encoding="utf-8") == "hello"
+
+        duplicate = file_tools.create_file(str(target), "changed")
+        assert duplicate.success is False
+        assert target.read_text(encoding="utf-8") == "hello"
+
+        overwritten = file_tools.create_file(str(target), "changed", overwrite=True)
+        assert overwritten.success is True
+        assert target.read_text(encoding="utf-8") == "changed"
 
 
 def main() -> None:
     test_backup_list_and_rollback_restore_real_file()
     test_rollback_tool_is_destructive_and_approval_gated()
     test_impact_text_is_truthful_about_rollback()
+    test_create_file_tool_creates_real_file_without_overwriting_by_default()
     print("rollback visibility regression OK")
 
 

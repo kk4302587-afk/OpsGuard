@@ -42,6 +42,39 @@ def write_file(filepath: str, content: str, append: bool = False) -> ToolResult:
         return ToolResult(success=False, data="", error=str(e))
 
 
+def create_file(filepath: str, content: str = "", overwrite: bool = False) -> ToolResult:
+    """Create a new file. REQUIRES APPROVAL.
+
+    Args:
+        filepath: Target file path
+        content: Initial file content
+        overwrite: If True, overwrite an existing file; defaults to safe create-only
+    """
+    error = _check_protected(filepath)
+    if error:
+        return ToolResult(success=False, data="", error=error)
+
+    try:
+        path = Path(filepath)
+        parent = path.parent
+        if parent and not parent.exists():
+            return ToolResult(success=False, data="", error=f"父目录不存在: {parent}")
+        if path.exists() and path.is_dir():
+            return ToolResult(success=False, data="", error=f"目标是目录，不能创建为文件: {filepath}")
+        if path.exists() and not overwrite:
+            return ToolResult(success=False, data="", error=f"文件已存在，如需覆盖请设置 overwrite=true: {filepath}")
+
+        mode = "w" if overwrite else "x"
+        with open(path, mode, encoding="utf-8") as f:
+            f.write(content)
+        action = "已覆盖创建" if overwrite else "已创建"
+        return ToolResult(success=True, data=f"{action}: {filepath} ({len(content)} bytes)")
+    except FileExistsError:
+        return ToolResult(success=False, data="", error=f"文件已存在，如需覆盖请设置 overwrite=true: {filepath}")
+    except Exception as e:
+        return ToolResult(success=False, data="", error=str(e))
+
+
 def delete_file(filepath: str) -> ToolResult:
     """Delete a file. REQUIRES APPROVAL.
 

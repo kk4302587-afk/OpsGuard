@@ -55,6 +55,14 @@
 - Protected paths list checked before any write operation
 - Before/after change diffs must use a live pre-execution snapshot captured immediately before the write tool runs. Never hardcode "Before" values from assumptions.
 - Write-completion hallucination guards must consider the user's current write intent, not only completion-looking words in the final response. Read-only analysis may legitimately describe system state with phrases such as "已启动".
+- Clearly read-only requests such as service status/query/log/config inspection
+  must not trigger WRITE/DESTRUCTIVE tools. If the LLM selects a write tool for
+  a read-only turn, block it before approval/execution and report skipped
+  evidence.
+- Service status output may contain historical `ExecStart`, restart counter, or
+  failed start records. Final replies must distinguish "current state observed"
+  from "this turn executed start/restart"; never imply this turn restarted a
+  service unless `start_service`/`restart_service` actually ran.
 - Knowledge retrieval must distinguish a real no-match result from search
   failure. Do not catch database/search exceptions and report them as "no
   related history".
@@ -132,6 +140,60 @@ await send_to_client(trace_event(
     ),
 ))
 ```
+
+## Scenario: Chinese Structured Assistant Responses
+
+### 1. Scope / Trigger
+- Trigger: any change to Agent prompts, final response generation, Runbook summaries, or incident reference text.
+- Goal: final assistant replies should read like a concise Chinese ops handling note, not a raw reasoning dump.
+
+### 2. Signatures
+- Prompt helper: `_system_prompt() -> str`
+- Prompt constants: `SYSTEM_PROMPT`, `RESPONSE_STYLE_PROMPT`
+- Final response path: Agent/Runbook returns Markdown text to chat messages.
+
+### 3. Contracts
+- User-facing assistant replies must be Chinese.
+- Preferred sections are `**结论**`, `**关键证据**`, `**建议操作**`, `**可复制命令**`, and `**风险与确认**`.
+- Copy-worthy commands must be fenced `bash` code blocks, one complete command per line.
+- Do not include raw tool JSON, long logs, or full reasoning traces in the final response; the trace panel is the detail surface.
+- Do not generate English incident/status/failure labels in user-facing text.
+
+### 4. Validation & Error Matrix
+- Read-only diagnosis -> include conclusion, key evidence, and next read-only checks.
+- Write/destructive recommendation -> include risk and confirmation requirement.
+- Manual command recommendation -> include `bash` fenced block.
+- No actionable command -> omit `**可复制命令**`.
+
+### 5. Good/Base/Bad Cases
+- Good: short conclusion, 3 evidence bullets, one `bash` code block, clear confirmation question.
+- Base: no issue found -> concise Chinese summary with verification source.
+- Bad: long Markdown with emojis, repeated `---`, raw trace text, and inline-only shell commands.
+
+### 6. Tests Required
+- Prompt smoke check imports `_system_prompt()` and asserts the response style rules are present.
+- Frontend build verifies rendered Markdown supports command copy controls.
+
+### 7. Wrong vs Correct
+#### Wrong
+```markdown
+### 🔎 最新证据强化结论
+1. `nslookup example.com` ...
+---
+Incident timeline
+```
+
+#### Correct
+````markdown
+**结论**
+DNS 解析可能异常，建议先做只读确认。
+
+**可复制命令**
+```bash
+nslookup example.com
+cat /etc/resolv.conf
+```
+````
 
 ## Scenario: Runbook Governance Metadata
 
@@ -297,7 +359,8 @@ else:
 - Approval pending/rejected entries use `execution_state: skipped`.
 - Final assistant responses include a compact incident reference with the
   incident id, status, event count, tool result count, failure count, and API
-  endpoint for the timeline.
+  endpoint for the timeline. This block is user-facing and must be written in
+  Chinese, with raw API identifiers kept only where they are actionable.
 - OpsReport may aggregate incident counts, but it must not synthesize missing
   incident events.
 
@@ -349,6 +412,9 @@ else:
   represented in `source_status`; they must not be collapsed into "no changes".
 - Agent automatically emits a `recent_changes` trace event before LLM
   reasoning and injects a compact context block.
+- User-facing `recent_changes` trace content must be Chinese and compact:
+  summary first, at most a few representative changes, no raw `source_status`
+  JSON and no long journal/package log lines.
 - Recent changes are candidate evidence only. The LLM must not claim root cause
   from recency alone without corroborating checks.
 
@@ -374,6 +440,8 @@ else:
 - Tool test for a real temp config mtime.
 - Tool test proving failed sources are preserved in `source_status`.
 - Agent node test proving trace evidence and prompt context are produced.
+- Trace content test proving the visible event is Chinese, bounded, and does
+  not include raw `source_status` JSON.
 
 ## Scenario: Incident-Memory Knowledge Entries
 

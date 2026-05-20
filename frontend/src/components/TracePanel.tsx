@@ -151,6 +151,7 @@ function TracePanel() {
     switch (phase) {
       case 'safety_check': return <SafetyOutlined style={{ ...iconStyle, color: 'var(--accent-green)' }} />
       case 'knowledge_retrieval': return <SearchOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
+      case 'recent_changes': return <SearchOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
       case 'planning': return <BulbOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
       case 'tool_call': return <ToolOutlined style={{ ...iconStyle, color: 'var(--accent-purple)' }} />
       case 'execution': return <LoadingOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
@@ -179,6 +180,7 @@ function TracePanel() {
       input_received: '接收指令',
       safety_check: '安全校验',
       knowledge_retrieval: '知识检索',
+      recent_changes: '近期变更',
       planning: '推理规划',
       tool_call: '工具调用',
       approval_request: '审批请求',
@@ -190,6 +192,14 @@ function TracePanel() {
       knowledge_save: '知识沉淀',
     }
     return labels[phase] || phase
+  }
+
+  const getDisplayContent = (event: TraceEvidence & { phase?: string; content?: string }) => {
+    const content = event.content || ''
+    if (event.phase === 'recent_changes' && content.length > 420) {
+      return `${content.slice(0, 420)}\n...（内容较长，已截断；新版近期变更会显示中文摘要）`
+    }
+    return content
   }
 
   return (
@@ -242,10 +252,11 @@ function TracePanel() {
                     fontSize: 11,
                     color: event.event_type === 'blocked' ? 'var(--accent-red)' : 'var(--text-secondary)',
                     fontFamily: 'var(--font-mono)',
-                    wordBreak: 'break-all',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
                   }}
                 >
-                  {event.content}
+                  {getDisplayContent(event)}
                 </Text>
                 {renderEvidence(event)}
                 {event.phase === 'tool_call' && event.content.includes('调用工具') && (

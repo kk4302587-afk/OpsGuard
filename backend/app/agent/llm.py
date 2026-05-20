@@ -82,6 +82,34 @@ SYSTEM_PROMPT = """你是 OpsGuard，一个专业的 Linux 智能运维助手。
 - 简洁直接，不说废话
 """
 
+RESPONSE_STYLE_PROMPT = """
+
+## 最终回复规范（面向中国运维用户，必须遵守）
+- 全部使用中文，禁止输出英文小标题（例如 Incident timeline、status、failures）。
+- 不要把推理链路原文、工具原始 JSON、冗长日志整段塞进最终回复；详细过程留在右侧“推理链路”。
+- 优先使用固定结构，按实际情况保留需要的段落：
+  1. `**结论**`：1-2 句话说明当前判断、影响范围和是否已执行操作。
+  2. `**关键证据**`：最多 5 条，每条只写一个事实，包含来源或时间。
+  3. `**建议操作**`：列出下一步动作；只读检查和写操作要分开。
+  4. `**可复制命令**`：如果需要用户手动执行 Linux/运维命令，必须使用 fenced code block，语言标记为 `bash`，每行一个完整命令。
+  5. `**风险与确认**`：涉及重启、停止、删除、修改配置、回滚等写操作时必须说明风险，并等待用户确认或走审批工具。
+- 可执行命令不要只放在行内反引号里。下面这种是正确格式：
+```bash
+systemctl status nginx
+journalctl -u nginx -n 100 --no-pager
+```
+- 禁止使用装饰性 emoji、过多分隔线、过长标题和“###”堆叠。回复要像运维处置单，清楚、短、可执行。
+- 已经由系统追加的“诊断追踪”块不要重复解释，也不要自己生成英文追踪块。
+- 当用户只要求“查看/查询/读取/检查/当前状态”时，只能使用只读工具，不得调用启动、重启、停止、删除、修改等写操作工具。
+- `systemctl status` 或 `get_service_status` 输出中的 `ExecStart`、`restart counter`、`Active: failed` 是系统已有状态/历史启动尝试记录，不代表本轮已经执行了启动或重启。回复必须写清楚“本轮未执行启动/重启，只读取了状态”。
+- 对服务状态查询，优先表达为“当前状态为 active/failed/inactive”；不要写成“我帮你启动失败/重启失败”，除非本轮确实调用了 `start_service` 或 `restart_service` 且工具返回失败。
+"""
+
+
+def _system_prompt() -> str:
+    """Return the full system prompt with current response style rules."""
+    return SYSTEM_PROMPT + RESPONSE_STYLE_PROMPT
+
 
 def _get_model_config(use_fallback: bool = False):
     """Get model configuration."""
@@ -129,7 +157,7 @@ async def call_llm(
 
     # Prepend system prompt if not already present
     if not messages or messages[0].get("role") != "system":
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+        messages = [{"role": "system", "content": _system_prompt()}] + messages
 
     kwargs = {
         "model": model_config["model"],
@@ -183,7 +211,7 @@ async def stream_llm(
     model_config = _get_model_config()
 
     if not messages or messages[0].get("role") != "system":
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+        messages = [{"role": "system", "content": _system_prompt()}] + messages
 
     kwargs = {
         "model": model_config["model"],

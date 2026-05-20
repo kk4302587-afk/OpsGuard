@@ -24,9 +24,35 @@ interface ApprovalModalProps {
   onClose: () => void
 }
 
+function previewLabel(strategy?: string) {
+  const labels: Record<string, string> = {
+    impact_only: '仅影响评估',
+    check_mode: '检查模式',
+    diff: '差异对比',
+    dry_run: '预演执行',
+    none: '无预览',
+  }
+  return labels[strategy || 'none'] || strategy || '无预览'
+}
+
+function rollbackLabel(strategy?: string) {
+  const labels: Record<string, string> = {
+    backup: '备份回滚',
+    manual: '手动回滚',
+    inverse_action: '反向操作',
+    none: '无可靠自动回滚',
+  }
+  return labels[strategy || 'none'] || strategy || '无可靠自动回滚'
+}
+
+function riskLabel(level: string) {
+  if (level === 'destructive') return '高危操作'
+  if (level === 'write') return '写操作'
+  return '需要确认'
+}
+
 /**
- * Modal for approving/rejecting high-risk operations.
- * Shows command details, risk level, and description.
+ * Modal for approving or rejecting high-risk operations.
  */
 function ApprovalModal({ visible, request, onClose }: ApprovalModalProps) {
   const { ws } = useChatStore()
@@ -97,7 +123,7 @@ function ApprovalModal({ visible, request, onClose }: ApprovalModalProps) {
         <Descriptions column={1} size="small" bordered>
           <Descriptions.Item label="风险等级">
             <Tag color={getRiskColor(request.risk_level)} icon={getRiskIcon(request.risk_level)}>
-              {request.risk_level === 'destructive' ? '高危' : '写操作'}
+              {riskLabel(request.risk_level)}
             </Tag>
           </Descriptions.Item>
           <Descriptions.Item label="操作描述">
@@ -105,9 +131,11 @@ function ApprovalModal({ visible, request, onClose }: ApprovalModalProps) {
           </Descriptions.Item>
           <Descriptions.Item label="预览/回滚">
             <Space direction="vertical" size={2}>
-              <Text>预览: {request.preview_strategy || 'impact_only'}</Text>
+              <Text>预览：{previewLabel(request.preview_strategy)}</Text>
               <Text>
-                回滚: {request.supports_rollback ? `${request.rollback_strategy || 'backup'} 可用` : '无可靠自动回滚'}
+                回滚：{request.supports_rollback
+                  ? `${rollbackLabel(request.rollback_strategy)}可用`
+                  : '无可靠自动回滚'}
               </Text>
             </Space>
           </Descriptions.Item>
@@ -132,14 +160,14 @@ function ApprovalModal({ visible, request, onClose }: ApprovalModalProps) {
         <div style={{ marginTop: 16, padding: '8px 12px', background: 'rgba(229, 192, 123, 0.1)', borderRadius: 4, border: '1px solid rgba(229, 192, 123, 0.3)' }}>
           <Text style={{ fontSize: 12, color: 'var(--accent-yellow)' }}>
             <WarningOutlined style={{ marginRight: 6 }} />
-            请确认此操作是否安全。批准后将立即执行，操作前已自动备份相关文件。
+            请确认此操作是否安全。批准后会立即执行；只有弹窗明确显示回滚可用的操作，才会尝试创建可恢复的备份点。
           </Text>
         </div>
 
         {request.impact && (
           <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(97, 175, 239, 0.08)', borderRadius: 4, border: '1px solid rgba(97, 175, 239, 0.2)' }}>
             <Text style={{ fontSize: 12, color: 'var(--accent-blue)', whiteSpace: 'pre-line' }}>
-              影响评估: {request.impact}
+              {request.impact}
             </Text>
           </div>
         )}

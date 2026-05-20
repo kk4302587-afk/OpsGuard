@@ -10,7 +10,7 @@ from pathlib import Path
 
 os.chdir(Path(__file__).parent)
 
-from app.agent.graph import _claims_write_completion, _has_write_intent
+from app.agent.graph import _claims_write_completion, _has_write_intent, _is_read_only_intent
 
 
 def _would_trigger_guard(user_message: str, final_response: str) -> bool:
@@ -73,9 +73,11 @@ WRITE_INTENT_CASES = [
 def main() -> None:
     for user_message, final_response in READ_ONLY_CASES:
         assert not _would_trigger_guard(user_message, final_response), user_message
+        assert _is_read_only_intent(user_message), user_message
 
     for user_message, final_response in WRITE_INTENT_CASES:
         assert _would_trigger_guard(user_message, final_response), user_message
+        assert not _is_read_only_intent(user_message), user_message
 
     print(
         f"write guard regression OK: "

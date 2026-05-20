@@ -86,8 +86,85 @@ def test_tool_result_failure_is_traced_as_failure() -> None:
     asyncio.run(scenario())
 
 
+def test_read_only_status_request_blocks_write_tool_choice() -> None:
+    async def scenario() -> None:
+        events: list[dict] = []
+        llm_calls = 0
+        write_tool_executed = False
+
+        original_call_llm = graph.call_llm
+        original_get_tool = graph.tools_registry.get_tool
+        original_get_all_tools = graph.tools_registry.get_all_tools_for_llm
+        original_log = graph.audit_logger.log
+
+        def fake_restart_service(service: str) -> ToolResult:
+            nonlocal write_tool_executed
+            write_tool_executed = True
+            return ToolResult(success=True, data=f"Service {service} restarted")
+
+        async def fake_call_llm(messages, tools=None):
+            nonlocal llm_calls
+            llm_calls += 1
+            if llm_calls == 1:
+                return {
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "tool-1", "name": "restart_service", "arguments": {"service": "nginx"}}
+                    ],
+                }
+            return {"content": "本轮只查询状态，未执行启动或重启。", "tool_calls": []}
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        def fake_get_tool(name: str):
+            if name == "restart_service":
+                return ToolDefinition(
+                    name=name,
+                    description="Restart service",
+                    parameters={"type": "object", "properties": {}},
+                    function=fake_restart_service,
+                    risk_level=RiskLevel.WRITE,
+                    category="service",
+                )
+            return original_get_tool(name)
+
+        try:
+            graph.call_llm = fake_call_llm
+            graph.tools_registry.get_all_tools_for_llm = lambda: []
+            graph.tools_registry.get_tool = fake_get_tool
+            graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+
+            result = await graph.reasoning_node({
+                "session_id": "read-only-block",
+                "user_message": "查看 nginx 当前状态",
+                "send_to_client": capture_event,
+                "messages": [],
+                "risk_warning": "",
+                "knowledge_hint": "",
+            })
+
+            assert result["final_response"] == "本轮只查询状态，未执行启动或重启。"
+            assert write_tool_executed is False
+            assert any(
+                event["phase"] == "tool_call"
+                and event["event_type"] == "blocked"
+                and event.get("source") == "read_only_intent_guard"
+                and event.get("execution_state") == "skipped"
+                for event in events
+            )
+        finally:
+            graph.call_llm = original_call_llm
+            graph.tools_registry.get_tool = original_get_tool
+            graph.tools_registry.get_all_tools_for_llm = original_get_all_tools
+            graph.audit_logger.log = original_log
+
+    asyncio.run(scenario())
+
+
 def main() -> None:
     test_tool_result_failure_is_traced_as_failure()
+    test_read_only_status_request_blocks_write_tool_choice()
     print("agent trace truthfulness regression OK")
 
 

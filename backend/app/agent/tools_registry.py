@@ -66,6 +66,7 @@ _DISPLAY_NAMES: dict[str, str] = {
     "get_crontab_list": "定时任务列表",
     "get_user_sessions": "登录用户会话",
     # File
+    "create_file": "创建文件",
     "write_file": "写入文件",
     "delete_file": "删除文件",
     "delete_directory": "删除目录",
@@ -378,6 +379,16 @@ class ToolsRegistry:
         # File management tools
         from app.mcp_tools import file_tools
 
+        self._register("create_file", "创建新文件；默认不覆盖已存在文件", {
+            "type": "object",
+            "properties": {
+                "filepath": {"type": "string", "description": "目标文件路径"},
+                "content": {"type": "string", "description": "初始文件内容", "default": ""},
+                "overwrite": {"type": "boolean", "description": "是否允许覆盖已存在文件", "default": False},
+            },
+            "required": ["filepath"],
+        }, file_tools.create_file, RiskLevel.WRITE, "file")
+
         self._register("write_file", "写入或追加文件内容", {
             "type": "object",
             "properties": {
@@ -662,7 +673,7 @@ class ToolsRegistry:
 
     def _rollback_capability(self, name: str, category: str) -> tuple[bool, str]:
         """Return best-known rollback support for a tool."""
-        if name in {"write_file", "delete_file", "delete_directory", "move_file", "change_permissions", "change_owner"}:
+        if name in {"create_file", "write_file", "delete_file", "delete_directory", "move_file", "change_permissions", "change_owner"}:
             return True, "backup"
         if name == "rollback_backup":
             return False, "manual"

@@ -100,7 +100,19 @@ async def save_message(session_id: str, message: dict):
 
 @router.get("/{session_id}/trace")
 async def get_session_trace(session_id: str):
-    """Get the reasoning trace for a session from audit logs."""
+    """Get the reasoning trace for a session.
+
+    Audit rows contain coarse checkpoints. Incident timeline rows are recorded
+    from the exact trace payloads emitted during Agent/Runbook execution, so
+    they let the UI recover the live reasoning process after a reconnect.
+    """
+    trace = await _load_incident_trace(session_id)
+    trace.extend(await _load_audit_trace(session_id))
+    return {"trace": _dedupe_and_sort_trace(trace)}
+
+
+async def _load_audit_trace(session_id: str) -> list[dict]:
+    """Load legacy/coarse audit rows as trace events."""
     from app.database import get_audit_db_path
 
     async with aiosqlite.connect(get_audit_db_path()) as db:
@@ -125,4 +137,61 @@ async def get_session_trace(session_id: str):
             if isinstance(metadata, dict) and isinstance(metadata.get("evidence"), dict):
                 event.update(metadata["evidence"])
             trace.append(event)
-    return {"trace": trace}
+    return trace
+
+
+async def _load_incident_trace(session_id: str) -> list[dict]:
+    """Load trace events captured from incident timeline storage."""
+    async with aiosqlite.connect(get_knowledge_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """SELECT id, timestamp, phase, event_type, title, detail, evidence, metadata
+            FROM incident_events WHERE session_id = ?
+            ORDER BY timestamp ASC, id ASC LIMIT 500""",
+            (session_id,),
+        )
+        rows = await cursor.fetchall()
+
+    trace: list[dict] = []
+    for row in rows:
+        metadata = _json_loads(row["metadata"], {})
+        evidence = _json_loads(row["evidence"], None)
+        phase = row["phase"]
+        event = {
+            "timestamp": row["timestamp"],
+            "phase": "input_received" if phase == "problem_statement" else phase,
+            "event_type": row["event_type"],
+            "content": row["detail"] or row["title"],
+            "metadata": metadata,
+        }
+        if isinstance(evidence, dict):
+            event.update(evidence)
+            event.setdefault("metadata", {}).setdefault("evidence", evidence)
+        trace.append(event)
+    return trace
+
+
+def _dedupe_and_sort_trace(events: list[dict]) -> list[dict]:
+    """Return stable chronological trace events without exact duplicates."""
+    seen: set[tuple[str, str, str]] = set()
+    ordered: list[dict] = []
+    for event in sorted(events, key=lambda item: item.get("timestamp") or ""):
+        key = (
+            str(event.get("phase") or ""),
+            str(event.get("event_type") or ""),
+            str(event.get("content") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(event)
+    return ordered
+
+
+def _json_loads(value: str | None, default):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except Exception:
+        return default

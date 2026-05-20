@@ -100,6 +100,101 @@ interface ChatStore {
   disconnectWebSocket: () => void
 }
 
+const createDefaultProgressSteps = (): ProgressStep[] => [
+  { title: '安全校验', status: 'process' },
+  { title: '知识检索', status: 'wait' },
+  { title: '推理分析', status: 'wait' },
+  { title: '工具执行', status: 'wait' },
+  { title: '结果验证', status: 'wait' },
+]
+
+const phaseToProgressStep: Record<string, number> = {
+  safety_check: 0,
+  knowledge_retrieval: 1,
+  recent_changes: 1,
+  planning: 2,
+  tool_call: 3,
+  execution: 3,
+  approval_request: 3,
+  approval_response: 3,
+  verification: 4,
+  response: 4,
+  knowledge_save: 4,
+}
+
+const applyTraceToProgressSteps = (
+  steps: ProgressStep[],
+  event: Pick<TraceEvent, 'phase' | 'event_type' | 'content'>,
+): ProgressStep[] => {
+  const stepIdx = phaseToProgressStep[event.phase]
+  if (stepIdx === undefined) return steps
+
+  const nextSteps = [...steps]
+  for (let i = 0; i < stepIdx; i++) {
+    if (nextSteps[i].status !== 'error') {
+      nextSteps[i] = { ...nextSteps[i], status: 'finish' }
+    }
+  }
+
+  if (event.event_type === 'start' || event.event_type === 'pending') {
+    nextSteps[stepIdx] = { ...nextSteps[stepIdx], status: 'process', description: event.content }
+  } else if (event.event_type === 'success') {
+    nextSteps[stepIdx] = { ...nextSteps[stepIdx], status: 'finish', description: event.content }
+  } else if (event.event_type === 'failure' || event.event_type === 'blocked') {
+    nextSteps[stepIdx] = { ...nextSteps[stepIdx], status: 'error', description: event.content }
+  }
+
+  return nextSteps
+}
+
+const buildProgressStepsFromTrace = (traceEvents: TraceEvent[]): ProgressStep[] => (
+  traceEvents.reduce(
+    (steps, event) => applyTraceToProgressSteps(steps, event),
+    createDefaultProgressSteps(),
+  )
+)
+
+const createProgressMessage = (traceEvents: TraceEvent[] = []): Message => ({
+  id: 'progress-' + crypto.randomUUID(),
+  role: 'progress',
+  content: '',
+  timestamp: new Date().toISOString(),
+  progressSteps: traceEvents.length > 0 ? buildProgressStepsFromTrace(traceEvents) : createDefaultProgressSteps(),
+})
+
+const mergeMessagesPreservingRuntime = (
+  loadedMessages: Message[],
+  currentMessages: Message[],
+  isThinking: boolean,
+  traceEvents: TraceEvent[],
+): Message[] => {
+  const runtimeProgress = currentMessages.find((message) => message.role === 'progress')
+  if (!isThinking) return loadedMessages
+  return [
+    ...loadedMessages.filter((message) => message.role !== 'progress'),
+    runtimeProgress || createProgressMessage(traceEvents),
+  ]
+}
+
+const traceKey = (event: TraceEvent): string => [
+  event.timestamp || '',
+  event.phase || '',
+  event.event_type || '',
+  event.content || '',
+].join('\u0000')
+
+const mergeTraceEvents = (existing: TraceEvent[], incoming: TraceEvent[]): TraceEvent[] => {
+  const seen = new Set<string>()
+  return [...existing, ...incoming]
+    .filter((event) => {
+      const key = traceKey(event)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''))
+}
+
 export const useChatStore = create<ChatStore>((set, get) => ({
   sessions: [],
   activeSessionId: null,
@@ -188,8 +283,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     fetch(`/api/sessions/${id}/messages`)
       .then((res) => res.json())
       .then((data) => {
+        if (get().activeSessionId !== id) return
         if (data.messages) {
-          set({ messages: data.messages })
+          set((state) => ({
+            messages: mergeMessagesPreservingRuntime(
+              data.messages,
+              state.messages,
+              state.isThinking,
+              state.traceEvents,
+            ),
+          }))
         }
       })
       .catch((err) => console.error('Failed to load messages:', err))
@@ -198,8 +301,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     fetch(`/api/sessions/${id}/trace`)
       .then((res) => res.json())
       .then((data) => {
+        if (get().activeSessionId !== id) return
         if (data.trace) {
-          set({ traceEvents: data.trace })
+          set((state) => {
+            const traceEvents = mergeTraceEvents(state.traceEvents, data.trace)
+            const messages = state.messages.map((msg) => (
+              msg.role === 'progress'
+                ? { ...msg, progressSteps: buildProgressStepsFromTrace(traceEvents) }
+                : msg
+            ))
+            return { traceEvents, messages }
+          })
         }
       })
       .catch((err) => console.error('Failed to load trace:', err))

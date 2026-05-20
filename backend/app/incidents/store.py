@@ -291,13 +291,18 @@ async def append_incident_reference(
     summary = await get_incident_summary(incident_id, db_path=db_path)
     if not summary:
         return response
+    status_label = {
+        "open": "处理中",
+        "resolved": "已解决",
+        "failed": "失败",
+    }.get(str(summary.get("status") or ""), str(summary.get("status") or "未知"))
     block = (
         "\n\n---\n"
-        "Incident timeline\n"
-        f"- incident_id: {summary['id']}\n"
-        f"- status: {summary['status']}\n"
-        f"- events: {summary['event_count']}, tool_results: {summary['tool_result_count']}, failures: {summary['failure_count']}\n"
-        f"- api: GET /api/incidents/{summary['id']}/events"
+        "诊断追踪\n"
+        f"- 追踪ID：{summary['id']}\n"
+        f"- 状态：{status_label}\n"
+        f"- 事件数：{summary['event_count']}，工具结果：{summary['tool_result_count']}，失败数：{summary['failure_count']}\n"
+        f"- 明细接口：GET /api/incidents/{summary['id']}/events"
     )
     return response + block
 

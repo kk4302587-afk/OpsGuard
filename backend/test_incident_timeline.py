@@ -171,7 +171,7 @@ def test_agent_run_creates_incident_and_appends_reference() -> None:
                 graph.knowledge_store.search = original_search
                 graph.audit_logger.log = original_log
 
-        assert "Incident timeline" in response
+        assert "诊断追踪" in response
         assert len(incidents) == 1
         assert incidents[0]["status"] == "resolved"
         assert any(event["phase"] == "knowledge_retrieval" for event in incident_events)
@@ -231,7 +231,7 @@ def test_runbook_execution_creates_incident_from_real_step_events() -> None:
                 runbook_executor.tools_registry.get_tool = original_get_tool
                 runbook_executor.audit_logger.log = original_log
 
-        assert "Incident timeline" in summary
+        assert "诊断追踪" in summary
         assert len(incidents) == 1
         assert incidents[0]["status"] == "resolved"
         execution = [event for event in incident_events if event["phase"] == "execution"]

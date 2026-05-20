@@ -59,6 +59,32 @@ _FIREWALL_FILES = [
     "/etc/ufw/user6.rules",
 ]
 
+_SOURCE_LABELS = {
+    "systemd_journal": "系统日志",
+    "config_mtime": "配置文件",
+    "package_history": "软件包历史",
+    "cron_mtime": "计划任务",
+    "firewall_history": "防火墙",
+    "opsguard_backups": "OpsGuard备份",
+}
+
+_CHANGE_TYPE_LABELS = {
+    "service_event": "服务事件",
+    "config_file_modified": "配置修改",
+    "package_event": "软件包事件",
+    "cron_modified": "计划任务修改",
+    "firewall_file_modified": "防火墙文件修改",
+    "firewall_event": "防火墙事件",
+    "opsguard_backup": "备份记录",
+}
+
+_STATUS_LABELS = {
+    "ok": "正常",
+    "partial": "部分可用",
+    "failed": "失败",
+    "unavailable": "不可用",
+}
+
 
 def get_recent_changes(window_hours: int = 24, limit: int = 30) -> ToolResult:
     """Collect recent local system changes for root-cause analysis.
@@ -419,7 +445,7 @@ def _change(
 
 def _summarize_changes(changes: list[dict[str, Any]], source_status: dict[str, dict[str, Any]], window_hours: int) -> str:
     unavailable = [
-        name for name, status in source_status.items()
+        _source_label(name) for name, status in source_status.items()
         if status.get("status") in {"unavailable", "failed", "partial"}
     ]
     if changes:
@@ -427,11 +453,14 @@ def _summarize_changes(changes: list[dict[str, Any]], source_status: dict[str, d
         for change in changes:
             change_type = str(change.get("change_type") or "unknown")
             by_type[change_type] = by_type.get(change_type, 0) + 1
-        parts = ", ".join(f"{name}: {count}" for name, count in sorted(by_type.items()))
-        suffix = f"; limited sources: {', '.join(unavailable)}" if unavailable else ""
-        return f"Found {len(changes)} recent changes in the last {window_hours}h ({parts}){suffix}"
-    suffix = f"; unavailable/partial sources: {', '.join(unavailable)}" if unavailable else ""
-    return f"No recent changes found in inspected sources for the last {window_hours}h{suffix}"
+        parts = "，".join(
+            f"{_change_type_label(name)} {count} 条"
+            for name, count in sorted(by_type.items())
+        )
+        suffix = f"；部分来源受限：{'、'.join(unavailable)}" if unavailable else ""
+        return f"近 {window_hours} 小时发现 {len(changes)} 条系统变更（{parts}）{suffix}"
+    suffix = f"；部分来源受限：{'、'.join(unavailable)}" if unavailable else ""
+    return f"近 {window_hours} 小时在已检查来源中未发现系统变更{suffix}"
 
 
 def _extract_systemd_target(line: str) -> str:
@@ -485,20 +514,104 @@ def _timestamp_before(timestamp: str, since: datetime) -> bool:
         return False
 
 
-def compact_recent_changes(data: dict[str, Any], *, max_changes: int = 8) -> str:
-    """Return a compact prompt/trace representation of recent changes."""
+def compact_recent_changes(
+    data: dict[str, Any],
+    *,
+    max_changes: int = 5,
+    include_source_status: bool = True,
+) -> str:
+    """Return a Chinese, compact prompt/trace representation of recent changes."""
     changes = data.get("changes") or []
     if not isinstance(changes, list):
         changes = []
-    lines = [str(data.get("summary") or "Recent change check completed")]
+    source_status = data.get("source_status")
+    raw_summary = str(data.get("summary") or "")
+    if raw_summary.startswith(("Found ", "No recent changes", "Recent change check")):
+        raw_summary = ""
+    if not raw_summary:
+        raw_summary = _summarize_changes(
+            changes,
+            source_status if isinstance(source_status, dict) else {},
+            int(data.get("window_hours") or 24),
+        )
+    lines = [raw_summary]
     for change in changes[:max_changes]:
         lines.append(
             "- "
-            f"{change.get('timestamp') or 'unknown time'} "
-            f"[{change.get('source')}/{change.get('change_type')}] "
-            f"{change.get('target')}: {json.dumps(change.get('detail'), ensure_ascii=False, default=str)[:220]}"
+            f"{_short_time(change.get('timestamp'))} | "
+            f"{_source_label(str(change.get('source') or 'unknown'))}/"
+            f"{_change_type_label(str(change.get('change_type') or 'unknown'))} | "
+            f"{change.get('target') or '未知对象'} | "
+            f"{_compact_change_detail(change)}"
         )
-    source_status = data.get("source_status")
+    remaining = max(0, len(changes) - max_changes)
+    if remaining:
+        lines.append(f"- 其余 {remaining} 条已省略，可在事件明细中查看。")
+    source_status = source_status if include_source_status else None
     if source_status:
-        lines.append(f"source_status: {json.dumps(source_status, ensure_ascii=False, default=str)[:500]}")
+        lines.append(f"来源状态：{_format_source_status(source_status)}")
     return "\n".join(lines)
+
+
+def _source_label(source: str) -> str:
+    return _SOURCE_LABELS.get(source, source)
+
+
+def _change_type_label(change_type: str) -> str:
+    return _CHANGE_TYPE_LABELS.get(change_type, change_type)
+
+
+def _short_time(timestamp: Any) -> str:
+    if not timestamp:
+        return "时间未知"
+    text = str(timestamp)
+    return text.replace("T", " ")[:19]
+
+
+def _compact_detail(detail: Any, max_chars: int = 120) -> str:
+    if isinstance(detail, dict):
+        fields = []
+        if detail.get("operation"):
+            fields.append(f"操作={detail.get('operation')}")
+        if detail.get("backup_id"):
+            fields.append(f"备份={detail.get('backup_id')}")
+        if detail.get("size") is not None:
+            fields.append(f"大小={detail.get('size')}")
+        if detail.get("sha256"):
+            fields.append(f"sha256={str(detail.get('sha256'))[:12]}...")
+        text = "，".join(fields) if fields else json.dumps(detail, ensure_ascii=False, default=str)
+    else:
+        text = str(detail or "无详细信息")
+    text = " ".join(text.split())
+    return text[:max_chars] + ("..." if len(text) > max_chars else "")
+
+
+def _compact_change_detail(change: dict[str, Any]) -> str:
+    change_type = str(change.get("change_type") or "")
+    if change_type == "service_event":
+        return "命中服务启动/停止/重启/失败相关日志"
+    if change_type == "package_event":
+        return "命中软件包安装/升级/删除相关日志"
+    if change_type == "firewall_event":
+        return "命中防火墙放行/拦截相关日志"
+    return _compact_detail(change.get("detail"))
+
+
+def _format_source_status(source_status: Any, max_items: int = 6) -> str:
+    if not isinstance(source_status, dict) or not source_status:
+        return "无来源状态"
+    parts = []
+    for source, status in list(source_status.items())[:max_items]:
+        if not isinstance(status, dict):
+            parts.append(f"{_source_label(str(source))}: 未知")
+            continue
+        status_label = _STATUS_LABELS.get(str(status.get("status") or ""), str(status.get("status") or "未知"))
+        observed = status.get("observed")
+        reason = status.get("reason") or "; ".join(status.get("errors") or [])
+        suffix = f"({observed} 条)" if observed not in (None, "") else ""
+        if reason and status.get("status") in {"failed", "unavailable", "partial"}:
+            suffix = f"{suffix}：{str(reason)[:80]}" if suffix else f"：{str(reason)[:80]}"
+        parts.append(f"{_source_label(str(source))}: {status_label}{suffix}")
+    if len(source_status) > max_items:
+        parts.append(f"另有 {len(source_status) - max_items} 个来源")
+    return "；".join(parts)

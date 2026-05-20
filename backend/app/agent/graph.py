@@ -11,7 +11,7 @@ from datetime import datetime
 from loguru import logger
 from langgraph.graph import StateGraph, END
 
-from app.agent.llm import call_llm, SYSTEM_PROMPT
+from app.agent.llm import call_llm
 from app.agent.trace_evidence import (
     build_evidence,
     inference_evidence,
@@ -204,7 +204,7 @@ async def recent_changes_node(state: AgentState) -> dict:
             event_type="failure",
             content="最近变更检查不可用: get_recent_changes 工具未注册",
             evidence=build_evidence(
-                claim="Recent change check could not run because the tool is missing",
+                claim="近期变更检查无法执行，因为工具未注册",
                 evidence_type="command",
                 source="get_recent_changes",
                 observed="tool not registered",
@@ -219,14 +219,6 @@ async def recent_changes_node(state: AgentState) -> dict:
         phase="recent_changes",
         event_type="start",
         content="检查近期系统变更...",
-        evidence=build_evidence(
-            claim="Recent change collection has been requested",
-            evidence_type="command",
-            source="get_recent_changes",
-            observed={"window_hours": 24, "limit": 30},
-            confidence="medium",
-            execution_state="skipped",
-        ),
     ))
 
     try:
@@ -237,7 +229,7 @@ async def recent_changes_node(state: AgentState) -> dict:
             event_type="failure",
             content=f"近期变更检查异常: {e}",
             evidence=build_evidence(
-                claim="Recent change collection raised an exception",
+                claim="近期变更检查执行时出现异常",
                 evidence_type="command",
                 source="get_recent_changes",
                 observed=str(e),
@@ -282,18 +274,28 @@ async def recent_changes_node(state: AgentState) -> dict:
 
     from app.mcp_tools.recent_changes import compact_recent_changes
 
-    summary = compact_recent_changes(result_data) if isinstance(result_data, dict) else str(result_data)
+    trace_summary = (
+        compact_recent_changes(result_data, max_changes=3, include_source_status=False)
+        if isinstance(result_data, dict)
+        else str(result_data)
+    )
+    prompt_summary = (
+        compact_recent_changes(result_data, max_changes=8, include_source_status=True)
+        if isinstance(result_data, dict)
+        else str(result_data)
+    )
     change_count = len(result_data.get("changes") or []) if isinstance(result_data, dict) else 0
     await send_to_client(trace_event(
         phase="recent_changes",
         event_type="success",
-        content=summary,
-        evidence=tool_result_evidence(
-            tool_name="get_recent_changes",
-            tool_args={"window_hours": 24, "limit": 30},
-            tool_def=tool_def,
-            result=result,
-            claim=f"Recent change check returned {change_count} candidate changes",
+        content=trace_summary,
+        evidence=build_evidence(
+            claim=f"近期变更检查返回 {change_count} 条候选变更",
+            evidence_type="command",
+            source="get_recent_changes",
+            observed=trace_summary,
+            confidence="high",
+            execution_state="executed",
         ),
     ))
     await audit_logger.log(
@@ -305,9 +307,9 @@ async def recent_changes_node(state: AgentState) -> dict:
 
     return {
         "recent_changes_hint": (
-            "\n\n## Recent Change Evidence\n"
-            "Use this as candidate RCA evidence only; do not claim causality without supporting checks.\n"
-            f"{summary}\n"
+            "\n\n## 近期变更证据\n"
+            "这些内容只能作为根因候选线索，不能在没有进一步验证时直接断定因果关系。\n"
+            f"{prompt_summary}\n"
         )
     }
 
@@ -360,6 +362,39 @@ async def reasoning_node(state: AgentState) -> dict:
                     messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": f"Error: Unknown tool '{tool_name}'"})
                     continue
 
+                if _is_read_only_intent(user_message) and tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
+                    block_reason = (
+                        "用户本轮请求是只读查询，不能执行会改变系统状态的操作。"
+                        f"已阻断工具: {tool_name}"
+                    )
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [
+                        {"id": tool_call.get("id", ""), "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)}}
+                    ]})
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": f"BLOCKED_READ_ONLY_INTENT: {block_reason}"})
+                    await audit_logger.log(
+                        session_id,
+                        AuditPhase.TOOL_CALL,
+                        AuditEventType.BLOCKED,
+                        block_reason,
+                        {"tool_name": tool_name, "tool_args": tool_args, "user_message": user_message},
+                    )
+                    await send_to_client(trace_event(
+                        phase="tool_call",
+                        event_type="blocked",
+                        content=block_reason,
+                        evidence=build_evidence(
+                            claim=f"{tool_name} was blocked because the user asked for read-only status/query",
+                            evidence_type="user input",
+                            source="read_only_intent_guard",
+                            observed=user_message,
+                            confidence="high",
+                            execution_state="skipped",
+                            failure_reason="Read-only user intent cannot trigger write/destructive tools",
+                            next_check="Use read-only tools such as get_service_status or get_service_logs.",
+                        ),
+                    ))
+                    continue
+
                 await send_to_client(trace_event(
                     phase="tool_call",
                     event_type="start",
@@ -403,6 +438,7 @@ async def reasoning_node(state: AgentState) -> dict:
                     approval_future = loop.create_future()
                     approval_manager.register_pending(request_id, session_id, tool_name, tool_args, tool_def.risk_level, tool_def.description, approval_future)
 
+                    supports_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
                     await send_to_client({
                         "type": "approval_request",
                         "request_id": request_id,
@@ -410,8 +446,8 @@ async def reasoning_node(state: AgentState) -> dict:
                         "risk_level": tool_def.risk_level,
                         "description": tool_def.description,
                         "impact": impact_text,
-                        "rollback_strategy": tool_def.rollback_strategy,
-                        "supports_rollback": tool_def.supports_rollback,
+                        "rollback_strategy": rollback_strategy,
+                        "supports_rollback": supports_rollback,
                         "preview_strategy": tool_def.preview_strategy,
                     })
                     await send_to_client(trace_event(
@@ -478,13 +514,14 @@ async def reasoning_node(state: AgentState) -> dict:
                     if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
                         from app.mcp_tools.backup import backup_manager
                         target_path = tool_args.get("filepath") or tool_args.get("path") or tool_args.get("service")
-                        if target_path and isinstance(target_path, str):
+                        can_backup_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
+                        if can_backup_rollback and rollback_strategy == "backup" and target_path and isinstance(target_path, str):
                             backup_record = backup_manager.backup_file(target_path, operation=f"{tool_name}")
                             if backup_record:
                                 await send_to_client(trace_event(
                                     phase="execution",
                                     event_type="start",
-                                    content=f"已备份: {target_path}",
+                                    content=f"已创建回滚备份：{target_path}",
                                     evidence=build_evidence(
                                         claim=f"Backup was created before {tool_name}",
                                         evidence_type="config",
@@ -544,12 +581,12 @@ async def reasoning_node(state: AgentState) -> dict:
                                 phase="execution",
                                 event_type="success",
                                 content=(
-                                    "Rollback point created:\n"
-                                    f"- rollback_id: {backup_record.get('id')}\n"
-                                    f"- target: {backup_record.get('original_path')}\n"
-                                    "- strategy: backup\n"
-                                    f"- created_at: {backup_record.get('timestamp')}\n"
-                                    "- restore: available through rollback_backup or /api/backups/{id}/rollback"
+                                    "已创建回滚点：\n"
+                                    f"- 回滚ID：{backup_record.get('id')}\n"
+                                    f"- 目标：{backup_record.get('original_path')}\n"
+                                    "- 策略：备份回滚\n"
+                                    f"- 创建时间：{backup_record.get('timestamp')}\n"
+                                    "- 恢复方式：使用 rollback_backup 或 /api/backups/{id}/rollback"
                                 ),
                                 evidence=build_evidence(
                                     claim=f"Rollback point is available for {tool_name}",
@@ -844,7 +881,6 @@ def build_agent_graph():
     workflow.add_node("knowledge_retrieval", knowledge_retrieval_node)
     workflow.add_node("recent_changes", recent_changes_node)
     workflow.add_node("reasoning", reasoning_node)
-    workflow.add_node("knowledge_save", knowledge_save_node)
 
     # Set entry point
     workflow.set_entry_point("safety_check")
@@ -853,8 +889,7 @@ def build_agent_graph():
     workflow.add_conditional_edges("safety_check", should_continue_after_safety)
     workflow.add_edge("knowledge_retrieval", "recent_changes")
     workflow.add_edge("recent_changes", "reasoning")
-    workflow.add_edge("reasoning", "knowledge_save")
-    workflow.add_edge("knowledge_save", END)
+    workflow.add_edge("reasoning", END)
 
     return workflow.compile()
 
@@ -864,6 +899,13 @@ agent_graph = build_agent_graph()
 
 
 # === Public API ===
+
+async def _run_post_response_persistence(state: AgentState) -> None:
+    """Persist learned knowledge/runbooks after the user-visible reply is ready."""
+    try:
+        await knowledge_save_node(state)
+    except Exception as e:
+        logger.warning(f"Post-response persistence failed: {e}")
 
 async def run_agent(
     session_id: str,
@@ -927,6 +969,15 @@ async def run_agent(
                 final_response,
                 incident_id,
             )
+        if (
+            not final_state.get("is_blocked")
+            and any(msg.get("role") == "tool" for msg in final_state.get("messages", []))
+        ):
+            import asyncio
+
+            persistence_state = dict(final_state)
+            persistence_state["final_response"] = final_response
+            asyncio.create_task(_run_post_response_persistence(persistence_state))
         return final_response
     except Exception as e:
         if incident_id:
@@ -1009,6 +1060,55 @@ def _format_knowledge_entries_for_trace(entries: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _preview_strategy_label(strategy: str) -> str:
+    """Return a Chinese label for an internal preview strategy."""
+    return {
+        "impact_only": "仅影响评估（不会执行预演命令）",
+        "check_mode": "检查模式",
+        "diff": "差异对比",
+        "dry_run": "预演执行",
+        "none": "无预览",
+    }.get(strategy or "none", strategy or "无预览")
+
+
+def _rollback_strategy_label(strategy: str) -> str:
+    """Return a Chinese label for an internal rollback strategy."""
+    return {
+        "backup": "备份回滚",
+        "manual": "手动回滚",
+        "inverse_action": "反向操作",
+        "none": "无可靠自动回滚",
+    }.get(strategy or "none", strategy or "无可靠自动回滚")
+
+
+def _effective_rollback_capability(tool_name: str, tool_args: dict, tool_def) -> tuple[bool, str]:
+    """Return rollback capability that can be truthfully claimed before approval."""
+    if not tool_def or not tool_def.supports_rollback or tool_def.rollback_strategy != "backup":
+        return False, "none"
+
+    path_value = tool_args.get("filepath") or tool_args.get("path")
+    if tool_name == "create_file":
+        if not tool_args.get("overwrite") or not path_value:
+            return False, "none"
+        from pathlib import Path
+
+        path = Path(str(path_value))
+        if path.exists() and path.is_file():
+            return True, tool_def.rollback_strategy
+        return False, "none"
+
+    if tool_name in {"write_file", "delete_file", "change_permissions"} and path_value:
+        from pathlib import Path
+
+        path = Path(str(path_value))
+        if path.exists() and path.is_file():
+            return True, tool_def.rollback_strategy
+        return False, "none"
+
+    # No complete inverse action or reliable directory/ownership restore exists yet.
+    return False, "none"
+
+
 async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_to_client) -> str | None:
     """Pre-execution impact assessment for high-risk operations."""
     impact_lines = []
@@ -1021,9 +1121,10 @@ async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_t
         or tool_args.get("pid")
         or tool_args.get("username")
         or tool_args.get("backup_id")
-        or "current system"
+        or "当前系统"
     )
-    impact_lines.append(f"Target: {target}")
+    display_name = tool_def.display_name if tool_def and tool_def.display_name else tool_name
+    impact_lines.append(f"目标：{target}")
 
     if tool_name == "kill_process":
         import psutil
@@ -1033,15 +1134,15 @@ async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_t
                 proc = psutil.Process(pid)
                 children = proc.children(recursive=True)
                 connections = proc.net_connections()
-                impact_lines.append(f"目标进程: {proc.name()} (PID: {pid})")
+                impact_lines.append(f"操作：终止进程 {proc.name()} (PID: {pid})")
                 if children:
-                    impact_lines.append(f"子进程数: {len(children)}")
+                    impact_lines.append(f"影响：同时可能影响 {len(children)} 个子进程")
                 if connections:
                     ports = [c.laddr.port for c in connections if c.status == 'LISTEN']
                     if ports:
-                        impact_lines.append(f"监听端口: {ports}")
+                        impact_lines.append(f"影响：监听端口可能关闭 {ports}")
             except Exception:
-                pass
+                impact_lines.append(f"操作：终止进程 PID {pid}")
 
     elif tool_name in ("restart_service", "start_service", "stop_service"):
         service = tool_args.get("service")
@@ -1052,36 +1153,32 @@ async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_t
                 "stop_service": "停止",
             }
             action = action_map.get(tool_name, "操作")
-            impact_lines.append(f"操作: {action} {service}")
-            impact_lines.append("影响: 服务状态将发生变化")
+            impact_lines.append(f"操作：{action}服务 {service}")
+            impact_lines.append("影响：服务当前状态会被改变，可能造成短暂中断或连接重建")
 
     elif tool_name == "rollback_backup":
-        impact_lines.append("Operation: restore a previous backup")
-        impact_lines.append("Impact: target file/directory will be overwritten by the selected backup")
+        impact_lines.append("操作：恢复历史备份")
+        impact_lines.append("影响：目标文件或目录会被所选备份覆盖")
 
-    elif tool_name in ("write_file", "delete_file", "delete_directory", "move_file", "change_permissions", "change_owner"):
-        impact_lines.append(f"Operation: {tool_name}")
-        impact_lines.append("Impact: file system content or metadata may change")
+    elif tool_name in ("create_file", "write_file", "delete_file", "delete_directory", "move_file", "change_permissions", "change_owner"):
+        impact_lines.append(f"操作：{display_name}")
+        impact_lines.append("影响：文件系统内容或元数据可能发生变化")
 
     if tool_def:
-        preview_text = (
-            f"Preview: {tool_def.preview_strategy}"
-            if tool_def.supports_preview
-            else f"Preview: impact estimate only ({tool_def.preview_strategy})"
-        )
-        impact_lines.append(preview_text)
-        if tool_def.supports_rollback:
-            impact_lines.append(f"Rollback: {tool_def.rollback_strategy} strategy, high confidence when backup creation succeeds")
+        impact_lines.append(f"预览：{_preview_strategy_label(tool_def.preview_strategy)}")
+        supports_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
+        if supports_rollback:
+            impact_lines.append(f"回滚：支持{_rollback_strategy_label(rollback_strategy)}，备份创建成功后可信度较高")
         else:
-            impact_lines.append("Rollback: no reliable automated rollback will be claimed")
-        impact_lines.append(f"Verification: post-action check will run when supported for {tool_name}")
+            impact_lines.append("回滚：无可靠自动回滚，本次不会声称可自动恢复")
+        impact_lines.append(f"验证：支持时会在执行后检查 {display_name} 的结果")
 
     if impact_lines:
         impact_text = "\n".join(dict.fromkeys(impact_lines))
         await send_to_client(trace_event(
             phase="planning",
             event_type="start",
-            content=f"影响评估:\n{impact_text}",
+            content=f"影响评估：\n{impact_text}",
             evidence=build_evidence(
                 claim=f"Estimated operational impact for {tool_name}",
                 evidence_type="user input",
@@ -1155,6 +1252,18 @@ def _capture_pre_change_state(tool_name: str, tool_args: dict, backup_record: di
         if service:
             return {"service_state": _get_service_active_state(service)}
 
+    if tool_name == "create_file":
+        from pathlib import Path
+
+        filepath = tool_args.get("filepath")
+        if filepath:
+            path = Path(str(filepath))
+            return {
+                "file_path": str(path),
+                "file_exists": path.exists(),
+                "file_size": path.stat().st_size if path.exists() and path.is_file() else None,
+            }
+
     if backup_record:
         return {"backup_record": backup_record}
 
@@ -1205,6 +1314,22 @@ def _capture_change_diff(
             after_service_state = _get_service_active_state(service)
             diff_lines.append(f"[Before] {service}: {before_service_state}")
             diff_lines.append(f"[After]  {service}: {after_service_state}")
+
+    elif tool_name == "create_file":
+        from pathlib import Path
+
+        filepath = tool_args.get("filepath")
+        if filepath:
+            path = Path(str(filepath))
+            before_exists = before_state.get("file_exists", False)
+            after_exists = path.exists()
+            diff_lines.append(f"[Before] 文件存在: {'是' if before_exists else '否'}")
+            diff_lines.append(f"[After]  文件存在: {'是' if after_exists else '否'}")
+            if after_exists and path.is_file():
+                before_size = before_state.get("file_size")
+                after_size = path.stat().st_size
+                diff_lines.append(f"[Before] 文件大小: {before_size if before_size is not None else 0} bytes")
+                diff_lines.append(f"[After]  文件大小: {after_size} bytes")
 
     elif backup_record:
         from pathlib import Path
@@ -1369,6 +1494,12 @@ _WRITE_INTENT_PATTERNS = (
 )
 
 
+_READ_ONLY_INTENT_PATTERNS = (
+    r"(查看|查询|读取|获取|检查|检测|分析|列出|显示|搜索|检索|生成.*报告|当前状态|状态|是否运行|是否启动|健康|日志|配置|文件内容)",
+    r"\b(show|status|get|check|inspect|read|list|view|query|search|describe|report)\b",
+)
+
+
 def _has_write_intent(text: str) -> bool:
     """Return whether the current user message is likely requesting a write."""
     if not text:
@@ -1378,6 +1509,17 @@ def _has_write_intent(text: str) -> bool:
 
     normalized = text.strip()
     return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in _WRITE_INTENT_PATTERNS)
+
+
+def _is_read_only_intent(text: str) -> bool:
+    """Return whether the latest user turn is clearly asking for observation only."""
+    if not text or _has_write_intent(text):
+        return False
+
+    import re
+
+    normalized = text.strip()
+    return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in _READ_ONLY_INTENT_PATTERNS)
 
 
 def _claims_write_completion(text: str) -> bool:

@@ -81,7 +81,7 @@ def test_recent_changes_preserves_failed_source_status() -> None:
     assert isinstance(result.data, dict)
     assert result.data["source_status"]["systemd_journal"]["status"] == "failed"
     assert "journal unavailable" in result.data["source_status"]["systemd_journal"]["reason"]
-    assert "unavailable" in result.data["summary"] or "limited sources" in result.data["summary"]
+    assert "受限" in result.data["summary"]
 
 
 def test_tool_registry_exposes_recent_changes_as_read_only() -> None:
@@ -155,7 +155,7 @@ def test_recent_changes_node_emits_trace_and_context() -> None:
             graph.tools_registry.get_tool = original_get_tool
             graph.audit_logger.log = original_log
 
-        assert "Recent Change Evidence" in result["recent_changes_hint"]
+        assert "近期变更证据" in result["recent_changes_hint"]
         assert "/etc/nginx/nginx.conf" in result["recent_changes_hint"]
         success_events = [
             event for event in events
@@ -164,6 +164,8 @@ def test_recent_changes_node_emits_trace_and_context() -> None:
         assert success_events
         assert success_events[0].get("execution_state") == "executed"
         assert success_events[0].get("source") == "get_recent_changes"
+        assert "近 24 小时发现 1 条系统变更" in success_events[0].get("content", "")
+        assert "source_status" not in success_events[0].get("content", "")
 
     asyncio.run(scenario())
 
