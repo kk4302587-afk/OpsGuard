@@ -32,6 +32,8 @@ _STRUCTURED_FIELDS = (
     "non_applicability_conditions",
     "source_incident_id",
     "confidence",
+    "source_modalities",
+    "multimodal_evidence",
 )
 _JSON_FIELDS = {
     "symptoms",
@@ -40,6 +42,8 @@ _JSON_FIELDS = {
     "failed_attempts",
     "applicability_conditions",
     "non_applicability_conditions",
+    "source_modalities",
+    "multimodal_evidence",
 }
 _TOKEN_RE = re.compile(r"[a-z0-9_.-]+|[\u4e00-\u9fff]+")
 _KNOWN_CJK_TERMS = (
@@ -263,6 +267,8 @@ class KnowledgeStore:
                     "non_applicability_conditions": _json_dump_or_none(memory.get("non_applicability_conditions")),
                     "source_incident_id": memory.get("source_incident_id"),
                     "confidence": memory.get("confidence"),
+                    "source_modalities": _json_dump_or_none(memory.get("source_modalities")),
+                    "multimodal_evidence": _json_dump_or_none(memory.get("multimodal_evidence")),
                 }
 
                 if existing:
@@ -281,7 +287,9 @@ class KnowledgeStore:
                             applicability_conditions = COALESCE(?, applicability_conditions),
                             non_applicability_conditions = COALESCE(?, non_applicability_conditions),
                             source_incident_id = COALESCE(?, source_incident_id),
-                            confidence = COALESCE(?, confidence)
+                            confidence = COALESCE(?, confidence),
+                            source_modalities = COALESCE(?, source_modalities),
+                            multimodal_evidence = COALESCE(?, multimodal_evidence)
                         WHERE id = ?""",
                         (
                             datetime.now().isoformat(),
@@ -297,6 +305,8 @@ class KnowledgeStore:
                             structured_values["non_applicability_conditions"],
                             structured_values["source_incident_id"],
                             structured_values["confidence"],
+                            structured_values["source_modalities"],
+                            structured_values["multimodal_evidence"],
                             existing[0],
                         ),
                     )
@@ -307,9 +317,10 @@ class KnowledgeStore:
                             problem_signature, diagnosis_path, solution, tools_used,
                             symptoms, root_cause, evidence, successful_actions,
                             failed_attempts, validation_method, applicability_conditions,
-                            non_applicability_conditions, source_incident_id, confidence
+                            non_applicability_conditions, source_incident_id, confidence,
+                            source_modalities, multimodal_evidence
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             problem_signature,
                             diagnosis_path,
@@ -325,6 +336,8 @@ class KnowledgeStore:
                             structured_values["non_applicability_conditions"],
                             structured_values["source_incident_id"],
                             structured_values["confidence"],
+                            structured_values["source_modalities"],
+                            structured_values["multimodal_evidence"],
                         ),
                     )
                 await db.commit()

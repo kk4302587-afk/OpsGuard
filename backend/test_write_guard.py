@@ -64,8 +64,10 @@ WRITE_INTENT_CASES = [
     ("停止 nginx 服务", "已停止 nginx"),
     ("删除 /tmp/core.dump 文件", "已删除 /tmp/core.dump"),
     ("修改 nginx 配置", "已修改 nginx 配置"),
+    ("在 /tmp 下创建 test 目录", "已创建 /tmp/test 目录"),
     ("安装 nginx 软件包", "已安装 nginx"),
     ("检查并重启 nginx", "已重启 nginx"),
+    ("please create directory /tmp/test", "directory create completed"),
     ("please restart nginx service", "nginx restart completed"),
 ]
 

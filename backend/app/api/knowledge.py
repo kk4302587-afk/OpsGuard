@@ -45,6 +45,8 @@ def _serialize_row(row: aiosqlite.Row) -> dict:
         "failed_attempts",
         "applicability_conditions",
         "non_applicability_conditions",
+        "source_modalities",
+        "multimodal_evidence",
     ):
         if item.get(field):
             try:

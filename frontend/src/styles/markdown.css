@@ -96,33 +96,6 @@
   background: rgba(0, 212, 170, 0.12);
 }
 
-.md-inline-command {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  max-width: 100%;
-  vertical-align: middle;
-}
-
-.md-inline-command code {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.md-copy-btn-inline {
-  position: static;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  justify-content: center;
-  font-size: 10px;
-  flex: 0 0 auto;
-}
-
-.md-copy-btn-inline span {
-  display: none;
-}
-
 .md-content table {
   width: 100%;
   border-collapse: collapse;

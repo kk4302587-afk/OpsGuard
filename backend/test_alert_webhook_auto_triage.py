@@ -262,7 +262,7 @@ def test_webhook_auto_triage_blocks_non_read_steps() -> None:
         assert result["status"] == "skipped"
         assert not calls
         assert result["evidence"]["execution_state"] == "skipped"
-        assert "non-read" in result["summary"]
+        assert "非只读" in result["summary"]
 
     asyncio.run(scenario())
 

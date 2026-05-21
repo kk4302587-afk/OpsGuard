@@ -42,6 +42,9 @@ class AgentState(TypedDict):
     risk_warning: str
     knowledge_hint: str
     recent_changes_hint: str
+    multimodal_hint: str
+    multimodal_context: list[dict]
+    current_turn_tool_count: int
     iteration: int
     send_to_client: object  # Callable, not serializable but used in-memory
 
@@ -75,7 +78,7 @@ async def safety_check_node(state: AgentState) -> dict:
             event_type="blocked",
             content=safety_result.detail,
             evidence=build_evidence(
-                claim="Safety guardrail blocked the request",
+                claim="安全护栏已拦截该请求",
                 evidence_type="user input",
                 source="SafetyGuardrail.check_input",
                 observed=safety_result.detail,
@@ -96,7 +99,7 @@ async def safety_check_node(state: AgentState) -> dict:
         event_type="success",
         content=f"安全校验通过 ({', '.join(safety_result.layers_checked)})",
         evidence=build_evidence(
-            claim="Safety guardrail allowed the request",
+            claim="安全护栏允许该请求继续执行",
             evidence_type="user input",
             source="SafetyGuardrail.check_input",
             observed={"layers_checked": safety_result.layers_checked},
@@ -131,7 +134,7 @@ async def knowledge_retrieval_node(state: AgentState) -> dict:
         event_type="start",
         content="检索历史经验...",
         evidence=build_evidence(
-            claim="Knowledge search has been requested",
+            claim="正在检索历史经验",
             evidence_type="knowledge",
             source="knowledge_store.search",
             observed=user_message[:200],
@@ -210,7 +213,7 @@ async def recent_changes_node(state: AgentState) -> dict:
                 observed="tool not registered",
                 confidence="high",
                 execution_state="failed",
-                failure_reason="Tool is not registered",
+                failure_reason="工具未注册",
             ),
         ))
         return {"recent_changes_hint": ""}
@@ -334,7 +337,8 @@ async def reasoning_node(state: AgentState) -> dict:
 
     # Build messages
     messages = list(state.get("messages", []))
-    user_content = user_message + knowledge_hint + recent_changes_hint + risk_warning
+    multimodal_hint = state.get("multimodal_hint", "")
+    user_content = user_message + multimodal_hint + knowledge_hint + recent_changes_hint + risk_warning
     messages.append({"role": "user", "content": user_content})
 
     all_tools = tools_registry.get_all_tools_for_llm()
@@ -343,6 +347,7 @@ async def reasoning_node(state: AgentState) -> dict:
     write_tools_called = 0  # Count of WRITE/DESTRUCTIVE tools genuinely invoked this turn
     write_tools_succeeded = 0
     write_tool_failures: list[str] = []
+    current_turn_tool_count = 0
     hallucination_retry_done = False  # Guard so we only retry once
 
     while iteration < max_iterations:
@@ -362,10 +367,11 @@ async def reasoning_node(state: AgentState) -> dict:
                     messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": f"Error: Unknown tool '{tool_name}'"})
                     continue
 
+                display_name = tool_def.display_name or tool_name
                 if _is_read_only_intent(user_message) and tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
                     block_reason = (
                         "用户本轮请求是只读查询，不能执行会改变系统状态的操作。"
-                        f"已阻断工具: {tool_name}"
+                        f"已阻断工具: {display_name}"
                     )
                     messages.append({"role": "assistant", "content": None, "tool_calls": [
                         {"id": tool_call.get("id", ""), "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)}}
@@ -383,14 +389,14 @@ async def reasoning_node(state: AgentState) -> dict:
                         event_type="blocked",
                         content=block_reason,
                         evidence=build_evidence(
-                            claim=f"{tool_name} was blocked because the user asked for read-only status/query",
+                            claim=f"{display_name} 已被阻断：用户请求是只读查询",
                             evidence_type="user input",
                             source="read_only_intent_guard",
                             observed=user_message,
                             confidence="high",
                             execution_state="skipped",
-                            failure_reason="Read-only user intent cannot trigger write/destructive tools",
-                            next_check="Use read-only tools such as get_service_status or get_service_logs.",
+                            failure_reason="只读意图不能触发写操作或破坏性工具",
+                            next_check="请改用服务状态、日志、文件读取等只读工具。",
                         ),
                     ))
                     continue
@@ -398,7 +404,7 @@ async def reasoning_node(state: AgentState) -> dict:
                 await send_to_client(trace_event(
                     phase="tool_call",
                     event_type="start",
-                    content=f"调用工具: {tool_name}({json.dumps(tool_args, ensure_ascii=False)})",
+                    content=f"准备调用工具：{display_name}\n参数：{json.dumps(tool_args, ensure_ascii=False)}",
                     evidence=tool_plan_evidence(tool_name, tool_args),
                 ))
                 await audit_logger.log(session_id, AuditPhase.TOOL_CALL, AuditEventType.START, f"工具调用: {tool_name}", {"args": tool_args})
@@ -416,7 +422,7 @@ async def reasoning_node(state: AgentState) -> dict:
                             event_type="blocked",
                             content=f"被拦截: {cmd_check.detail}",
                             evidence=build_evidence(
-                                claim=f"Guardrail blocked {tool_name} before execution",
+                                claim=f"{display_name} 执行前被安全规则拦截",
                                 evidence_type="command",
                                 source="SafetyGuardrail.check_command",
                                 observed=cmd_check.detail,
@@ -453,9 +459,9 @@ async def reasoning_node(state: AgentState) -> dict:
                     await send_to_client(trace_event(
                         phase="approval_request",
                         event_type="pending",
-                        content=f"等待用户审批: {tool_name}",
+                        content=f"等待用户审批: {display_name}",
                         evidence=build_evidence(
-                            claim=f"{tool_name} requires user approval before execution",
+                            claim=f"{display_name} 需要用户审批后才能执行",
                             evidence_type="user input",
                             source="approval_manager",
                             observed=impact_text or tool_args,
@@ -481,13 +487,13 @@ async def reasoning_node(state: AgentState) -> dict:
                             event_type="failure",
                             content="用户拒绝了操作",
                             evidence=build_evidence(
-                                claim=f"{tool_name} was not executed because approval was rejected or timed out",
+                                claim=f"{display_name} 因审批未通过或超时而未执行",
                                 evidence_type="user input",
                                 source="approval_manager",
-                                observed="rejected_or_timeout",
+                                observed="用户拒绝或审批超时",
                                 confidence="high",
                                 execution_state="skipped",
-                                failure_reason="User approval was not granted",
+                                failure_reason="用户未批准该操作",
                             ),
                         ))
                         continue
@@ -497,10 +503,10 @@ async def reasoning_node(state: AgentState) -> dict:
                         event_type="success",
                         content="用户已批准",
                         evidence=build_evidence(
-                            claim=f"{tool_name} was approved by the user",
+                            claim=f"{display_name} 已通过用户审批",
                             evidence_type="user input",
                             source="approval_manager",
-                            observed="approved",
+                            observed="已批准",
                             confidence="high",
                             execution_state="executed",
                         ),
@@ -523,16 +529,17 @@ async def reasoning_node(state: AgentState) -> dict:
                                     event_type="start",
                                     content=f"已创建回滚备份：{target_path}",
                                     evidence=build_evidence(
-                                        claim=f"Backup was created before {tool_name}",
+                                        claim=f"{display_name} 执行前已创建回滚备份",
                                         evidence_type="config",
                                         source="BackupManager.backup_file",
-                                        observed=backup_record,
+                                        observed=target_path,
                                         confidence="high",
                                         execution_state="executed",
                                     ),
                                 ))
                         before_change_state = _capture_pre_change_state(tool_name, tool_args, backup_record)
 
+                    current_turn_tool_count += 1
                     result = tool_def.function(**tool_args)
                     result_success = bool(getattr(result, "success", True))
                     result_error = getattr(result, "error", None)
@@ -553,7 +560,7 @@ async def reasoning_node(state: AgentState) -> dict:
                                 event_type=verification["status"],
                                 content=verification["message"],
                                 evidence=verification_evidence(
-                                    claim=f"Post-action verification for {tool_name}",
+                                    claim=f"{display_name} 执行后验证",
                                     source=tool_name,
                                     observed=verification["message"],
                                     success=verification["status"] == "success",
@@ -568,7 +575,7 @@ async def reasoning_node(state: AgentState) -> dict:
                                 event_type="success",
                                 content=f"变更对比:\n{change_diff}",
                                 evidence=verification_evidence(
-                                    claim=f"Before/after comparison captured for {tool_name}",
+                                    claim=f"{display_name} 已记录执行前后对比",
                                     source=tool_name,
                                     observed=change_diff,
                                     success=True,
@@ -589,7 +596,7 @@ async def reasoning_node(state: AgentState) -> dict:
                                     "- 恢复方式：使用 rollback_backup 或 /api/backups/{id}/rollback"
                                 ),
                                 evidence=build_evidence(
-                                    claim=f"Rollback point is available for {tool_name}",
+                                    claim=f"{display_name} 已创建可用回滚点",
                                     evidence_type="config",
                                     source="BackupManager.backup_file",
                                     observed=backup_record,
@@ -601,7 +608,7 @@ async def reasoning_node(state: AgentState) -> dict:
                         await send_to_client(trace_event(
                             phase="execution",
                             event_type="success",
-                            content=f"执行成功: {tool_name}",
+                            content=f"执行成功: {display_name}",
                             evidence=tool_result_evidence(
                                 tool_name=tool_name,
                                 tool_args=tool_args,
@@ -615,7 +622,7 @@ async def reasoning_node(state: AgentState) -> dict:
                         await send_to_client(trace_event(
                             phase="execution",
                             event_type="failure",
-                            content=f"执行失败: {tool_name} - {failure_message}",
+                            content=f"执行失败: {display_name} - {failure_message}",
                             evidence=tool_result_evidence(
                                 tool_name=tool_name,
                                 tool_args=tool_args,
@@ -629,16 +636,16 @@ async def reasoning_node(state: AgentState) -> dict:
                     await send_to_client(trace_event(
                         phase="execution",
                         event_type="failure",
-                        content=f"执行失败: {tool_name} - {e}",
+                        content=f"执行失败: {display_name} - {e}",
                         evidence=build_evidence(
-                            claim=f"{tool_name} raised an exception during execution",
+                            claim=f"{display_name} 执行时发生异常",
                             evidence_type="command",
                             source=tool_name,
                             observed=str(e),
                             confidence="high",
                             execution_state="failed",
                             failure_reason=str(e),
-                            next_check="Inspect tool arguments and retry with a read-only check if possible.",
+                            next_check="请检查工具参数，并优先用只读检查确认状态后重试。",
                         ),
                     ))
 
@@ -651,12 +658,44 @@ async def reasoning_node(state: AgentState) -> dict:
             # if the response claims a write operation was completed but NO write tool
             # was actually called this turn, force one retry with an explicit reminder.
             final_content = llm_response.get("content", "") or ""
+            has_write_completion_claim = _has_write_intent(user_message) and _claims_write_completion(final_content)
             if (
-                not hallucination_retry_done
-                and write_tools_called == 0
-                and _has_write_intent(user_message)
-                and _claims_write_completion(final_content)
+                write_tools_called == 0
+                and has_write_completion_claim
             ):
+                if hallucination_retry_done:
+                    blocked_claim = final_content
+                    final_content = (
+                        "本次没有执行该写操作。\n\n"
+                        "原因：系统检测到模型回复声称操作已完成，但本轮没有真实调用任何写操作工具，"
+                        "因此已阻断该回复。\n\n"
+                        "当前状态不能仅凭模型文字确认。请重新发起操作，系统会先展示影响评估并等待你确认；"
+                        "只有工具返回成功后，才会回复执行成功。"
+                    )
+                    llm_response["content"] = final_content
+                    await audit_logger.log(
+                        session_id,
+                        AuditPhase.RESPONSE,
+                        AuditEventType.FAILURE,
+                        "幻觉守卫: 重试后仍声称完成写操作，已阻断最终回复",
+                        {"original_response": blocked_claim[:500]},
+                    )
+                    await send_to_client(trace_event(
+                        phase="response",
+                        event_type="failure",
+                        content="已阻断未验证的写操作完成声明，改为安全回复",
+                        evidence=build_evidence(
+                            claim="模型再次声称写操作已完成，但没有真实执行证据",
+                            evidence_type="user input",
+                            source="write_completion_guard",
+                            observed=blocked_claim[:500],
+                            confidence="high",
+                            execution_state="failed",
+                            failure_reason="重试后仍没有调用写操作或破坏性工具",
+                            next_check="请重新发起明确执行请求，以便系统走审批和真实工具执行。",
+                        ),
+                    ))
+                    break
                 hallucination_retry_done = True
                 logger.warning(
                     f"Hallucination guard triggered: LLM claimed completion without "
@@ -674,14 +713,14 @@ async def reasoning_node(state: AgentState) -> dict:
                     event_type="failure",
                     content="⚠️ 检测到模型声称已完成写操作但未真实调用工具，已强制重新分析",
                     evidence=build_evidence(
-                        claim="Model response claimed a write completion without executed write evidence",
+                        claim="模型声称写操作已完成，但没有真实执行证据",
                         evidence_type="user input",
                         source="write_completion_guard",
                         observed=final_content[:500],
                         confidence="high",
                         execution_state="failed",
-                        failure_reason="No write/destructive tool was called in this turn",
-                        next_check="Force the agent to either execute an approved tool or retract the claim.",
+                        failure_reason="本轮没有调用写操作或破坏性工具",
+                        next_check="请让智能体执行已审批工具，或明确撤回该完成声明。",
                     ),
                 ))
                 # Inject the assistant's bogus message so the LLM sees its own claim,
@@ -700,14 +739,44 @@ async def reasoning_node(state: AgentState) -> dict:
                 })
                 continue  # Retry one more LLM round with reminder in context
             if (
-                not hallucination_retry_done
-                and write_tool_failures
+                write_tool_failures
                 and write_tools_succeeded == 0
-                and _has_write_intent(user_message)
-                and _claims_write_completion(final_content)
+                and has_write_completion_claim
             ):
-                hallucination_retry_done = True
                 failure_summary = "; ".join(write_tool_failures)[:500]
+                if hallucination_retry_done:
+                    blocked_claim = final_content
+                    final_content = (
+                        "本次写操作没有成功完成。\n\n"
+                        f"真实工具返回失败：{failure_summary}\n\n"
+                        "系统已阻断模型继续声称操作成功。请根据失败原因修复后重试；"
+                        "只有写操作工具返回成功后，才会回复执行成功。"
+                    )
+                    llm_response["content"] = final_content
+                    await audit_logger.log(
+                        session_id,
+                        AuditPhase.RESPONSE,
+                        AuditEventType.FAILURE,
+                        "幻觉守卫: 写操作失败后仍声称完成，已阻断最终回复",
+                        {"tool_failures": write_tool_failures[:5], "original_response": blocked_claim[:500]},
+                    )
+                    await send_to_client(trace_event(
+                        phase="response",
+                        event_type="failure",
+                        content="已阻断失败写操作的完成声明，改为安全回复",
+                        evidence=build_evidence(
+                            claim="写操作工具失败后，模型再次声称操作已完成",
+                            evidence_type="command",
+                            source="write_completion_guard",
+                            observed=failure_summary,
+                            confidence="high",
+                            execution_state="failed",
+                            failure_reason=failure_summary,
+                            next_check="请先处理工具失败原因，再重试写操作。",
+                        ),
+                    ))
+                    break
+                hallucination_retry_done = True
                 logger.warning(
                     f"Hallucination guard triggered: LLM claimed completion after "
                     f"failed write tools. Failures: {failure_summary!r}"
@@ -724,14 +793,14 @@ async def reasoning_node(state: AgentState) -> dict:
                     event_type="failure",
                     content="⚠️ 写操作工具返回失败，但模型声称已完成，已强制重新分析",
                     evidence=build_evidence(
-                        claim="Model response claimed a write completion after tool failure",
+                        claim="写操作工具失败后，模型仍声称操作已完成",
                         evidence_type="command",
                         source="write_completion_guard",
                         observed=failure_summary,
                         confidence="high",
                         execution_state="failed",
                         failure_reason=failure_summary,
-                        next_check="Regenerate the answer from the failed tool output.",
+                        next_check="请基于失败工具输出重新生成回复，明确说明操作未成功。",
                     ),
                 ))
                 messages.append({"role": "assistant", "content": final_content})
@@ -756,7 +825,12 @@ async def reasoning_node(state: AgentState) -> dict:
         evidence=inference_evidence("Final response was generated from prior evidence and messages", "LLM", final_response[:500]),
     ))
 
-    return {"final_response": final_response, "messages": messages, "iteration": iteration}
+    return {
+        "final_response": final_response,
+        "messages": messages,
+        "iteration": iteration,
+        "current_turn_tool_count": current_turn_tool_count,
+    }
 
 
 async def knowledge_save_node(state: AgentState) -> dict:
@@ -773,10 +847,14 @@ async def knowledge_save_node(state: AgentState) -> dict:
     user_message = state["user_message"]
     final_response = state["final_response"]
     messages = state.get("messages", [])
+    incident_id = state.get("incident_id", "")
+    multimodal_context = state.get("multimodal_context", [])
     send_to_client = state["send_to_client"]
 
-    # No tool was executed → nothing actionable happened → nothing to save.
-    if not any(msg.get("role") == "tool" for msg in messages):
+    # No tool was executed in the current turn → nothing actionable happened →
+    # nothing to save. Historical tool messages in the same conversation must
+    # not make a pure image/voice turn look like a verified resolution.
+    if int(state.get("current_turn_tool_count", 0) or 0) <= 0:
         return {}
 
     # === Semantic extraction (single LLM call serves both knowledge and runbook) ===
@@ -795,6 +873,13 @@ async def knowledge_save_node(state: AgentState) -> dict:
 
     # === Knowledge entry ===
     try:
+        multimodal_memory = _build_multimodal_memory(multimodal_context)
+        evidence = list(summary_data.get("evidence") or [])
+        applicability_conditions = list(summary_data.get("applicability_conditions") or [])
+        if multimodal_memory:
+            evidence.extend(multimodal_memory["evidence"])
+            applicability_conditions.append("多模态识别结果仅作为辅助上下文，复用前必须重新执行真实 MCP 检查。")
+
         await knowledge_store.save_resolution(
             problem_signature=problem,
             diagnosis_path=diagnosis,
@@ -803,14 +888,16 @@ async def knowledge_save_node(state: AgentState) -> dict:
             incident_memory={
                 "symptoms": summary_data.get("symptoms") or [],
                 "root_cause": summary_data.get("root_cause") or "",
-                "evidence": summary_data.get("evidence") or [],
+                "evidence": evidence,
                 "successful_actions": summary_data.get("successful_actions") or [],
                 "failed_attempts": summary_data.get("failed_attempts") or [],
                 "validation_method": summary_data.get("validation_method") or "",
-                "applicability_conditions": summary_data.get("applicability_conditions") or [],
+                "applicability_conditions": applicability_conditions,
                 "non_applicability_conditions": summary_data.get("non_applicability_conditions") or [],
                 "source_incident_id": incident_id,
                 "confidence": summary_data.get("confidence") or "medium",
+                "source_modalities": multimodal_memory.get("source_modalities", []) if multimodal_memory else ["real_tool_execution"],
+                "multimodal_evidence": multimodal_memory.get("items", []) if multimodal_memory else [],
             },
         )
         await send_to_client({"type": "trace", "phase": "knowledge_save", "event_type": "success", "content": f"经验已保存: {problem[:30]}"})
@@ -910,6 +997,7 @@ async def run_agent(
     user_message: str,
     conversation_history: list[dict],
     send_to_client: Callable,
+    multimodal_context: list[dict] | None = None,
 ) -> str:
     """Run the Agent pipeline using LangGraph.
 
@@ -938,6 +1026,13 @@ async def run_agent(
                 logger.warning(f"Incident event recording failed for {incident_id}: {e}")
             await original_send_to_client(data)
 
+    multimodal_context = multimodal_context or []
+    if multimodal_context:
+        from app.multimodal.provider import trace_events_from_context
+
+        for event in trace_events_from_context(multimodal_context):
+            await send_to_client(event)
+
     initial_state: AgentState = {
         "session_id": session_id,
         "incident_id": incident_id or "",
@@ -949,6 +1044,9 @@ async def run_agent(
         "risk_warning": "",
         "knowledge_hint": "",
         "recent_changes_hint": "",
+        "multimodal_hint": _format_multimodal_context(multimodal_context),
+        "multimodal_context": multimodal_context,
+        "current_turn_tool_count": 0,
         "iteration": 0,
         "send_to_client": send_to_client,
     }
@@ -969,7 +1067,7 @@ async def run_agent(
             )
         if (
             not final_state.get("is_blocked")
-            and any(msg.get("role") == "tool" for msg in final_state.get("messages", []))
+            and int(final_state.get("current_turn_tool_count", 0) or 0) > 0
         ):
             import asyncio
 
@@ -1039,6 +1137,65 @@ def _format_knowledge_entry_for_prompt(entry: dict) -> str:
         + ("可作为参考，但写操作仍需重新检查和审批" if entry.get("safe_to_reuse") else "仅供参考，不能直接复用写操作")
     )
     return "\n".join(lines) + "\n"
+
+
+def _format_multimodal_context(items: list[dict] | None) -> str:
+    """Format uploaded image/voice recognition as cautious Agent context."""
+    if not items:
+        return ""
+    try:
+        from app.multimodal.provider import build_multimodal_prompt_context
+
+        return build_multimodal_prompt_context(items)
+    except Exception as e:
+        logger.warning(f"Failed to format multimodal context: {e}")
+        return ""
+
+
+def _build_multimodal_memory(items: list[dict] | None) -> dict:
+    """Build source-marked auxiliary memory from multimodal input.
+
+    This helper is called only after ``knowledge_save_node`` has already found
+    real tool evidence in the turn. Image/voice recognition alone must never
+    create a knowledge entry.
+    """
+    if not items:
+        return {}
+
+    memory_items: list[dict] = []
+    evidence: list[str] = []
+    source_modalities = {"real_tool_execution"}
+    for item in items[:5]:
+        if not isinstance(item, dict):
+            continue
+        input_type = item.get("input_type") or item.get("type") or "unknown"
+        source = "image_recognition" if input_type == "image" else "voice_transcription" if input_type == "audio" else "multimodal_recognition"
+        source_modalities.add(source)
+        summary = (
+            item.get("summary")
+            or item.get("normalized_transcript")
+            or item.get("extracted_text")
+            or item.get("raw_transcript")
+            or ""
+        )
+        entities = item.get("entities") if isinstance(item.get("entities"), dict) else {}
+        memory_items.append({
+            "source": source,
+            "input_type": input_type,
+            "summary": str(summary)[:500],
+            "confidence": item.get("confidence") or "medium",
+            "entities": entities,
+        })
+        if summary:
+            evidence.append(f"来源:{source}；识别摘要:{str(summary)[:300]}")
+
+    if not memory_items:
+        return {}
+    return {
+        "source_modalities": sorted(source_modalities),
+        "items": memory_items,
+        "evidence": evidence,
+    }
 
 
 def _format_knowledge_entries_for_trace(entries: list[dict]) -> str:
@@ -1158,7 +1315,17 @@ async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_t
         impact_lines.append("操作：恢复历史备份")
         impact_lines.append("影响：目标文件或目录会被所选备份覆盖")
 
-    elif tool_name in ("create_file", "write_file", "delete_file", "delete_directory", "move_file", "change_permissions", "change_owner"):
+    elif tool_name in (
+        "create_file",
+        "create_directory",
+        "write_file",
+        "delete_file",
+        "delete_directory",
+        "move_file",
+        "copy_file",
+        "change_permissions",
+        "change_owner",
+    ):
         impact_lines.append(f"操作：{display_name}")
         impact_lines.append("影响：文件系统内容或元数据可能发生变化")
 
@@ -1178,7 +1345,7 @@ async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_t
             event_type="start",
             content=f"影响评估：\n{impact_text}",
             evidence=build_evidence(
-                claim=f"Estimated operational impact for {tool_name}",
+                claim=f"已评估 {display_name} 的操作影响",
                 evidence_type="user input",
                 source="assess_impact",
                 observed=impact_text,
@@ -1232,6 +1399,16 @@ def _verify_tool_result(tool_name: str, tool_args: dict, result) -> dict | None:
             except Exception:
                 pass
 
+    elif tool_name == "create_directory":
+        from pathlib import Path
+
+        dirpath = tool_args.get("dirpath")
+        if dirpath:
+            path = Path(str(dirpath))
+            if path.exists() and path.is_dir():
+                return {"status": "success", "message": f"验证通过: 目录已创建 {dirpath}"}
+            return {"status": "failure", "message": f"验证失败: 目录不存在 {dirpath}"}
+
     if success:
         return {"status": "success", "message": f"执行完成: {tool_name}"}
     return None
@@ -1250,16 +1427,18 @@ def _capture_pre_change_state(tool_name: str, tool_args: dict, backup_record: di
         if service:
             return {"service_state": _get_service_active_state(service)}
 
-    if tool_name == "create_file":
+    if tool_name in {"create_file", "create_directory"}:
         from pathlib import Path
 
-        filepath = tool_args.get("filepath")
-        if filepath:
-            path = Path(str(filepath))
+        target_path = tool_args.get("filepath") or tool_args.get("dirpath")
+        if target_path:
+            path = Path(str(target_path))
             return {
-                "file_path": str(path),
-                "file_exists": path.exists(),
-                "file_size": path.stat().st_size if path.exists() and path.is_file() else None,
+                "path": str(path),
+                "exists": path.exists(),
+                "is_file": path.is_file(),
+                "is_dir": path.is_dir(),
+                "size": path.stat().st_size if path.exists() and path.is_file() else None,
             }
 
     if backup_record:
@@ -1313,18 +1492,19 @@ def _capture_change_diff(
             diff_lines.append(f"[Before] {service}: {before_service_state}")
             diff_lines.append(f"[After]  {service}: {after_service_state}")
 
-    elif tool_name == "create_file":
+    elif tool_name in {"create_file", "create_directory"}:
         from pathlib import Path
 
-        filepath = tool_args.get("filepath")
-        if filepath:
-            path = Path(str(filepath))
-            before_exists = before_state.get("file_exists", False)
+        target_path = tool_args.get("filepath") or tool_args.get("dirpath")
+        if target_path:
+            path = Path(str(target_path))
+            before_exists = before_state.get("exists", False)
             after_exists = path.exists()
-            diff_lines.append(f"[Before] 文件存在: {'是' if before_exists else '否'}")
-            diff_lines.append(f"[After]  文件存在: {'是' if after_exists else '否'}")
+            target_label = "目录" if tool_name == "create_directory" else "文件"
+            diff_lines.append(f"[Before] {target_label}存在: {'是' if before_exists else '否'}")
+            diff_lines.append(f"[After]  {target_label}存在: {'是' if after_exists else '否'}")
             if after_exists and path.is_file():
-                before_size = before_state.get("file_size")
+                before_size = before_state.get("size")
                 after_size = path.stat().st_size
                 diff_lines.append(f"[Before] 文件大小: {before_size if before_size is not None else 0} bytes")
                 diff_lines.append(f"[After]  文件大小: {after_size} bytes")
@@ -1468,9 +1648,9 @@ _WRITE_COMPLETION_PATTERNS = (
     "已 kill", "已终止", "已杀死", "已为您终止",
     "已修改", "已更新", "已写入", "已应用", "已保存", "已成功修改",
     "已执行完毕", "已为您执行", "已为你执行", "执行完毕", "已经执行",
-    "已添加", "已配置", "已开启", "已关闭", "已禁用", "已启用",
+    "已添加", "已创建", "创建完成", "已成功创建", "已新建", "新建完成", "已配置", "已开启", "已关闭", "已禁用", "已启用",
     "已安装", "安装完成", "已卸载", "卸载完成",
-    "started", "start completed", "restarted", "restart completed",
+    "started", "start completed", "restarted", "restart completed", "created", "create completed",
     "stopped", "stop completed", "deleted", "delete completed",
     "removed", "remove completed", "modified", "updated", "saved",
     "installed", "install completed", "uninstalled", "uninstall completed",
@@ -1480,13 +1660,15 @@ _WRITE_COMPLETION_PATTERNS = (
 _WRITE_INTENT_PATTERNS = (
     # Explicit operation requests. Keep the gap short so read-only phrases like
     # "请查看 nginx 配置文件" do not treat the noun "配置" as a write verb.
-    r"(帮我|请|执行|开始|给我|把|将|立即|现在|麻烦).{0,4}(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|安装|卸载|配置)",
+    r"(帮我|请|执行|开始|给我|把|将|立即|现在|麻烦).{0,4}(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|创建|新建|安装|卸载|配置)",
     # Bare imperative-style operation plus an object.
-    r"^(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|安装|卸载|配置).{0,30}(服务|进程|文件|目录|配置|端口|用户|软件|包|规则|权限|nginx|mysql|redis|apache|systemd)",
+    r"^(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|创建|新建|安装|卸载|配置).{0,30}(服务|进程|文件|目录|配置|端口|用户|软件|包|规则|权限|nginx|mysql|redis|apache|systemd)",
+    # Location-first creation requests such as "在 /tmp 下创建 test 目录".
+    r"(在|到|向).{0,60}(创建|新建).{0,30}(文件夹|目录|文件)",
     # Mixed read-then-write requests such as "检查并重启 nginx".
-    r"(并|然后|之后|后).{0,6}(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|安装|卸载|配置)",
+    r"(并|然后|之后|后).{0,6}(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|创建|新建|安装|卸载|配置)",
     # English operation requests.
-    r"\b(start|restart|stop|delete|remove|clean|modify|write|save|apply|enable|disable|install|uninstall)\b.{0,40}\b(service|process|file|directory|config|port|user|package|nginx|mysql|redis|apache)\b",
+    r"\b(start|restart|stop|delete|remove|clean|modify|write|save|apply|enable|disable|create|install|uninstall)\b.{0,40}\b(service|process|file|directory|config|port|user|package|nginx|mysql|redis|apache)\b",
     # Follow-up confirmations after the assistant proposed a write operation.
     r"^(执行|确认|确定|批准|同意|开始执行|继续|好的|好|可以|那就这样|那就执行)$",
 )

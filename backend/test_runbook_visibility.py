@@ -119,7 +119,8 @@ def test_runbook_replay_streams_plan_step_summaries_and_report() -> None:
         assert "执行计划" in contents
         assert "统计目录 /tmp 的占用大小" in contents
         assert "查找 /tmp 下超过 10M 的大文件" in contents
-        assert "技术细节: get_directory_size" in contents
+        assert "工具: 目录大小" in contents
+        assert "技术细节:" not in contents
         assert "结果摘要: 目录占用: 128M" in contents
         assert "结果摘要: 找到 1 个候选大文件" in contents
         execution_events = [
@@ -128,7 +129,7 @@ def test_runbook_replay_streams_plan_step_summaries_and_report() -> None:
         ]
         assert execution_events
         assert all(event.get("execution_state") == "executed" for event in execution_events)
-        assert all(event.get("source") in {"get_directory_size", "find_large_files"} for event in execution_events)
+        assert all(event.get("source") in {"目录大小", "查找大文件"} for event in execution_events)
         assert "执行概览" in summary
         assert "系统影响: 本次只执行读取/检查步骤，没有修改系统。" in summary
         assert "下一步建议" in summary
@@ -136,8 +137,43 @@ def test_runbook_replay_streams_plan_step_summaries_and_report() -> None:
     asyncio.run(scenario())
 
 
+def test_runbook_result_summaries_do_not_dump_raw_json() -> None:
+    system_summary = runbook_executor._summarize_result(
+        "system_overview",
+        {
+            "success": True,
+            "data": {
+                "uptime": "2d 11h",
+                "load_avg": {"1min": "2.14", "5min": "1.60", "15min": "1.14"},
+                "memory": {"percent": "92%"},
+                "disk_root": "27% /",
+            },
+        },
+    )
+    health_summary = runbook_executor._summarize_result(
+        "health_check",
+        {
+            "success": True,
+            "data": {
+                "status": "critical",
+                "issues": [
+                    {"type": "disk", "severity": "high", "detail": "/run/media/root is 100% full"},
+                    {"type": "memory", "severity": "high", "detail": "Memory usage: 92%"},
+                ],
+            },
+        },
+    )
+
+    assert "运行时间 2d 11h" in system_summary
+    assert "负载 2.14/1.60/1.14" in system_summary
+    assert "{" not in system_summary
+    assert "健康状态 critical，发现 2 个问题" in health_summary
+    assert "{" not in health_summary
+
+
 def main() -> None:
     test_runbook_replay_streams_plan_step_summaries_and_report()
+    test_runbook_result_summaries_do_not_dump_raw_json()
     print("runbook visibility regression OK")
 
 

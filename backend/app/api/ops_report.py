@@ -11,7 +11,8 @@ import aiosqlite
 from fastapi import APIRouter, Query
 
 from app.database import get_audit_db_path, get_knowledge_db_path
-from app.incidents.store import get_recent_incident_stats
+from app.agent.tools_registry import tools_registry
+from app.incidents.store import get_recent_incident_stats, get_recent_multimodal_evidence
 
 router = APIRouter()
 
@@ -95,6 +96,14 @@ async def generate_ops_report(hours: int = Query(default=24, description="回溯
         "by_status": incident_stats["by_status"],
         "items": incident_stats["recent"],
     }
+    multimodal_evidence = await get_recent_multimodal_evidence(since=since, limit=20)
+    report["sections"]["multimodal_evidence"] = {
+        "title": "多模态证据",
+        "count": multimodal_evidence["total"],
+        "images": multimodal_evidence["images"],
+        "audio": multimodal_evidence["audio"],
+        "items": multimodal_evidence["items"],
+    }
 
     # 2. Audit log summary
     async with aiosqlite.connect(get_audit_db_path()) as db:
@@ -112,7 +121,8 @@ async def generate_ops_report(hours: int = Query(default=24, description="回溯
             content = row["content"]
             if ":" in content:
                 tool_name = content.split(":")[-1].strip().split("(")[0].strip()
-                tool_stats[tool_name] = tool_stats.get(tool_name, 0) + 1
+                display_name = _display_tool_name(tool_name)
+                tool_stats[display_name] = tool_stats.get(display_name, 0) + 1
 
         report["sections"]["tool_calls"] = {
             "title": "工具调用统计",
@@ -168,7 +178,7 @@ def _generate_summary_text(report: dict) -> str:
 
     # Messages
     m = sections.get("messages", {})
-    lines.append(f"交互: 用户 {m.get('user_messages', 0)} 条, Agent {m.get('agent_responses', 0)} 条")
+    lines.append(f"交互: 用户 {m.get('user_messages', 0)} 条, 智能体 {m.get('agent_responses', 0)} 条")
 
     # Tools
     t = sections.get("tool_calls", {})
@@ -203,7 +213,22 @@ def _generate_summary_text(report: dict) -> str:
         by_status = inc.get("by_status") or {}
         lines.append(
             f"事件时间线: {inc['count']} 个 "
-            f"(resolved {by_status.get('resolved', 0)}, failed {by_status.get('failed', 0)}, open {by_status.get('open', 0)})"
+            f"(已解决 {by_status.get('resolved', 0)}, 失败 {by_status.get('failed', 0)}, 未关闭 {by_status.get('open', 0)})"
+        )
+
+    multimodal = sections.get("multimodal_evidence", {})
+    if multimodal.get("count", 0) > 0:
+        lines.append(
+            f"多模态证据: {multimodal['count']} 条 "
+            f"(图片 {multimodal.get('images', 0)}, 语音 {multimodal.get('audio', 0)})"
         )
 
     return "\n".join(lines)
+
+
+def _display_tool_name(tool_name: str) -> str:
+    """Return a Chinese display name for a technical tool identifier."""
+    tool = tools_registry.get_tool(tool_name)
+    if tool and tool.display_name:
+        return tool.display_name
+    return tool_name

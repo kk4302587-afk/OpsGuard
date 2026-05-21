@@ -2,7 +2,23 @@
 
 from fastapi import APIRouter
 
-from app.api import alerts, sessions, system, knowledge, health_report, topology, security_demo, health_report_pdf, tools, runbook, ops_report, ops_report_pdf, backups, incidents
+from app.api import (
+    alerts,
+    backups,
+    health_report,
+    health_report_pdf,
+    incidents,
+    knowledge,
+    multimodal,
+    ops_report,
+    ops_report_pdf,
+    runbook,
+    security_demo,
+    sessions,
+    system,
+    tools,
+    topology,
+)
 
 router = APIRouter()
 
@@ -20,3 +36,4 @@ router.include_router(backups.router, prefix="/backups", tags=["backups"])
 router.include_router(incidents.router, prefix="/incidents", tags=["incidents"])
 router.include_router(ops_report.router, prefix="/ops-report", tags=["ops-report"])
 router.include_router(ops_report_pdf.router, prefix="/ops-report", tags=["ops-report"])
+router.include_router(multimodal.router, prefix="/multimodal", tags=["multimodal"])

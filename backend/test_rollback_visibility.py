@@ -69,6 +69,11 @@ def test_impact_text_is_truthful_about_rollback() -> None:
             assert "操作：创建文件" in new_file_text
             assert "回滚：无可靠自动回滚" in new_file_text
 
+            new_dir_text = await assess_impact("create_directory", {"dirpath": str(Path(tmpdir) / "new-dir")}, "s", capture)
+            assert new_dir_text is not None
+            assert "操作：创建目录" in new_dir_text
+            assert "回滚：无可靠自动回滚" in new_dir_text
+
             overwrite_text = await assess_impact(
                 "create_file",
                 {"filepath": str(target), "overwrite": True},

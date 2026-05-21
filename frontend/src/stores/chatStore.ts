@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { localizeTraceContent } from '../utils/traceLocalization'
 
 interface Message {
   id: string
@@ -37,6 +38,25 @@ interface TraceEvent {
   next_check?: string
 }
 
+export interface MultimodalRecognitionResult {
+  input_type: 'image' | 'audio'
+  summary?: string
+  extracted_text?: string
+  raw_transcript?: string
+  normalized_transcript?: string
+  entities?: Record<string, unknown>
+  diagnosis_hints?: string[]
+  recommended_tools?: Array<Record<string, unknown>>
+  corrections?: Array<Record<string, unknown>>
+  warnings?: string[]
+  confidence?: 'low' | 'medium' | 'high'
+  provider?: string
+  model?: string
+  file?: Record<string, unknown>
+  requires_write_confirmation?: boolean
+  needs_user_confirmation?: boolean
+}
+
 interface Session {
   id: string
   title: string
@@ -57,7 +77,7 @@ interface ChatStore {
   inputValue: string
   isThinking: boolean
   setInputValue: (value: string) => void
-  sendMessage: (content: string) => void
+  sendMessage: (content: string, multimodalContext?: MultimodalRecognitionResult[]) => void
 
   // Trace
   traceEvents: TraceEvent[]
@@ -136,11 +156,11 @@ const applyTraceToProgressSteps = (
   }
 
   if (event.event_type === 'start' || event.event_type === 'pending') {
-    nextSteps[stepIdx] = { ...nextSteps[stepIdx], status: 'process', description: event.content }
+    nextSteps[stepIdx] = { ...nextSteps[stepIdx], status: 'process', description: localizeTraceContent(event.content) }
   } else if (event.event_type === 'success') {
-    nextSteps[stepIdx] = { ...nextSteps[stepIdx], status: 'finish', description: event.content }
+    nextSteps[stepIdx] = { ...nextSteps[stepIdx], status: 'finish', description: localizeTraceContent(event.content) }
   } else if (event.event_type === 'failure' || event.event_type === 'blocked') {
-    nextSteps[stepIdx] = { ...nextSteps[stepIdx], status: 'error', description: event.content }
+    nextSteps[stepIdx] = { ...nextSteps[stepIdx], status: 'error', description: localizeTraceContent(event.content) }
   }
 
   return nextSteps
@@ -332,7 +352,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setInputValue: (value: string) => set({ inputValue: value }),
 
-  sendMessage: (content: string) => {
+  sendMessage: (content: string, multimodalContext: MultimodalRecognitionResult[] = []) => {
     const { ws, activeSessionId, createSession } = get()
 
     // Auto-create session if none exists
@@ -353,7 +373,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               messages: [...state.messages, userMessage],
               isThinking: true,
             }))
-            newWs.send(JSON.stringify({ type: 'message', content }))
+            newWs.send(JSON.stringify({ type: 'message', content, multimodal_context: multimodalContext }))
           }
         }, 500)
       })
@@ -372,7 +392,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       isThinking: true,
     }))
 
-    ws.send(JSON.stringify({ type: 'message', content }))
+    ws.send(JSON.stringify({ type: 'message', content, multimodal_context: multimodalContext }))
   },
 
   connectWebSocket: (sessionId: string) => {
@@ -486,11 +506,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 }
                 // Update current step
                 if (data.event_type === 'start' || data.event_type === 'pending') {
-                  steps[stepIdx] = { ...steps[stepIdx], status: 'process', description: data.content }
+                  steps[stepIdx] = { ...steps[stepIdx], status: 'process', description: localizeTraceContent(data.content) }
                 } else if (data.event_type === 'success') {
-                  steps[stepIdx] = { ...steps[stepIdx], status: 'finish', description: data.content }
+                  steps[stepIdx] = { ...steps[stepIdx], status: 'finish', description: localizeTraceContent(data.content) }
                 } else if (data.event_type === 'failure' || data.event_type === 'blocked') {
-                  steps[stepIdx] = { ...steps[stepIdx], status: 'error', description: data.content }
+                  steps[stepIdx] = { ...steps[stepIdx], status: 'error', description: localizeTraceContent(data.content) }
                 }
               }
 

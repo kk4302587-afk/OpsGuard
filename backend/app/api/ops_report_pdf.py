@@ -92,7 +92,7 @@ async def export_ops_report_pdf(hours: int = Query(default=24)):
         f"安全拦截: {sections.get('security', {}).get('blocks', 0)}",
         f"审批通过: {sections.get('approvals', {}).get('approved', 0)}",
         f"新增知识: {sections.get('knowledge', {}).get('count', 0)}",
-        f"Runbook: {sections.get('runbooks', {}).get('count', 0)}",
+        f"新增 Runbook: {sections.get('runbooks', {}).get('count', 0)}",
     ]]
     stats_table = Table(stats_data, colWidths=[29*mm]*6)
     stats_table.setStyle(TableStyle([
@@ -144,6 +144,28 @@ async def export_ops_report_pdf(hours: int = Query(default=24)):
             s_body,
         ))
 
+    # Incidents
+    incidents = sections.get("incidents", {})
+    if incidents.get("items"):
+        elements.append(Paragraph("事件草稿", s_heading))
+        for item in incidents["items"][:10]:
+            status = _status_label(item.get("status", ""))
+            title = item.get("problem_statement") or item.get("id", "")
+            elements.append(Paragraph(f"\u2022  [{status}] {title}", s_small))
+
+    # Multimodal evidence
+    multimodal = sections.get("multimodal_evidence", {})
+    if multimodal.get("items"):
+        elements.append(Paragraph("多模态证据", s_heading))
+        for item in multimodal["items"][:10]:
+            input_label = "语音识别" if item.get("input_type") == "audio" else "图片识别"
+            summary = item.get("summary") or item.get("recognized_text") or "已记录识别结果"
+            verification = item.get("verification") or []
+            verify_text = "；真实工具验证: " + "、".join(
+                str(v.get("source") or v.get("title") or "") for v in verification[:3]
+            ) if verification else "；尚未找到真实工具验证"
+            elements.append(Paragraph(f"\u2022  [{input_label}] {summary[:120]}{verify_text}", s_small))
+
     # Sessions
     sess = sections.get("sessions", {})
     if sess.get("items"):
@@ -177,3 +199,12 @@ async def export_ops_report_pdf(hours: int = Query(default=24)):
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+def _status_label(status: str) -> str:
+    return {
+        "resolved": "已解决",
+        "failed": "失败",
+        "open": "处理中",
+        "active": "处理中",
+    }.get(status or "", status or "未知")

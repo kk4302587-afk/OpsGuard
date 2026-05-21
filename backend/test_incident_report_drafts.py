@@ -95,13 +95,13 @@ def test_handoff_and_postmortem_separate_facts_from_hypotheses() -> None:
         assert postmortem is not None
         handoff_md = handoff["markdown"]
         postmortem_md = postmortem["markdown"]
-        assert "get_service_status [executed]" in handoff_md
+        assert "服务状态 [已执行]" in handoff_md
         assert "journalctl unavailable" in handoff_md
-        assert "get_service_status [executed]" in postmortem_md
-        assert "Hypothesis: LLM [inferred]" in postmortem_md
-        assert "Customer / Business Impact" in postmortem_md
-        assert "[Placeholder]" in postmortem_md
-        assert "Confirmed root cause is not automatically claimed" in postmortem_md
+        assert "服务状态 [已执行]" in postmortem_md
+        assert "推断：模型推断 [推断]" in postmortem_md
+        assert "用户 / 业务影响" in postmortem_md
+        assert "[待补充]" in postmortem_md
+        assert "系统不会自动声称已确认根因" in postmortem_md
 
     asyncio.run(scenario())
 
@@ -115,9 +115,9 @@ def test_open_incident_postmortem_has_followup_items() -> None:
 
         assert postmortem is not None
         markdown = postmortem["markdown"]
-        assert "Incident status is open" in markdown
-        assert "Assign an owner to continue diagnosis" in markdown
-        assert "Add explicit verification evidence" in markdown
+        assert "事件状态为处理中" in markdown
+        assert "指定负责人继续诊断" in markdown
+        assert "补充明确的验证证据" in markdown
 
     asyncio.run(scenario())
 
@@ -130,4 +130,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

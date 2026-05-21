@@ -149,9 +149,9 @@ async def _triage_one_alert(alert: NormalizedAlert) -> dict[str, Any]:
         event=trace_event(
             phase="input_received",
             event_type="success",
-            content=f"Alert webhook accepted: {alert.alertname}",
+            content=f"告警 Webhook 已接收：{alert.alertname}",
             evidence=build_evidence(
-                claim="Alert webhook payload was normalized into an auto-triage request",
+                claim="告警 Webhook 已转换为自动分析请求",
                 evidence_type="user input",
                 source="alert_webhook",
                 observed=_alert_to_dict(alert),
@@ -183,9 +183,9 @@ async def _triage_one_alert(alert: NormalizedAlert) -> dict[str, Any]:
         event=trace_event(
             phase="response",
             event_type="success",
-            content="Alert auto-triage report generated",
+            content="告警自动分析报告已生成",
             evidence=build_evidence(
-                claim="Auto-triage report was persisted as an assistant message",
+                claim="告警自动分析报告已保存为智能体回复",
                 evidence_type="user input",
                 source="alert_webhook",
                 observed={"message_id": message_id, "incident_id": incident_id},
@@ -212,9 +212,10 @@ async def _execute_step(
     incident_id: str,
     step: TriageStep,
 ) -> dict[str, Any]:
+    display_name = _display_tool_name(step.tool_name)
     if step.skip_reason:
         evidence = build_evidence(
-            claim=f"{step.tool_name} was skipped before execution",
+            claim=f"{display_name} 已在执行前跳过",
             evidence_type="command",
             source=step.tool_name,
             observed=step.skip_reason,
@@ -228,7 +229,7 @@ async def _execute_step(
             event=trace_event(
                 phase="execution",
                 event_type="skipped",
-                content=f"Skipped {step.tool_name}: {step.skip_reason}",
+                content=f"已跳过 {display_name}: {step.skip_reason}",
                 evidence=evidence,
                 metadata={"tool_name": step.tool_name, "tool_args": step.tool_args},
             ),
@@ -237,9 +238,9 @@ async def _execute_step(
 
     tool_def = tools_registry.get_tool(step.tool_name)
     if not tool_def:
-        reason = f"Tool {step.tool_name} is not registered"
+        reason = f"工具未注册: {display_name}"
         evidence = build_evidence(
-            claim=f"{step.tool_name} could not run because the tool is missing",
+            claim=f"{display_name} 无法执行：工具未注册",
             evidence_type="command",
             source=step.tool_name,
             observed=reason,
@@ -260,9 +261,9 @@ async def _execute_step(
         return _check_summary(step, "failed", reason, evidence)
 
     if tool_def.risk_level != RiskLevel.READ:
-        reason = f"Blocked non-read tool during webhook auto-triage: {step.tool_name}"
+        reason = f"告警自动分析已阻断非只读工具: {display_name}"
         evidence = build_evidence(
-            claim=f"{step.tool_name} was blocked because webhook auto-triage is read-only",
+            claim=f"{display_name} 已被阻断：告警自动分析只允许只读检查",
             evidence_type="command",
             source=step.tool_name,
             observed={"risk_level": tool_def.risk_level},
@@ -288,9 +289,9 @@ async def _execute_step(
         event=trace_event(
             phase="tool_call",
             event_type="start",
-            content=f"Auto-triage read-only check: {step.tool_name}",
+            content=f"告警自动分析准备执行只读工具: {display_name}",
             evidence=build_evidence(
-                claim=f"Webhook auto-triage is about to run read-only tool {step.tool_name}",
+                claim=f"告警自动分析准备执行只读工具: {display_name}",
                 evidence_type="command",
                 source=step.tool_name,
                 observed=step.tool_args,
@@ -306,7 +307,7 @@ async def _execute_step(
     except Exception as exc:
         logger.exception(f"Alert auto-triage tool exception: {step.tool_name}")
         evidence = build_evidence(
-            claim=f"{step.tool_name} raised an exception during webhook auto-triage",
+            claim=f"{display_name} 在告警自动分析中执行异常",
             evidence_type="command",
             source=step.tool_name,
             observed=str(exc),
@@ -320,7 +321,7 @@ async def _execute_step(
             event=trace_event(
                 phase="execution",
                 event_type="failure",
-                content=f"{step.tool_name} raised exception: {exc}",
+                content=f"{display_name} 执行异常: {exc}",
                 evidence=evidence,
             ),
         )
@@ -332,7 +333,7 @@ async def _execute_step(
         tool_args=step.tool_args,
         tool_def=tool_def,
         result=result,
-        claim=f"{step.purpose}: {step.tool_name} returned {'success' if success else 'failure'}",
+        claim=f"{step.purpose}: {display_name} 返回{'成功' if success else '失败'}",
     )
     observed = evidence.get("observed") or getattr(result, "error", "")
     await _record_trace(
@@ -341,7 +342,7 @@ async def _execute_step(
         event=trace_event(
             phase="execution",
             event_type="success" if success else "failure",
-            content=f"{step.tool_name} {'completed' if success else 'failed'}",
+            content=f"{display_name} {'执行完成' if success else '执行失败'}",
             evidence=evidence,
             metadata={"tool_name": step.tool_name, "tool_args": step.tool_args, "purpose": step.purpose},
         ),
@@ -352,25 +353,25 @@ async def _execute_step(
 def _steps_for_template(template: str, alert: NormalizedAlert) -> list[TriageStep]:
     if template == "high_disk_usage":
         return [
-            TriageStep("get_disk_usage", {"path": alert.mountpoint or "/"}, "Check current disk usage"),
-            TriageStep("get_recent_changes", {"window_hours": 24, "limit": 30}, "Check recent system changes"),
+            TriageStep("get_disk_usage", {"path": alert.mountpoint or "/"}, "检查当前磁盘使用率"),
+            TriageStep("get_recent_changes", {"window_hours": 24, "limit": 30}, "检查近期系统变更"),
         ]
 
     return [
         TriageStep(
             "get_service_status",
             {"service": alert.service},
-            "Check systemd service status",
-            "" if alert.service else "Alert did not include a service/unit label",
+            "检查 systemd 服务状态",
+            "" if alert.service else "告警未包含 service/unit 标签",
         ),
         TriageStep(
             "get_service_logs",
             {"service": alert.service, "lines": 50},
-            "Inspect recent service logs",
-            "" if alert.service else "Alert did not include a service/unit label",
+            "查看最近服务日志",
+            "" if alert.service else "告警未包含 service/unit 标签",
         ),
-        TriageStep("get_listening_ports", {}, "Inspect listening ports"),
-        TriageStep("get_recent_changes", {"window_hours": 24, "limit": 30}, "Check recent system changes"),
+        TriageStep("get_listening_ports", {}, "检查监听端口"),
+        TriageStep("get_recent_changes", {"window_hours": 24, "limit": 30}, "检查近期系统变更"),
     ]
 
 
@@ -391,6 +392,11 @@ def _match_template(alert: NormalizedAlert) -> str:
     if any(token in haystack for token in ("highdisk", "diskfull", "filesystemfull")):
         return "high_disk_usage"
     return "service_down"
+
+
+def _display_tool_name(tool_name: str) -> str:
+    tool_def = tools_registry.get_tool(tool_name)
+    return getattr(tool_def, "display_name", "") or tool_name
 
 
 async def _create_session_with_message(
@@ -456,34 +462,42 @@ async def _record_trace(session_id: str, incident_id: str, event: dict[str, Any]
 
 def _build_report(alert: NormalizedAlert, template: str, checks: list[dict[str, Any]]) -> str:
     lines = [
-        f"Auto-triage report: {alert.alertname}",
+        f"告警自动分析报告: {alert.alertname}",
         "",
-        "Alert summary",
-        f"- status: {alert.status}",
-        f"- severity: {alert.severity or 'unknown'}",
-        f"- service: {alert.service or 'not provided'}",
-        f"- instance: {alert.instance or 'not provided'}",
-        f"- template: {template}",
+        "告警摘要",
+        f"- 状态: {alert.status}",
+        f"- 严重级别: {alert.severity or '未知'}",
+        f"- 服务: {alert.service or '未提供'}",
+        f"- 实例: {alert.instance or '未提供'}",
+        f"- 匹配模板: {template}",
     ]
     if template == "high_disk_usage":
-        lines.append(f"- mountpoint: {alert.mountpoint or '/'}")
+        lines.append(f"- 挂载点: {alert.mountpoint or '/'}")
     if alert.description:
-        lines.append(f"- description: {alert.description}")
+        lines.append(f"- 描述: {alert.description}")
 
-    lines.extend(["", "Checks"])
+    lines.extend(["", "检查结果"])
     for check in checks:
-        lines.append(f"- {check['tool_name']}: {check['status']} - {check['summary']}")
+        lines.append(f"- {_display_tool_name(check['tool_name'])}: {_format_check_status(check['status'])} - {check['summary']}")
 
     failures = [check for check in checks if check["status"] == "failed"]
     skipped = [check for check in checks if check["status"] == "skipped"]
-    lines.extend(["", "Next suggested checks"])
+    lines.extend(["", "下一步建议"])
     if failures:
-        lines.append("- Review failed check errors before trusting this triage result.")
+        lines.append("- 先复核失败检查的错误信息，再决定是否采信本次自动分析结果。")
     if skipped:
-        lines.append("- Add missing alert labels so skipped checks can run next time.")
+        lines.append("- 补充缺失的告警标签，便于下次自动执行被跳过的检查。")
     if not failures and not skipped:
-        lines.append("- Review the incident timeline and continue manual RCA if symptoms persist.")
+        lines.append("- 查看事件时间线；如果症状仍存在，继续人工 RCA。")
     return "\n".join(lines)
+
+
+def _format_check_status(status: str) -> str:
+    return {
+        "executed": "已执行",
+        "failed": "失败",
+        "skipped": "已跳过",
+    }.get(status, status)
 
 
 def _check_summary(
@@ -504,19 +518,19 @@ def _check_summary(
 
 def _alert_user_message(alert: NormalizedAlert) -> str:
     parts = [
-        f"Alert: {alert.alertname}",
-        f"Status: {alert.status}",
-        f"Severity: {alert.severity or 'unknown'}",
+        f"告警: {alert.alertname}",
+        f"状态: {alert.status}",
+        f"严重级别: {alert.severity or '未知'}",
     ]
     if alert.service:
-        parts.append(f"Service: {alert.service}")
+        parts.append(f"服务: {alert.service}")
     if alert.instance:
-        parts.append(f"Instance: {alert.instance}")
+        parts.append(f"实例: {alert.instance}")
     if alert.mountpoint:
-        parts.append(f"Mountpoint: {alert.mountpoint}")
+        parts.append(f"挂载点: {alert.mountpoint}")
     if alert.description:
-        parts.append(f"Description: {alert.description}")
-    parts.append("Request: run read-only auto-triage only; do not remediate automatically.")
+        parts.append(f"描述: {alert.description}")
+    parts.append("请求: 只执行只读自动分析，不要自动修复。")
     return "\n".join(parts)
 
 
@@ -561,4 +575,3 @@ def _compact(value: Any, max_chars: int = 500) -> str:
 
 def _now() -> str:
     return datetime.now().isoformat()
-

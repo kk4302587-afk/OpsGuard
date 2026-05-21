@@ -2,7 +2,7 @@
 
 Message protocol:
   Client → Server:
-    {type: "message", content}                          regular Agent turn
+    {type: "message", content, multimodal_context?}     regular Agent turn
     {type: "approve", request_id, approved}             response to approval modal
     {type: "runbook_decision", decision, original_message?}
                                                         "execute" or "dismiss" the
@@ -197,8 +197,11 @@ async def handle_user_message(session_id: str, message: dict):
     Step 3: otherwise, run the regular Agent pipeline.
     """
     content = message.get("content", "").strip()
+    multimodal_context = _coerce_multimodal_context(message.get("multimodal_context"))
     if not content:
-        return
+        if not multimodal_context:
+            return
+        content = "请分析我上传的多模态运维信息"
 
     await _persist_user_message(session_id, content)
 
@@ -250,7 +253,7 @@ async def handle_user_message(session_id: str, message: dict):
         return  # Stop here — wait for runbook_decision.
 
     # === Step 3: No match → regular Agent pipeline ===
-    await _run_agent_for_message(session_id, content)
+    await _run_agent_for_message(session_id, content, multimodal_context=multimodal_context)
 
 
 async def handle_runbook_decision(session_id: str, message: dict):
@@ -337,6 +340,21 @@ def _make_sender(session_id: str):
     return send_to_client
 
 
+def _coerce_multimodal_context(value) -> list[dict]:
+    """Accept only structured multimodal context objects from the client."""
+    if not isinstance(value, list):
+        return []
+    items: list[dict] = []
+    for item in value[:5]:
+        if not isinstance(item, dict):
+            continue
+        input_type = item.get("input_type") or item.get("type")
+        if input_type not in {"image", "audio"}:
+            continue
+        items.append(item)
+    return items
+
+
 async def _save_assistant_response(session_id: str, response: str) -> str:
     """Persist an assistant message and return its id."""
     import aiosqlite
@@ -355,7 +373,12 @@ async def _save_assistant_response(session_id: str, response: str) -> str:
     return assistant_msg_id
 
 
-async def _run_agent_for_message(session_id: str, content: str) -> None:
+async def _run_agent_for_message(
+    session_id: str,
+    content: str,
+    *,
+    multimodal_context: list[dict] | None = None,
+) -> None:
     """Run the full Agent pipeline on a user message and stream results."""
     import aiosqlite
     from app.database import get_knowledge_db_path
@@ -382,6 +405,7 @@ async def _run_agent_for_message(session_id: str, content: str) -> None:
             user_message=content,
             conversation_history=conversation_history[:-1],  # exclude the just-saved msg
             send_to_client=send_to_client,
+            multimodal_context=multimodal_context or [],
         )
 
         assistant_msg_id = await _save_assistant_response(session_id, response)

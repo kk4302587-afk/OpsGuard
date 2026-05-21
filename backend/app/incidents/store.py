@@ -127,7 +127,7 @@ async def create_incident(
                 problem_statement[:4000],
                 _json_dumps(
                     {
-                        "claim": "Incident problem statement came from the submitted user request",
+                        "claim": "事件问题描述来自用户输入",
                         "evidence_type": "user input",
                         "source": source,
                         "observed": problem_statement[:500],
@@ -422,6 +422,97 @@ async def get_recent_incident_stats(
         "total": sum(counts.values()),
         "by_status": counts,
         "recent": recent,
+    }
+
+
+async def get_recent_multimodal_evidence(
+    *,
+    since: str,
+    limit: int = 20,
+    db_path: str | None = None,
+) -> dict:
+    """Return multimodal incident evidence plus real tool verification events."""
+    async with aiosqlite.connect(_resolve_db_path(db_path)) as db:
+        await ensure_incident_schema(db)
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT *
+            FROM incident_events
+            WHERE timestamp >= ?
+              AND phase IN ('image_recognition', 'voice_recognition', 'multimodal_recognition')
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (since, limit),
+        )
+        multimodal_rows = await cursor.fetchall()
+        incident_ids = [row["incident_id"] for row in multimodal_rows]
+
+        verification_by_incident: dict[str, list[dict]] = {}
+        if incident_ids:
+            placeholders = ",".join("?" for _ in incident_ids)
+            cursor = await db.execute(
+                f"""
+                SELECT *
+                FROM incident_events
+                WHERE incident_id IN ({placeholders})
+                  AND phase IN ('execution', 'verification')
+                ORDER BY timestamp ASC, id ASC
+                """,
+                tuple(incident_ids),
+            )
+            for row in await cursor.fetchall():
+                event = _event_from_row(row)
+                evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
+                if evidence.get("execution_state") not in {"executed", "failed"}:
+                    continue
+                verification_by_incident.setdefault(row["incident_id"], []).append({
+                    "timestamp": row["timestamp"],
+                    "phase": row["phase"],
+                    "event_type": row["event_type"],
+                    "title": row["title"],
+                    "detail": row["detail"],
+                    "source": evidence.get("source"),
+                    "execution_state": evidence.get("execution_state"),
+                    "observed": evidence.get("observed"),
+                })
+
+    items = []
+    image_count = 0
+    audio_count = 0
+    for row in multimodal_rows:
+        event = _event_from_row(row)
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
+        multimodal = metadata.get("multimodal") if isinstance(metadata.get("multimodal"), dict) else {}
+        input_type = multimodal.get("input_type") or multimodal.get("type") or (
+            "image" if row["phase"] == "image_recognition" else "audio" if row["phase"] == "voice_recognition" else "unknown"
+        )
+        if input_type == "image":
+            image_count += 1
+        elif input_type == "audio":
+            audio_count += 1
+        items.append({
+            "incident_id": row["incident_id"],
+            "session_id": row["session_id"],
+            "timestamp": row["timestamp"],
+            "input_type": input_type,
+            "title": row["title"],
+            "summary": multimodal.get("summary") or multimodal.get("normalized_transcript") or row["detail"],
+            "recognized_text": multimodal.get("normalized_transcript") or multimodal.get("extracted_text") or multimodal.get("raw_transcript") or "",
+            "entities": multimodal.get("entities") or {},
+            "diagnosis_hints": multimodal.get("diagnosis_hints") or [],
+            "confidence": multimodal.get("confidence") or evidence.get("confidence"),
+            "source": evidence.get("source") or multimodal.get("provider"),
+            "verification": verification_by_incident.get(row["incident_id"], [])[:5],
+        })
+
+    return {
+        "total": len(items),
+        "images": image_count,
+        "audio": audio_count,
+        "items": items,
     }
 
 

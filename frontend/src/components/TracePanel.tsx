@@ -13,6 +13,12 @@ import {
   MessageOutlined,
 } from '@ant-design/icons'
 import { useChatStore } from '../stores/chatStore'
+import {
+  displayTraceName,
+  localizeTraceContent,
+  translateTraceClaim,
+  translateTraceText,
+} from '../utils/traceLocalization'
 
 const { Text, Title } = Typography
 
@@ -106,12 +112,12 @@ function TracePanel() {
         </div>
         {event.claim && (
           <Text style={{ display: 'block', fontSize: 11, color: 'var(--text-primary)', marginBottom: 4 }}>
-            {event.claim}
+            {translateTraceClaim(event.claim)}
           </Text>
         )}
         {event.source && (
           <Text style={{ display: 'block', fontSize: 10, color: 'var(--text-muted)', wordBreak: 'break-all' }}>
-            来源: {event.source}
+            来源: {displayTraceName(event.source)}
           </Text>
         )}
         {event.observed && (
@@ -131,12 +137,12 @@ function TracePanel() {
         )}
         {event.failure_reason && (
           <Text style={{ display: 'block', marginTop: 4, fontSize: 10, color: 'var(--accent-red)' }}>
-            失败原因: {event.failure_reason}
+            失败原因: {translateTraceText(event.failure_reason)}
           </Text>
         )}
         {event.next_check && (
           <Text style={{ display: 'block', marginTop: 4, fontSize: 10, color: 'var(--text-muted)' }}>
-            下一步: {event.next_check}
+            下一步: {translateTraceText(event.next_check)}
           </Text>
         )}
       </div>
@@ -152,6 +158,9 @@ function TracePanel() {
     switch (phase) {
       case 'safety_check': return <SafetyOutlined style={{ ...iconStyle, color: 'var(--accent-green)' }} />
       case 'knowledge_retrieval': return <SearchOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
+      case 'image_recognition': return <SearchOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
+      case 'voice_recognition': return <MessageOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
+      case 'multimodal_recognition': return <SearchOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
       case 'planning': return <BulbOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
       case 'tool_call': return <ToolOutlined style={{ ...iconStyle, color: 'var(--accent-purple)' }} />
       case 'execution': return <LoadingOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
@@ -180,6 +189,9 @@ function TracePanel() {
       input_received: '接收指令',
       safety_check: '安全校验',
       knowledge_retrieval: '知识检索',
+      image_recognition: '图片识别',
+      voice_recognition: '语音识别',
+      multimodal_recognition: '多模态识别',
       planning: '推理规划',
       tool_call: '工具调用',
       approval_request: '审批请求',
@@ -195,7 +207,7 @@ function TracePanel() {
 
   const getDisplayContent = (event: TraceEvidence & { phase?: string; content?: string }) => {
     const content = event.content || ''
-    return content
+    return localizeTraceContent(content)
   }
 
   return (
@@ -247,7 +259,6 @@ function TracePanel() {
                   style={{
                     fontSize: 11,
                     color: event.event_type === 'blocked' ? 'var(--accent-red)' : 'var(--text-secondary)',
-                    fontFamily: 'var(--font-mono)',
                     whiteSpace: 'pre-wrap',
                     wordBreak: 'break-word',
                   }}
@@ -255,13 +266,13 @@ function TracePanel() {
                   {getDisplayContent(event)}
                 </Text>
                 {renderEvidence(event)}
-                {event.phase === 'tool_call' && event.content.includes('调用工具') && (
+                {event.phase === 'tool_call' && (event.content.includes('调用工具') || event.content.includes('准备调用工具')) && (
                   <Button
                     size="small"
                     type="link"
                     icon={<BulbOutlined />}
                     style={{ padding: 0, marginTop: 4, fontSize: 11, height: 'auto' }}
-                    onClick={() => sendMessage(`请解释这个操作的含义和作用：${event.content.replace('调用工具: ', '')}`)}
+                    onClick={() => sendMessage(`请解释这个操作的含义和作用：${getDisplayContent(event)}`)}
                   >
                     解释
                   </Button>

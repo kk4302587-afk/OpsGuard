@@ -162,9 +162,62 @@ def test_read_only_status_request_blocks_write_tool_choice() -> None:
     asyncio.run(scenario())
 
 
+def test_repeated_write_completion_claim_without_tool_is_blocked() -> None:
+    async def scenario() -> None:
+        events: list[dict] = []
+        llm_calls = 0
+
+        original_call_llm = graph.call_llm
+        original_get_all_tools = graph.tools_registry.get_all_tools_for_llm
+        original_log = graph.audit_logger.log
+
+        async def fake_call_llm(messages, tools=None):
+            nonlocal llm_calls
+            llm_calls += 1
+            return {
+                "content": "nginx.service 已停止，操作已完成。",
+                "tool_calls": [],
+            }
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        try:
+            graph.call_llm = fake_call_llm
+            graph.tools_registry.get_all_tools_for_llm = lambda: []
+            graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+
+            result = await graph.reasoning_node({
+                "session_id": "write-claim-block",
+                "user_message": "帮我关闭 nginx",
+                "send_to_client": capture_event,
+                "messages": [],
+                "risk_warning": "",
+                "knowledge_hint": "",
+            })
+
+            assert llm_calls == 2
+            assert result["final_response"].startswith("本次没有执行该写操作")
+            assert "已停止" not in result["final_response"]
+            assert any(
+                event["phase"] == "response"
+                and event["event_type"] == "failure"
+                and event.get("source") == "write_completion_guard"
+                and event.get("failure_reason") == "重试后仍没有调用写操作或破坏性工具"
+                for event in events
+            )
+        finally:
+            graph.call_llm = original_call_llm
+            graph.tools_registry.get_all_tools_for_llm = original_get_all_tools
+            graph.audit_logger.log = original_log
+
+    asyncio.run(scenario())
+
+
 def main() -> None:
     test_tool_result_failure_is_traced_as_failure()
     test_read_only_status_request_blocks_write_tool_choice()
+    test_repeated_write_completion_claim_without_tool_is_blocked()
     print("agent trace truthfulness regression OK")
 
 

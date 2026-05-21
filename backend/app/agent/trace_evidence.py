@@ -111,10 +111,11 @@ def tool_result_evidence(
     evidence_type = _CATEGORY_EVIDENCE_TYPES.get(category, "command")
 
     target = _target_from_args(tool_args)
+    display_name = _display_tool_name(tool_name, tool_def)
     default_claim = (
-        f"{tool_name} executed against {target}"
+        f"{display_name} 已对 {target} 执行完成"
         if success
-        else f"{tool_name} failed against {target}"
+        else f"{display_name} 对 {target} 执行失败"
     )
     return build_evidence(
         claim=claim or default_claim,
@@ -123,15 +124,16 @@ def tool_result_evidence(
         observed=data if success else error,
         confidence="high",
         execution_state="executed" if success else "failed",
-        failure_reason=None if success else (error or "ToolResult.success is false"),
-        next_check=None if success else "Review the tool error and run a safer read-only check before retrying.",
+        failure_reason=None if success else (error or "工具返回 success=False"),
+        next_check=None if success else "请先复核工具错误，再用只读检查确认状态后重试。",
     )
 
 
 def tool_plan_evidence(tool_name: str, tool_args: dict) -> dict:
     """Evidence for a planned tool call that has not executed yet."""
+    display_name = _display_tool_name(tool_name)
     return build_evidence(
-        claim=f"Planning to call {tool_name}",
+        claim=f"准备调用工具：{display_name}",
         evidence_type="user input",
         source=tool_name,
         observed=tool_args,
@@ -157,7 +159,7 @@ def verification_evidence(
         confidence="high",
         execution_state="executed" if success else "failed",
         failure_reason=None if success else compact_observed(observed),
-        next_check=None if success else "Re-run a read-only status/config check to isolate the mismatch.",
+        next_check=None if success else "请重新执行只读状态或配置检查，定位执行结果不一致的原因。",
     )
 
 
@@ -165,17 +167,17 @@ def knowledge_evidence(count: int, observed: Any, *, failed: bool = False) -> di
     """Evidence for knowledge retrieval results."""
     if failed:
         return build_evidence(
-            claim="Knowledge retrieval failed",
+            claim="知识库检索失败",
             evidence_type="knowledge",
             source="knowledge_store.search",
             observed=observed,
             confidence="high",
             execution_state="failed",
             failure_reason=compact_observed(observed),
-            next_check="Check the knowledge database/search backend before relying on history.",
+            next_check="请先检查知识库或搜索后端，再依赖历史经验。",
         )
     return build_evidence(
-        claim=f"Knowledge search returned {count} matching entries",
+        claim=f"知识库检索返回 {count} 条匹配结果",
         evidence_type="knowledge",
         source="knowledge_store.search",
         observed=observed,
@@ -187,7 +189,7 @@ def knowledge_evidence(count: int, observed: Any, *, failed: bool = False) -> di
 def inference_evidence(claim: str, source: str, observed: Any = "") -> dict:
     """Evidence for planning or LLM-only inference steps."""
     return build_evidence(
-        claim=claim,
+        claim=_translate_claim(claim),
         evidence_type="user input",
         source=source,
         observed=observed,
@@ -202,4 +204,46 @@ def _target_from_args(tool_args: dict) -> str:
         value = tool_args.get(key)
         if value not in (None, ""):
             return str(value)
-    return "current system"
+    return "当前系统"
+
+
+def _display_tool_name(name: str, tool_def: Any = None) -> str:
+    """Return a Chinese display label for tools and common trace sources."""
+    if not name:
+        return "未知来源"
+    source_labels = {
+        "SafetyGuardrail": "安全护栏",
+        "SafetyGuardrail.check_input": "安全护栏",
+        "SafetyGuardrail.check_command": "安全规则",
+        "knowledge_store.search": "知识库检索",
+        "LLM": "模型推断",
+        "agent": "智能体",
+        "approval_manager": "审批管理器",
+        "read_only_intent_guard": "只读意图保护",
+        "write_completion_guard": "写操作真实性保护",
+        "BackupManager.backup_file": "备份管理器",
+        "assess_impact": "影响评估",
+        "runbook_executor": "Runbook执行器",
+    }
+    if name in source_labels:
+        return source_labels[name]
+    if tool_def is not None and getattr(tool_def, "display_name", ""):
+        return tool_def.display_name
+    try:
+        from app.agent.tools_registry import tools_registry
+
+        tool = tools_registry.get_tool(name)
+        if tool and tool.display_name:
+            return tool.display_name
+    except Exception:
+        pass
+    return name
+
+
+def _translate_claim(claim: str) -> str:
+    labels = {
+        "User request is being checked by safety rules": "正在根据安全规则检查用户请求",
+        "Final response was generated from prior evidence and messages": "已基于现有证据和上下文生成最终回复",
+        "Knowledge search has been requested": "正在检索历史经验",
+    }
+    return labels.get(claim, claim)

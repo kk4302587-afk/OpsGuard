@@ -26,9 +26,6 @@ from app.agent.tools_registry import tools_registry, RiskLevel
 from app.agent.runbook_governance import ensure_runbook_schema, record_runbook_result
 from app.agent.trace_evidence import (
     build_evidence,
-    inference_evidence,
-    tool_plan_evidence,
-    tool_result_evidence,
     trace_event,
     verification_evidence,
 )
@@ -53,6 +50,12 @@ def _technical_call(tool_name: str, tool_args: dict) -> str:
     return f"{tool_name}({json.dumps(tool_args, ensure_ascii=False)})"
 
 
+def _display_tool_name(tool_name: str, tool_def=None) -> str:
+    """Return the Chinese display name for a tool where possible."""
+    tool_def = tool_def or tools_registry.get_tool(tool_name)
+    return getattr(tool_def, "display_name", "") or tool_name
+
+
 def _target_from_args(tool_args: dict) -> str:
     """Pick the most useful target value from common tool argument names."""
     for key in ("service", "path", "filepath", "dirpath", "source", "destination", "port", "username", "name"):
@@ -66,10 +69,16 @@ def _describe_step(tool_name: str, tool_args: dict, tool_def) -> dict:
     """Build human-facing text for a Runbook step."""
     target = _target_from_args(tool_args)
     risk_label = _RISK_LABELS.get(tool_def.risk_level, str(tool_def.risk_level))
-    display_name = tool_def.display_name or tool_name
+    display_name = _display_tool_name(tool_name, tool_def)
 
     if tool_name == "get_directory_size":
         action = f"统计目录 {target} 的占用大小"
+    elif tool_name == "list_directory":
+        action = f"列出目录 {target} 的内容"
+    elif tool_name == "read_file":
+        action = f"读取文件 {target} 的内容"
+    elif tool_name == "find_files":
+        action = f"在 {target} 下查找文件或目录"
     elif tool_name == "find_large_files":
         min_size = tool_args.get("min_size") or "指定大小"
         limit = tool_args.get("limit")
@@ -91,6 +100,8 @@ def _describe_step(tool_name: str, tool_args: dict, tool_def) -> dict:
         action = f"查看服务 {target} 的最近日志"
     elif tool_name == "delete_file":
         action = f"删除文件 {target}"
+    elif tool_name == "create_directory":
+        action = f"创建目录 {target}"
     elif tool_name == "delete_directory":
         action = f"删除目录 {target}"
     elif tool_name == "write_file":
@@ -129,6 +140,20 @@ def _preview_text(value, max_chars: int = 220) -> str:
     return text[:max_chars] + ("..." if len(text) > max_chars else "")
 
 
+def _shorten(value, max_chars: int = 120) -> str:
+    text = _preview_text(value, max_chars=max_chars)
+    return text
+
+
+def _parse_table_first_data_line(data: str) -> str:
+    lines = [line for line in str(data or "").splitlines() if line.strip()]
+    if len(lines) >= 2:
+        return " ".join(lines[1].split())
+    if lines:
+        return " ".join(lines[0].split())
+    return "无输出"
+
+
 def _summarize_result(tool_name: str, result_repr) -> str:
     """Create a short user-facing summary from a real tool result."""
     if not isinstance(result_repr, dict):
@@ -138,6 +163,66 @@ def _summarize_result(tool_name: str, result_repr) -> str:
         return result_repr.get("error") or "工具返回失败"
 
     data = result_repr.get("data")
+    if tool_name == "system_overview" and isinstance(data, dict):
+        parts = []
+        if data.get("uptime"):
+            parts.append(f"运行时间 {data.get('uptime')}")
+        if isinstance(data.get("load_avg"), dict):
+            load = data["load_avg"]
+            one = load.get("1min") or load.get("1")
+            five = load.get("5min") or load.get("5")
+            fifteen = load.get("15min") or load.get("15")
+            if one or five or fifteen:
+                parts.append(f"负载 {one}/{five}/{fifteen}")
+        if isinstance(data.get("memory"), dict):
+            memory = data["memory"]
+            used = memory.get("percent") or memory.get("used_percent") or memory.get("usage")
+            if used:
+                parts.append(f"内存 {used}")
+        if data.get("disk_root"):
+            parts.append(f"根分区 {_shorten(data.get('disk_root'), 60)}")
+        return "；".join(parts) if parts else "系统概览已获取"
+    if tool_name == "health_check" and isinstance(data, dict):
+        status = data.get("status") or "unknown"
+        issues = data.get("issues") or []
+        if issues:
+            issue_text = "；".join(
+                _shorten(item.get("detail") if isinstance(item, dict) else item, 60)
+                for item in issues[:3]
+            )
+            suffix = "；..." if len(issues) > 3 else ""
+            return f"健康状态 {status}，发现 {len(issues)} 个问题：{issue_text}{suffix}"
+        return f"健康状态 {status}，未发现明显问题"
+    if tool_name in {"list_services", "get_failed_services", "get_listening_ports", "get_connections", "get_journal_logs", "get_recent_errors", "tail_log_file", "search_logs"}:
+        if isinstance(data, str):
+            lines = [line for line in data.splitlines() if line.strip()]
+            if not lines:
+                return "未返回记录"
+            return f"返回 {len(lines)} 行，摘要: {_shorten(lines[0], 120)}"
+        if isinstance(data, dict) and "count" in data:
+            return f"返回 {data.get('count')} 条结果"
+    if tool_name in {"get_disk_usage", "get_inode_usage"}:
+        return _parse_table_first_data_line(str(data or ""))
+    if tool_name == "get_service_status":
+        text = str(data or "")
+        for line in text.splitlines():
+            if "Active:" in line or "Loaded:" in line:
+                return _shorten(line.strip(), 140)
+        return _shorten(text, 140)
+    if tool_name in {"read_config_file", "read_file"}:
+        if isinstance(data, dict):
+            size = data.get("size")
+            truncated = "，内容已截断" if data.get("truncated") else ""
+            return f"已读取文件，大小 {size if size is not None else '未知'} bytes{truncated}"
+        return f"已读取内容，预览: {_shorten(data, 100)}"
+    if tool_name == "check_file_info" and isinstance(data, dict):
+        stat = data.get("stat") or ""
+        first = stat.splitlines()[0] if isinstance(stat, str) and stat else ""
+        return f"文件信息已获取{': ' + _shorten(first, 100) if first else ''}"
+    if tool_name == "list_directory" and isinstance(data, dict):
+        return f"目录包含 {data.get('count', 0)} 个条目" + ("，结果已截断" if data.get("truncated") else "")
+    if tool_name == "find_files" and isinstance(data, dict):
+        return f"找到 {data.get('count', 0)} 个匹配项" + ("，结果已截断" if data.get("truncated") else "")
     if tool_name == "find_large_files" and isinstance(data, dict):
         count = data.get("count", 0)
         files = data.get("files") or []
@@ -182,10 +267,10 @@ def _format_step_trace(step_info: dict, result_summary: str | None = None) -> st
     lines = [
         f"[步骤 {step_info['index']}/{step_info['total']}] {step_info['action']}",
         f"风险级别: {step_info['risk_label']}",
+        f"工具: {step_info['display_name']}",
     ]
     if result_summary:
         lines.append(f"结果摘要: {result_summary}")
-    lines.append(f"技术细节: {step_info['technical']}")
     return "\n".join(lines)
 
 
@@ -231,7 +316,7 @@ def _format_final_summary(
     ]
     for item in executed:
         mark = "✅" if item["success"] else "❌"
-        lines.append(f"{item['step']}. {mark} {item['action']} - {item['summary']}")
+        lines.append(f"{item['step']}. {mark} {item['action']} - {_shorten(item['summary'], 120)}")
 
     not_run = [step for step in plan_steps if step["index"] > len(executed)]
     for step in not_run:
@@ -369,10 +454,13 @@ async def execute_runbook(
         phase="planning",
         event_type="start",
         content=_format_plan(runbook_name, plan_steps),
-        evidence=inference_evidence(
-            f"Runbook {runbook_name} execution plan prepared",
-            "runbook_executor",
-            {"runbook_id": runbook_id, "step_count": len(plan_steps)},
+        evidence=build_evidence(
+            claim=f"Runbook「{runbook_name}」执行计划已生成",
+            evidence_type="user input",
+            source="Runbook执行器",
+            observed=f"步骤数 {len(plan_steps)}",
+            confidence="medium",
+            execution_state="inferred",
         ),
     ))
     await audit_logger.log(
@@ -397,16 +485,16 @@ async def execute_runbook(
             await send_to_client(trace_event(
                 phase="tool_call",
                 event_type="failure",
-                content=f"{step_header}\n结果摘要: 工具不存在，Runbook 中止\n技术细节: {step_info['technical']}",
+                content=f"{step_header}\n结果摘要: 工具不存在，Runbook 中止",
                 evidence=build_evidence(
-                    claim=f"Runbook step {idx} cannot execute because the tool is missing",
+                    claim=f"Runbook 步骤 {idx} 因工具不存在而无法执行",
                     evidence_type="command",
-                    source=tool_name or "runbook",
-                    observed=step_info["technical"],
+                    source=tool_name or "Runbook",
+                    observed=step_info["action"],
                     confidence="high",
                     execution_state="failed",
-                    failure_reason="Tool is not registered",
-                    next_check="Validate or update the runbook before replaying it.",
+                    failure_reason="工具未注册",
+                    next_check="请先校验或更新 Runbook，再重新执行。",
                 ),
             ))
             failed_step = idx
@@ -426,7 +514,14 @@ async def execute_runbook(
             phase="tool_call",
             event_type="start",
             content=_format_step_trace(step_info),
-            evidence=tool_plan_evidence(tool_name, tool_args),
+            evidence=build_evidence(
+                claim=f"准备执行 Runbook 步骤 {idx}",
+                evidence_type="user input",
+                source=step_info["display_name"],
+                observed=f"目标: {step_info['target']}；风险: {step_info['risk_label']}",
+                confidence="medium",
+                execution_state="skipped",
+            ),
         ))
         await audit_logger.log(
             session_id, AuditPhase.TOOL_CALL, AuditEventType.START,
@@ -443,9 +538,9 @@ async def execute_runbook(
                 event_type="blocked",
                 content=f"{step_header} 被规则引擎拦截: {cmd_check.detail}",
                 evidence=build_evidence(
-                    claim=f"Runbook step {idx} was blocked before execution",
+                    claim=f"Runbook 步骤 {idx} 执行前被安全规则拦截",
                     evidence_type="command",
-                    source="SafetyGuardrail.check_command",
+                    source="安全规则",
                     observed=cmd_check.detail,
                     confidence="high",
                     execution_state="skipped",
@@ -477,12 +572,12 @@ async def execute_runbook(
             await send_to_client(trace_event(
                 phase="approval_request",
                 event_type="pending",
-                content=f"等待用户审批 {step_header}\n技术细节: {step_info['technical']}",
+                content=f"等待用户审批 {step_header}",
                 evidence=build_evidence(
-                    claim=f"Runbook step {idx} requires approval before execution",
+                    claim=f"Runbook 步骤 {idx} 需要用户审批后才能执行",
                     evidence_type="user input",
-                    source="approval_manager",
-                    observed=step_info["technical"],
+                    source="审批管理器",
+                    observed=f"目标: {step_info['target']}；风险: {step_info['risk_label']}",
                     confidence="high",
                     execution_state="skipped",
                 ),
@@ -501,13 +596,13 @@ async def execute_runbook(
                     event_type="failure",
                     content=f"{step_header} 被拒绝，Runbook 中止",
                     evidence=build_evidence(
-                        claim=f"Runbook step {idx} was not executed because approval was rejected",
+                        claim=f"Runbook 步骤 {idx} 因审批未通过而未执行",
                         evidence_type="user input",
-                        source="approval_manager",
-                        observed="rejected_or_timeout",
+                        source="审批管理器",
+                        observed="用户拒绝或审批超时",
                         confidence="high",
                         execution_state="skipped",
-                        failure_reason="User approval was not granted",
+                        failure_reason="用户未批准该操作",
                     ),
                 ))
                 failed_step = idx
@@ -528,10 +623,10 @@ async def execute_runbook(
                 event_type="success",
                 content=f"{step_header} 已批准",
                 evidence=build_evidence(
-                    claim=f"Runbook step {idx} was approved by the user",
+                    claim=f"Runbook 步骤 {idx} 已通过用户审批",
                     evidence_type="user input",
-                    source="approval_manager",
-                    observed="approved",
+                    source="审批管理器",
+                    observed="已批准",
                     confidence="high",
                     execution_state="executed",
                 ),
@@ -551,10 +646,10 @@ async def execute_runbook(
                             event_type="start",
                             content=f"{step_header} 已创建回滚备份：{target_path}",
                             evidence=build_evidence(
-                                claim=f"Backup was created before runbook step {idx}",
+                                claim=f"Runbook 步骤 {idx} 执行前已创建回滚备份",
                                 evidence_type="config",
-                                source="BackupManager.backup_file",
-                                observed=backup_record,
+                                source="备份管理器",
+                                observed=target_path,
                                 confidence="high",
                                 execution_state="executed",
                             ),
@@ -600,8 +695,8 @@ async def execute_runbook(
                             event_type=verification["status"],
                             content=f"{step_header}\n验证结果: {verification['message']}",
                             evidence=verification_evidence(
-                                claim=f"Post-action verification for runbook step {idx}",
-                                source=tool_name,
+                                claim=f"Runbook 步骤 {idx} 执行后验证",
+                                source=step_info["display_name"],
                                 observed=verification["message"],
                                 success=verification["status"] == "success",
                             ),
@@ -619,8 +714,8 @@ async def execute_runbook(
                             event_type="success",
                             content=f"{step_header}\n变更对比:\n{change_diff}",
                             evidence=verification_evidence(
-                                claim=f"Before/after comparison captured for runbook step {idx}",
-                                source=tool_name,
+                                claim=f"Runbook 步骤 {idx} 已记录执行前后对比",
+                                source=step_info["display_name"],
                                 observed=change_diff,
                                 success=True,
                             ),
@@ -636,8 +731,8 @@ async def execute_runbook(
                         event_type="failure",
                         content=f"{step_header}\n验证异常: {e}",
                         evidence=verification_evidence(
-                            claim=f"Verification raised for runbook step {idx}",
-                            source=tool_name,
+                            claim=f"Runbook 步骤 {idx} 验证过程异常",
+                            source=step_info["display_name"],
                             observed=str(e),
                             success=False,
                         ),
@@ -652,12 +747,13 @@ async def execute_runbook(
                     phase="execution",
                     event_type="success",
                     content=_format_step_trace(step_info, result_summary),
-                    evidence=tool_result_evidence(
-                        tool_name=tool_name,
-                        tool_args=tool_args,
-                        tool_def=tool_def,
-                        result=result,
-                        claim=f"Runbook step {idx} executed successfully",
+                    evidence=build_evidence(
+                        claim=f"Runbook 步骤 {idx} 执行成功",
+                        evidence_type="command",
+                        source=step_info["display_name"],
+                        observed=result_summary,
+                        confidence="high",
+                        execution_state="executed",
                     ),
                 ))
             else:
@@ -674,12 +770,14 @@ async def execute_runbook(
                     phase="execution",
                     event_type="failure",
                     content=_format_step_trace(step_info, err_msg),
-                    evidence=tool_result_evidence(
-                        tool_name=tool_name,
-                        tool_args=tool_args,
-                        tool_def=tool_def,
-                        result=result,
-                        claim=f"Runbook step {idx} failed",
+                    evidence=build_evidence(
+                        claim=f"Runbook 步骤 {idx} 执行失败",
+                        evidence_type="command",
+                        source=step_info["display_name"],
+                        observed=err_msg,
+                        confidence="high",
+                        execution_state="failed",
+                        failure_reason=err_msg,
                     ),
                 ))
                 failed_step = idx
@@ -695,16 +793,16 @@ async def execute_runbook(
             await send_to_client(trace_event(
                 phase="execution",
                 event_type="failure",
-                content=f"{step_header}\n结果摘要: 异常: {e}\n技术细节: {step_info['technical']}",
+                content=f"{step_header}\n结果摘要: 异常: {e}",
                 evidence=build_evidence(
-                    claim=f"Runbook step {idx} raised an exception",
+                    claim=f"Runbook 步骤 {idx} 执行异常",
                     evidence_type="command",
-                    source=tool_name,
+                    source=step_info["display_name"],
                     observed=str(e),
                     confidence="high",
                     execution_state="failed",
                     failure_reason=str(e),
-                    next_check="Inspect the runbook step arguments and retry with a read-only validation first.",
+                    next_check="请检查 Runbook 步骤参数，并先用只读校验确认后再重试。",
                 ),
             ))
             failed_step = idx
@@ -740,10 +838,10 @@ async def execute_runbook(
             event_type="success",
             content=f"Runbook 完成: {len(steps)} 步全部成功\n系统影响: {'包含已审批的变更步骤' if any(step['risk_level'] in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE) for step in plan_steps) else '仅检查，未修改系统'}",
             evidence=build_evidence(
-                claim=f"Runbook {runbook_name} completed",
+                claim=f"Runbook「{runbook_name}」执行完成",
                 evidence_type="command",
-                source="runbook_executor",
-                observed={"executed_steps": len(executed), "failed_step": None},
+                source="Runbook执行器",
+                observed=f"成功执行 {len(executed)} 步",
                 confidence="high",
                 execution_state="executed",
             ),
@@ -755,10 +853,10 @@ async def execute_runbook(
             event_type="failure",
             content=f"Runbook 中止于步骤 {failed_step}: {abort_reason}",
             evidence=build_evidence(
-                claim=f"Runbook {runbook_name} stopped before completing all steps",
+                claim=f"Runbook「{runbook_name}」未完成全部步骤",
                 evidence_type="command",
-                source="runbook_executor",
-                observed={"executed_steps": len(executed), "failed_step": failed_step, "abort_reason": abort_reason},
+                source="Runbook执行器",
+                observed=f"已执行 {len(executed)} 步，中止步骤 {failed_step}",
                 confidence="high",
                 execution_state="failed",
                 failure_reason=abort_reason or "Runbook did not complete",

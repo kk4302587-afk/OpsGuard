@@ -66,12 +66,16 @@ _DISPLAY_NAMES: dict[str, str] = {
     "get_crontab_list": "定时任务列表",
     "get_user_sessions": "登录用户会话",
     # File
+    "list_directory": "列出目录",
+    "read_file": "读取文件",
+    "find_files": "查找文件/目录",
     "create_file": "创建文件",
+    "create_directory": "创建目录",
     "write_file": "写入文件",
     "delete_file": "删除文件",
     "delete_directory": "删除目录",
     "move_file": "移动/重命名文件",
-    "copy_file": "复制文件",
+    "copy_file": "复制文件/目录",
     "change_permissions": "修改文件权限",
     "change_owner": "修改文件所有者",
     # Package
@@ -379,6 +383,36 @@ class ToolsRegistry:
         # File management tools
         from app.mcp_tools import file_tools
 
+        self._register("list_directory", "列出目录内容；用于查看目录下有哪些文件或子目录", {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "目录路径"},
+                "show_hidden": {"type": "boolean", "description": "是否显示隐藏文件", "default": False},
+                "limit": {"type": "integer", "description": "返回条目上限", "default": 100},
+            },
+            "required": ["path"],
+        }, file_tools.list_directory, RiskLevel.READ, "file")
+
+        self._register("read_file", "读取普通文本文件内容；带大小上限，读取目录时请使用 list_directory", {
+            "type": "object",
+            "properties": {
+                "filepath": {"type": "string", "description": "文件路径"},
+                "max_bytes": {"type": "integer", "description": "最多读取字节数，最大 1MiB", "default": 65536},
+            },
+            "required": ["filepath"],
+        }, file_tools.read_file, RiskLevel.READ, "file")
+
+        self._register("find_files", "按名称模式查找文件或目录；例如 *.log、nginx*、sample.txt", {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "搜索根目录"},
+                "pattern": {"type": "string", "description": "名称匹配模式，支持 * 和 ?"},
+                "file_type": {"type": "string", "enum": ["any", "file", "directory"], "description": "匹配类型", "default": "any"},
+                "limit": {"type": "integer", "description": "返回结果上限", "default": 100},
+            },
+            "required": ["path", "pattern"],
+        }, file_tools.find_files, RiskLevel.READ, "file")
+
         self._register("create_file", "创建新文件；默认不覆盖已存在文件", {
             "type": "object",
             "properties": {
@@ -388,6 +422,17 @@ class ToolsRegistry:
             },
             "required": ["filepath"],
         }, file_tools.create_file, RiskLevel.WRITE, "file")
+
+        self._register("create_directory", "创建目录；默认可递归创建父目录，但目录已存在时不会假装成功", {
+            "type": "object",
+            "properties": {
+                "dirpath": {"type": "string", "description": "目标目录路径"},
+                "parents": {"type": "boolean", "description": "是否递归创建父目录", "default": True},
+                "exist_ok": {"type": "boolean", "description": "目录已存在时是否视为成功", "default": False},
+                "mode": {"type": "string", "description": "目录权限模式，如 755", "default": "755"},
+            },
+            "required": ["dirpath"],
+        }, file_tools.create_directory, RiskLevel.WRITE, "file")
 
         self._register("write_file", "写入或追加文件内容", {
             "type": "object",
@@ -425,10 +470,10 @@ class ToolsRegistry:
             "required": ["source", "destination"],
         }, file_tools.move_file, RiskLevel.WRITE, "file")
 
-        self._register("copy_file", "复制文件", {
+        self._register("copy_file", "复制文件或目录", {
             "type": "object",
             "properties": {
-                "source": {"type": "string", "description": "源文件路径"},
+                "source": {"type": "string", "description": "源文件或目录路径"},
                 "destination": {"type": "string", "description": "目标路径"},
             },
             "required": ["source", "destination"],
