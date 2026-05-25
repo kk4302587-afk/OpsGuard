@@ -132,7 +132,7 @@ function TracePanel() {
               wordBreak: 'break-word',
             }}
           >
-            {event.observed}
+            {translateTraceText(event.observed)}
           </Text>
         )}
         {event.failure_reason && (

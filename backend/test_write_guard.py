@@ -65,9 +65,15 @@ WRITE_INTENT_CASES = [
     ("删除 /tmp/core.dump 文件", "已删除 /tmp/core.dump"),
     ("修改 nginx 配置", "已修改 nginx 配置"),
     ("在 /tmp 下创建 test 目录", "已创建 /tmp/test 目录"),
+    ("把 sample-copy.txt 改名为 sample-moved.txt", "已成功将 sample-copy.txt 重命名为 sample-moved.txt"),
+    ("将 /tmp/a.txt 移动到 /tmp/b.txt", "已移动到 /tmp/b.txt"),
+    ("向 /tmp/a.txt 追加一行 hello", "已追加内容到 /tmp/a.txt"),
+    ("复制 /tmp/a.txt 到 /tmp/b.txt", "复制完成"),
+    ("rename file sample-copy.txt to sample-moved.txt", "renamed sample-copy.txt to sample-moved.txt"),
     ("安装 nginx 软件包", "已安装 nginx"),
     ("检查并重启 nginx", "已重启 nginx"),
     ("please create directory /tmp/test", "directory create completed"),
+    ("please move file /tmp/a.txt to /tmp/b.txt", "move completed"),
     ("please restart nginx service", "nginx restart completed"),
 ]
 

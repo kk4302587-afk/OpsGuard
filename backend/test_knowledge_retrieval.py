@@ -147,11 +147,48 @@ def test_search_failure_is_not_reported_as_no_history() -> None:
     asyncio.run(scenario())
 
 
+def test_empty_search_trace_evidence_is_chinese() -> None:
+    async def scenario() -> None:
+        events = []
+        original_search = graph.knowledge_store.search
+        original_log = graph.audit_logger.log
+
+        async def empty_search(query: str, limit: int = 5) -> list[dict]:
+            return []
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        try:
+            graph.knowledge_store.search = empty_search
+            graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+            result = await graph.knowledge_retrieval_node({
+                "session_id": "knowledge-empty",
+                "user_message": "你好",
+                "send_to_client": capture_event,
+            })
+
+            assert result == {"knowledge_hint": ""}
+            success_events = [
+                event for event in events
+                if event["phase"] == "knowledge_retrieval" and event["event_type"] == "success"
+            ]
+            assert any(event["content"] == "无相关历史经验" for event in success_events)
+            assert any(event.get("observed") == "检索完成，未找到匹配经验" for event in success_events)
+            assert not any("search completed" in event.get("observed", "") for event in success_events)
+        finally:
+            graph.knowledge_store.search = original_search
+            graph.audit_logger.log = original_log
+
+    asyncio.run(scenario())
+
+
 def main() -> None:
     test_chinese_no_space_request_matches_saved_nginx_resolution()
     test_english_request_matches_saved_chinese_resolution()
     test_unrelated_query_returns_empty_list()
     test_search_failure_is_not_reported_as_no_history()
+    test_empty_search_trace_evidence_is_chinese()
     print("knowledge retrieval regression OK")
 
 

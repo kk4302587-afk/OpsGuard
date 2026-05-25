@@ -245,5 +245,6 @@ def _translate_claim(claim: str) -> str:
         "User request is being checked by safety rules": "正在根据安全规则检查用户请求",
         "Final response was generated from prior evidence and messages": "已基于现有证据和上下文生成最终回复",
         "Knowledge search has been requested": "正在检索历史经验",
+        "The agent is planning next checks or actions": "智能体正在规划下一步检查或操作",
     }
     return labels.get(claim, claim)

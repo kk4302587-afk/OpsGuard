@@ -118,7 +118,7 @@ async def _load_audit_trace(session_id: str) -> list[dict]:
     async with aiosqlite.connect(get_audit_db_path()) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            """SELECT timestamp, phase, event_type, content, metadata
+            """SELECT id, timestamp, phase, event_type, content, metadata
             FROM audit_logs WHERE session_id = ?
             ORDER BY timestamp ASC LIMIT 200""",
             (session_id,),
@@ -128,6 +128,7 @@ async def _load_audit_trace(session_id: str) -> list[dict]:
         for row in rows:
             metadata = json.loads(row["metadata"]) if row["metadata"] else None
             event = {
+                "id": f"audit:{row['id']}",
                 "timestamp": row["timestamp"],
                 "phase": row["phase"],
                 "event_type": row["event_type"],
@@ -158,6 +159,7 @@ async def _load_incident_trace(session_id: str) -> list[dict]:
         evidence = _json_loads(row["evidence"], None)
         phase = row["phase"]
         event = {
+            "id": f"incident:{row['id']}",
             "timestamp": row["timestamp"],
             "phase": "input_received" if phase == "problem_statement" else phase,
             "event_type": row["event_type"],
@@ -173,13 +175,17 @@ async def _load_incident_trace(session_id: str) -> list[dict]:
 
 def _dedupe_and_sort_trace(events: list[dict]) -> list[dict]:
     """Return stable chronological trace events without exact duplicates."""
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, str]] = set()
     ordered: list[dict] = []
-    for event in sorted(events, key=lambda item: item.get("timestamp") or ""):
+    for event in sorted(events, key=lambda item: (item.get("timestamp") or "", item.get("id") or "")):
+        # Keep repeated fixed-text phases from later turns. Only collapse exact
+        # duplicate rows from multiple persistence sources at the same timestamp.
         key = (
+            str(event.get("timestamp") or ""),
             str(event.get("phase") or ""),
             str(event.get("event_type") or ""),
             str(event.get("content") or ""),
+            str(event.get("source") or ""),
         )
         if key in seen:
             continue

@@ -189,7 +189,7 @@ async def knowledge_retrieval_node(state: AgentState) -> dict:
             phase="knowledge_retrieval",
             event_type="success",
             content="无相关历史经验",
-            evidence=knowledge_evidence(0, "search completed; no matching entries"),
+            evidence=knowledge_evidence(0, "检索完成，未找到匹配经验"),
         ))
 
     return {"knowledge_hint": knowledge_hint}
@@ -331,7 +331,7 @@ async def reasoning_node(state: AgentState) -> dict:
         phase="planning",
         event_type="start",
         content="正在分析问题并制定方案...",
-        evidence=inference_evidence("The agent is planning next checks or actions", "LLM", user_message[:200]),
+        evidence=inference_evidence("智能体正在规划下一步检查或操作", "LLM", user_message[:200]),
     ))
     await audit_logger.log(session_id, AuditPhase.PLANNING, AuditEventType.START, "开始推理")
 
@@ -1646,13 +1646,17 @@ _WRITE_COMPLETION_PATTERNS = (
     "已删除", "已成功删除", "删除完成", "已清除", "已为您删除", "已为您清除",
     "已清理", "清理完成", "已成功清理", "已为您清理",
     "已 kill", "已终止", "已杀死", "已为您终止",
-    "已修改", "已更新", "已写入", "已应用", "已保存", "已成功修改",
+    "已修改", "已更新", "已写入", "已追加", "追加完成", "已应用", "已保存", "已成功修改",
+    "已移动", "移动完成", "已重命名", "重命名完成", "已改名", "改名完成",
+    "已复制", "复制完成", "已为您移动", "已为您重命名", "已为您复制",
     "已执行完毕", "已为您执行", "已为你执行", "执行完毕", "已经执行",
     "已添加", "已创建", "创建完成", "已成功创建", "已新建", "新建完成", "已配置", "已开启", "已关闭", "已禁用", "已启用",
     "已安装", "安装完成", "已卸载", "卸载完成",
     "started", "start completed", "restarted", "restart completed", "created", "create completed",
     "stopped", "stop completed", "deleted", "delete completed",
     "removed", "remove completed", "modified", "updated", "saved",
+    "appended", "append completed", "moved", "move completed", "renamed", "rename completed",
+    "copied", "copy completed",
     "installed", "install completed", "uninstalled", "uninstall completed",
 )
 
@@ -1660,17 +1664,21 @@ _WRITE_COMPLETION_PATTERNS = (
 _WRITE_INTENT_PATTERNS = (
     # Explicit operation requests. Keep the gap short so read-only phrases like
     # "请查看 nginx 配置文件" do not treat the noun "配置" as a write verb.
-    r"(帮我|请|执行|开始|给我|把|将|立即|现在|麻烦).{0,4}(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|创建|新建|安装|卸载|配置)",
+    r"(帮我|请|执行|开始|给我|把|将|立即|现在|麻烦).{0,60}(启动|重启|停止|关闭|删除|清理|修改|写入|追加|保存|应用|启用|禁用|添加|创建|新建|安装|卸载|改名|重命名|移动|复制)",
     # Bare imperative-style operation plus an object.
-    r"^(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|创建|新建|安装|卸载|配置).{0,30}(服务|进程|文件|目录|配置|端口|用户|软件|包|规则|权限|nginx|mysql|redis|apache|systemd)",
+    r"^(启动|重启|停止|关闭|删除|清理|修改|写入|追加|保存|应用|启用|禁用|添加|创建|新建|安装|卸载|改名|重命名|移动|复制).{0,80}(服务|进程|文件|目录|配置|端口|用户|软件|包|规则|权限|路径|nginx|mysql|redis|apache|systemd|txt|conf|log)",
+    # Explicit configuration changes. Avoid treating "查看 nginx 配置文件" as a write.
+    r"^(配置).{0,40}(防火墙|规则|端口|用户|权限|服务)",
     # Location-first creation requests such as "在 /tmp 下创建 test 目录".
     r"(在|到|向).{0,60}(创建|新建).{0,30}(文件夹|目录|文件)",
+    # File/path-first mutations such as "把 a.txt 改名为 b.txt" or "向 a.txt 追加一行".
+    r"(把|将|向).{0,120}(改名|重命名|移动|复制|追加|写入|保存|删除)",
     # Mixed read-then-write requests such as "检查并重启 nginx".
-    r"(并|然后|之后|后).{0,6}(启动|重启|停止|关闭|删除|清理|修改|写入|保存|应用|启用|禁用|添加|创建|新建|安装|卸载|配置)",
+    r"(并|然后|之后|后).{0,6}(启动|重启|停止|关闭|删除|清理|修改|写入|追加|保存|应用|启用|禁用|添加|创建|新建|安装|卸载|改名|重命名|移动|复制)",
     # English operation requests.
-    r"\b(start|restart|stop|delete|remove|clean|modify|write|save|apply|enable|disable|create|install|uninstall)\b.{0,40}\b(service|process|file|directory|config|port|user|package|nginx|mysql|redis|apache)\b",
+    r"\b(start|restart|stop|delete|remove|clean|modify|write|append|save|apply|enable|disable|create|move|rename|copy|install|uninstall)\b.{0,80}\b(service|process|file|directory|config|port|user|package|path|nginx|mysql|redis|apache|txt|conf|log)\b",
     # Follow-up confirmations after the assistant proposed a write operation.
-    r"^(执行|确认|确定|批准|同意|开始执行|继续|好的|好|可以|那就这样|那就执行)$",
+    r"^(是|对|执行|确认|确定|批准|同意|开始执行|继续|好的|好|可以|可以执行|那就这样|那就执行)$",
 )
 
 

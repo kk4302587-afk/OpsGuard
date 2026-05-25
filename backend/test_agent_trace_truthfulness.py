@@ -214,10 +214,109 @@ def test_repeated_write_completion_claim_without_tool_is_blocked() -> None:
     asyncio.run(scenario())
 
 
+def test_file_rename_completion_claim_without_tool_is_blocked() -> None:
+    async def scenario() -> None:
+        events: list[dict] = []
+        llm_calls = 0
+
+        original_call_llm = graph.call_llm
+        original_get_all_tools = graph.tools_registry.get_all_tools_for_llm
+        original_log = graph.audit_logger.log
+
+        async def fake_call_llm(messages, tools=None):
+            nonlocal llm_calls
+            llm_calls += 1
+            return {
+                "content": "结论：已成功将 `/tmp/sample-copy.txt` 重命名为 `/tmp/sample-moved.txt`。",
+                "tool_calls": [],
+            }
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        try:
+            graph.call_llm = fake_call_llm
+            graph.tools_registry.get_all_tools_for_llm = lambda: []
+            graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+
+            result = await graph.reasoning_node({
+                "session_id": "rename-claim-block",
+                "user_message": "把 sample-copy.txt 改名为 sample-moved.txt",
+                "send_to_client": capture_event,
+                "messages": [],
+                "risk_warning": "",
+                "knowledge_hint": "",
+                "recent_changes_hint": "",
+            })
+
+            assert llm_calls == 2
+            assert result["final_response"].startswith("本次没有执行该写操作")
+            assert "重命名为" not in result["final_response"]
+            assert any(
+                event["phase"] == "response"
+                and event["event_type"] == "failure"
+                and event.get("source") == "write_completion_guard"
+                for event in events
+            )
+            assert not any(event["phase"] == "execution" and event["event_type"] == "success" for event in events)
+        finally:
+            graph.call_llm = original_call_llm
+            graph.tools_registry.get_all_tools_for_llm = original_get_all_tools
+            graph.audit_logger.log = original_log
+
+    asyncio.run(scenario())
+
+
+def test_planning_trace_evidence_is_chinese() -> None:
+    async def scenario() -> None:
+        events: list[dict] = []
+
+        original_call_llm = graph.call_llm
+        original_get_all_tools = graph.tools_registry.get_all_tools_for_llm
+        original_log = graph.audit_logger.log
+
+        async def fake_call_llm(messages, tools=None):
+            return {"content": "你好，我可以帮你检查系统状态。", "tool_calls": []}
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        try:
+            graph.call_llm = fake_call_llm
+            graph.tools_registry.get_all_tools_for_llm = lambda: []
+            graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+
+            await graph.reasoning_node({
+                "session_id": "planning-chinese",
+                "user_message": "你好",
+                "send_to_client": capture_event,
+                "messages": [],
+                "risk_warning": "",
+                "knowledge_hint": "",
+                "recent_changes_hint": "",
+            })
+
+            planning_events = [
+                event for event in events
+                if event["phase"] == "planning" and event["event_type"] == "start"
+            ]
+            assert planning_events
+            assert planning_events[0].get("claim") == "智能体正在规划下一步检查或操作"
+            assert "The agent is planning" not in planning_events[0].get("claim", "")
+        finally:
+            graph.call_llm = original_call_llm
+            graph.tools_registry.get_all_tools_for_llm = original_get_all_tools
+            graph.audit_logger.log = original_log
+
+    asyncio.run(scenario())
+
+
 def main() -> None:
     test_tool_result_failure_is_traced_as_failure()
     test_read_only_status_request_blocks_write_tool_choice()
     test_repeated_write_completion_claim_without_tool_is_blocked()
+    test_file_rename_completion_claim_without_tool_is_blocked()
+    test_planning_trace_evidence_is_chinese()
     print("agent trace truthfulness regression OK")
 
 

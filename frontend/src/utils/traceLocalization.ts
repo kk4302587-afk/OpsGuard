@@ -96,6 +96,8 @@ const CLAIM_TRANSLATIONS: Record<string, string> = {
   'Safety guardrail blocked the request': '安全护栏已拦截该请求',
   'Knowledge search has been requested': '正在检索历史经验',
   'Knowledge retrieval failed': '知识库检索失败',
+  'The agent is planning next checks or actions': '智能体正在规划下一步检查或操作',
+  'The agent is planning next checks or actions.': '智能体正在规划下一步检查或操作。',
   'Final response was generated from prior evidence and messages': '已基于现有证据和上下文生成最终回复',
   'Model response claimed a write completion without executed write evidence': '模型声称写操作已完成，但没有真实执行证据',
   'Model repeated a write completion claim without executed write evidence': '模型再次声称写操作已完成，但没有真实执行证据',

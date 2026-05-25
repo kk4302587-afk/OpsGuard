@@ -106,8 +106,43 @@ def test_session_trace_replays_incident_timeline_events() -> None:
     asyncio.run(scenario())
 
 
+def test_trace_replay_keeps_repeated_turn_events() -> None:
+    events = [
+        {
+            "id": "incident:first",
+            "timestamp": "2026-05-25T05:24:35.000000",
+            "phase": "knowledge_retrieval",
+            "event_type": "start",
+            "content": "检索历史经验...",
+        },
+        {
+            "id": "incident:second",
+            "timestamp": "2026-05-25T05:25:35.000000",
+            "phase": "knowledge_retrieval",
+            "event_type": "start",
+            "content": "检索历史经验...",
+        },
+        {
+            "id": "audit:duplicate",
+            "timestamp": "2026-05-25T05:25:35.000000",
+            "phase": "knowledge_retrieval",
+            "event_type": "start",
+            "content": "检索历史经验...",
+        },
+    ]
+
+    trace = sessions._dedupe_and_sort_trace(events)
+
+    assert len(trace) == 2
+    assert [event["timestamp"] for event in trace] == [
+        "2026-05-25T05:24:35.000000",
+        "2026-05-25T05:25:35.000000",
+    ]
+
+
 def main() -> None:
     test_session_trace_replays_incident_timeline_events()
+    test_trace_replay_keeps_repeated_turn_events()
     print("session trace replay regression OK")
 
 
