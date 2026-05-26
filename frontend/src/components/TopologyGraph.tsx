@@ -80,6 +80,15 @@ const roleColors: Record<RcaRole, string> = {
 
 const backgroundNodeColor = '#5c6370'
 
+const categoryColors: Record<string, string> = {
+  process: '#61afef',
+  port: '#e5c07b',
+  service: '#00d4aa',
+  config: '#c678dd',
+  remote: '#e06c75',
+  log: '#d19a66',
+}
+
 const categorySymbols: Record<string, string> = {
   service: 'roundRect',
   process: 'circle',
@@ -205,6 +214,13 @@ function TopologyGraph() {
     { affected: 0, suspected_root_cause: 0, downstream_impact: 0, evidence: 0 }
   ), [data])
 
+  const hasFaultEvidence = useMemo(() => (
+    Boolean(
+      (data?.annotations?.length || 0) > 0 ||
+      data?.nodes.some((node) => node.rca_role || node.highlight || (node.annotations?.length || 0) > 0),
+    )
+  ), [data])
+
   const fetchTopology = async () => {
     setLoading(true)
     try {
@@ -247,13 +263,15 @@ function TopologyGraph() {
     )
   }
 
-  const getNodeColor = (node: TopologyNode) => (
-    node.rca_role ? roleColors[node.rca_role] : backgroundNodeColor
-  )
+  const getNodeColor = (node: TopologyNode) => {
+    if (hasFaultEvidence) return node.rca_role ? roleColors[node.rca_role] : backgroundNodeColor
+    return categoryColors[node.category] || backgroundNodeColor
+  }
 
   const getNodeStatusLabel = (node?: TopologyNode | null) => {
     if (!node) return '未选择'
-    return node.rca_role ? roleLabels[node.rca_role] : '背景节点'
+    if (node.rca_role) return roleLabels[node.rca_role]
+    return hasFaultEvidence ? '背景节点' : '系统拓扑节点'
   }
 
   const toggleCategory = (category: string) => {
@@ -335,9 +353,10 @@ function TopologyGraph() {
           else if (node.category === 'log') size = 20
 
           const role = node.rca_role
-          const roleColor = getNodeColor(node)
+          const nodeColor = getNodeColor(node)
           const isAnnotated = Boolean(node.highlight || node.annotations?.length)
           const isSelected = selectedNodeId === node.id
+          const isDimmedBackground = hasFaultEvidence && !role && !isAnnotated && !isSelected
 
           return {
             id: node.id,
@@ -351,15 +370,16 @@ function TopologyGraph() {
             symbol: categorySymbols[node.category] || 'circle',
             symbolSize: role ? size + 8 : size,
             label: {
-              show: isSelected || isAnnotated || Boolean(role) || node.category === 'service',
-              color: isAnnotated ? '#e4e7eb' : '#8b929a',
-              fontWeight: isAnnotated ? 700 : 400,
+              show: isSelected || isAnnotated || Boolean(role) || node.category === 'service' || (!hasFaultEvidence && node.category === 'process'),
+              color: isDimmedBackground ? '#6f7782' : '#d8dee9',
+              fontWeight: isSelected || isAnnotated || role ? 700 : 500,
             },
             itemStyle: {
-              color: roleColor,
+              color: nodeColor,
+              opacity: isDimmedBackground ? 0.45 : 0.95,
               shadowBlur: isAnnotated || isSelected ? 24 : 6,
-              shadowColor: isAnnotated || isSelected ? roleColor + '80' : roleColor + '30',
-              borderColor: isAnnotated || isSelected ? roleColor : '#8b929a80',
+              shadowColor: isAnnotated || isSelected ? nodeColor + '80' : nodeColor + '35',
+              borderColor: isAnnotated || isSelected ? nodeColor : nodeColor + '99',
               borderWidth: isSelected ? 4 : isAnnotated ? 3 : 1.5,
             },
           }
@@ -373,10 +393,10 @@ function TopologyGraph() {
             inferred: edge.inferred,
             annotations: edge.annotations || [],
             lineStyle: {
-              color: hasEvidence ? '#00d4aa' : '#3d4450',
-              width: hasEvidence ? 2.8 : edge.inferred ? 1.4 : 2,
+              color: hasEvidence ? '#00d4aa' : hasFaultEvidence ? '#3d4450' : '#4b5563',
+              width: hasEvidence ? 2.8 : edge.inferred ? 1.2 : 1.8,
               curveness: 0.2,
-              opacity: hasEvidence ? 0.9 : 0.55,
+              opacity: hasEvidence ? 0.9 : hasFaultEvidence ? 0.45 : 0.6,
               type: edge.inferred || edge.relation === 'connects_to' ? 'dashed' as const : 'solid' as const,
             },
           }
@@ -420,9 +440,15 @@ function TopologyGraph() {
               根因线索 {data.annotations?.length || 0}
             </Tag>
           )}
-          <Tag color={roleCounts.suspected_root_cause > 0 ? 'orange' : 'default'}>疑似根因 {roleCounts.suspected_root_cause}</Tag>
-          <Tag color={roleCounts.affected > 0 ? 'red' : 'default'}>受影响 {roleCounts.affected}</Tag>
-          <Tag color={roleCounts.downstream_impact > 0 ? 'gold' : 'default'}>影响范围 {roleCounts.downstream_impact}</Tag>
+          {hasFaultEvidence ? (
+            <>
+              <Tag color={roleCounts.suspected_root_cause > 0 ? 'orange' : 'default'}>疑似根因 {roleCounts.suspected_root_cause}</Tag>
+              <Tag color={roleCounts.affected > 0 ? 'red' : 'default'}>受影响 {roleCounts.affected}</Tag>
+              <Tag color={roleCounts.downstream_impact > 0 ? 'gold' : 'default'}>影响范围 {roleCounts.downstream_impact}</Tag>
+            </>
+          ) : (
+            <Tag color="cyan">系统拓扑视图</Tag>
+          )}
         </Space>
         <Button icon={<ReloadOutlined />} onClick={fetchTopology} loading={loading}>
           刷新
@@ -451,23 +477,34 @@ function TopologyGraph() {
           }}
         >
           <Space direction="vertical" size={14} style={{ width: '100%' }}>
-            <div>
-              <Text strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: 8 }}>
-                故障状态
-              </Text>
-              {([
-                ['受影响', roleColors.affected],
-                ['疑似根因', roleColors.suspected_root_cause],
-                ['影响范围', roleColors.downstream_impact],
-                ['证据关联', roleColors.evidence],
-                ['背景节点', backgroundNodeColor],
-              ] as Array<[string, string]>).map(([label, color]) => (
-                <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                  <span style={{ width: 10, height: 10, borderRadius: 10, background: color, display: 'inline-block' }} />
-                  <Text style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{label}</Text>
-                </div>
-              ))}
-            </div>
+            {hasFaultEvidence ? (
+              <div>
+                <Text strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: 8 }}>
+                  故障状态
+                </Text>
+                {([
+                  ['受影响', roleColors.affected],
+                  ['疑似根因', roleColors.suspected_root_cause],
+                  ['影响范围', roleColors.downstream_impact],
+                  ['证据关联', roleColors.evidence],
+                  ['背景节点', backgroundNodeColor],
+                ] as Array<[string, string]>).map(([label, color]) => (
+                  <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                    <span style={{ width: 10, height: 10, borderRadius: 10, background: color, display: 'inline-block' }} />
+                    <Text style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{label}</Text>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div>
+                <Text strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: 6 }}>
+                  当前视图
+                </Text>
+                <Text style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+                  当前没有会话故障证据，图中颜色表示节点类型；发起一次诊断后，页面会切换为故障关联视图。
+                </Text>
+              </div>
+            )}
 
             <div>
               <Text strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: 8 }}>
@@ -482,12 +519,22 @@ function TopologyGraph() {
                       checked={checked}
                       onChange={() => toggleCategory(category.name)}
                       style={{
-                        border: '1px solid var(--border-color)',
+                        border: `1px solid ${checked ? (categoryColors[category.name] || 'var(--border-color)') : 'var(--border-color)'}`,
                         borderRadius: 4,
                         color: checked ? 'var(--text-primary)' : 'var(--text-muted)',
-                        background: checked ? 'rgba(0, 212, 170, 0.12)' : 'transparent',
+                        background: checked ? `${categoryColors[category.name] || '#00d4aa'}22` : 'transparent',
                       }}
                     >
+                      <span
+                        style={{
+                          width: 7,
+                          height: 7,
+                          borderRadius: 7,
+                          background: categoryColors[category.name] || backgroundNodeColor,
+                          display: 'inline-block',
+                          marginRight: 5,
+                        }}
+                      />
                       <span style={{ marginRight: 4 }}>{categoryIcons[category.name] || <HddOutlined />}</span>
                       {categoryLabels[category.name] || category.name}
                     </Tag.CheckableTag>
@@ -556,7 +603,9 @@ function TopologyGraph() {
                     ))
                   ) : (
                     <Text style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                      该节点暂未绑定故障证据，可点击相邻节点继续查看上下游关系。
+                      {hasFaultEvidence
+                        ? '该节点暂未绑定故障证据，可点击相邻节点继续查看上下游关系。'
+                        : '该节点来自系统拓扑扫描，暂未和当前会话故障证据关联。'}
                     </Text>
                   )}
                 </Space>
