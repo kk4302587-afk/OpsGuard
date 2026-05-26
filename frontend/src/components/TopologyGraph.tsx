@@ -114,62 +114,33 @@ function TopologyGraph() {
     fetchTopology()
   }, [activeSessionId])
 
-  const fetchTopology = async () => {
-    setLoading(true)
-    try {
-      const endpoint = activeSessionId ? `/api/topology/graph/${activeSessionId}` : '/api/topology/graph'
-      const res = await fetch(endpoint)
-      if (res.ok) {
-        const result = await res.json()
-        setData(result)
-        const categoryNames = (result.categories || []).map((category: { name: string }) => category.name)
-        setEnabledCategories((current) => (
-          current.length > 0 ? current.filter((name) => categoryNames.includes(name)) : categoryNames
-        ))
+  const categoryMap = useMemo(() => {
+    const map: Record<string, number> = {}
+    data?.categories.forEach((cat, idx) => {
+      map[cat.name] = idx
+    })
+    return map
+  }, [data])
+
+  const annotatedNodeIds = useMemo(() => {
+    const ids = new Set<string>()
+    data?.annotations?.forEach((annotation) => ids.add(annotation.target_id))
+    data?.nodes.forEach((node) => {
+      if (node.highlight || node.rca_role || node.annotations?.length) {
+        ids.add(node.id)
       }
-    } catch (err) {
-      console.error('Failed to fetch topology:', err)
-    } finally {
-      setLoading(false)
-    }
-  }
+    })
+    return ids
+  }, [data])
 
-  if (loading) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-        <Spin tip="正在扫描系统拓扑..." />
-      </div>
-    )
-  }
-
-  if (!data || data.nodes.length === 0) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-        <Empty description="暂无拓扑数据" image={Empty.PRESENTED_IMAGE_SIMPLE}>
-          <Button type="primary" icon={<ReloadOutlined />} onClick={fetchTopology}>重新扫描</Button>
-        </Empty>
-      </div>
-    )
-  }
-
-  const categoryMap: Record<string, number> = {}
-  data.categories.forEach((cat, idx) => {
-    categoryMap[cat.name] = idx
-  })
-
-  const annotatedNodeIds = new Set<string>()
-  data.annotations?.forEach((annotation) => annotatedNodeIds.add(annotation.target_id))
-  data.nodes.forEach((node) => {
-    if (node.highlight || node.rca_role || node.annotations?.length) {
-      annotatedNodeIds.add(node.id)
-    }
-  })
-
-  const neighborOfAnnotatedIds = new Set<string>()
-  data.edges.forEach((edge) => {
-    if (annotatedNodeIds.has(edge.source)) neighborOfAnnotatedIds.add(edge.target)
-    if (annotatedNodeIds.has(edge.target)) neighborOfAnnotatedIds.add(edge.source)
-  })
+  const neighborOfAnnotatedIds = useMemo(() => {
+    const ids = new Set<string>()
+    data?.edges.forEach((edge) => {
+      if (annotatedNodeIds.has(edge.source)) ids.add(edge.target)
+      if (annotatedNodeIds.has(edge.target)) ids.add(edge.source)
+    })
+    return ids
+  }, [data, annotatedNodeIds])
 
   const getNodeScore = (node: TopologyNode) => {
     const roleScore: Record<RcaRole, number> = {
@@ -197,6 +168,8 @@ function TopologyGraph() {
   }
 
   const displayedNodes = useMemo(() => {
+    if (!data) return []
+
     const categoryEnabled = new Set(enabledCategories)
     const filteredByType = data.nodes.filter((node) => categoryEnabled.has(node.category))
     if (showAllNodes) return filteredByType
@@ -205,21 +178,74 @@ function TopologyGraph() {
     return [...filteredByType]
       .sort((a, b) => getNodeScore(b) - getNodeScore(a))
       .slice(0, maxNodes)
-  }, [data, enabledCategories, showAllNodes])
+  }, [data, enabledCategories, showAllNodes, annotatedNodeIds, neighborOfAnnotatedIds])
 
-  const displayedNodeIds = new Set(displayedNodes.map((node) => node.id))
-  const displayedEdges = data.edges.filter((edge) => (
-    displayedNodeIds.has(edge.source) && displayedNodeIds.has(edge.target)
-  ))
+  const displayedNodeIds = useMemo(
+    () => new Set(displayedNodes.map((node) => node.id)),
+    [displayedNodes],
+  )
 
-  const selectedNode = selectedNodeId
-    ? data.nodes.find((node) => node.id === selectedNodeId) || null
-    : null
+  const displayedEdges = useMemo(() => (
+    data?.edges.filter((edge) => (
+      displayedNodeIds.has(edge.source) && displayedNodeIds.has(edge.target)
+    )) || []
+  ), [data, displayedNodeIds])
 
-  const roleCounts = data.nodes.reduce<Record<RcaRole, number>>((acc, node) => {
-    if (node.rca_role) acc[node.rca_role] += 1
-    return acc
-  }, { affected: 0, suspected_root_cause: 0, downstream_impact: 0, evidence: 0 })
+  const selectedNode = useMemo(() => (
+    selectedNodeId && data
+      ? data.nodes.find((node) => node.id === selectedNodeId) || null
+      : null
+  ), [data, selectedNodeId])
+
+  const roleCounts = useMemo(() => (
+    data?.nodes.reduce<Record<RcaRole, number>>((acc, node) => {
+      if (node.rca_role) acc[node.rca_role] += 1
+      return acc
+    }, { affected: 0, suspected_root_cause: 0, downstream_impact: 0, evidence: 0 }) ||
+    { affected: 0, suspected_root_cause: 0, downstream_impact: 0, evidence: 0 }
+  ), [data])
+
+  const fetchTopology = async () => {
+    setLoading(true)
+    try {
+      const endpoint = activeSessionId ? `/api/topology/graph/${activeSessionId}` : '/api/topology/graph'
+      const res = await fetch(endpoint)
+      if (res.ok) {
+        const result = await res.json()
+        setData(result)
+        const categoryNames = (result.categories || []).map((category: { name: string }) => category.name)
+        setEnabledCategories((current) => (
+          current.length > 0 ? current.filter((name) => categoryNames.includes(name)) : categoryNames
+        ))
+      }
+    } catch (err) {
+      console.error('Failed to fetch topology:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (loading && !data) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+        <Spin>
+          <div style={{ width: 180, height: 80, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', color: 'var(--text-muted)' }}>
+            正在扫描系统拓扑...
+          </div>
+        </Spin>
+      </div>
+    )
+  }
+
+  if (!data || data.nodes.length === 0) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+        <Empty description="暂无拓扑数据" image={Empty.PRESENTED_IMAGE_SIMPLE}>
+          <Button type="primary" icon={<ReloadOutlined />} onClick={fetchTopology}>重新扫描</Button>
+        </Empty>
+      </div>
+    )
+  }
 
   const getNodeColor = (node: TopologyNode) => (
     node.rca_role ? roleColors[node.rca_role] : backgroundNodeColor

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Input, Button, Card, Tag, Space, Typography, List } from 'antd'
+import { Input, Button, Card, Tag, Space, Typography, List, Select } from 'antd'
 import {
   SafetyOutlined,
   BugOutlined,
@@ -11,6 +11,8 @@ import {
 
 const { TextArea } = Input
 const { Text, Title, Paragraph } = Typography
+
+const SECURITY_DEMO_RESULTS_STORAGE_KEY = 'opsguard-security-demo-results'
 
 interface TestResult {
   input_text: string
@@ -26,13 +28,34 @@ interface AttackExample {
   text: string
 }
 
+type ResultFilter = 'all' | 'blocked' | 'warning' | 'allowed'
+
+const loadSavedResults = (): TestResult[] => {
+  try {
+    const raw = localStorage.getItem(SECURITY_DEMO_RESULTS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((item) => (
+      typeof item?.input_text === 'string' &&
+      typeof item?.is_blocked === 'boolean' &&
+      Array.isArray(item?.layers_checked) &&
+      typeof item?.timestamp === 'string'
+    ))
+  } catch (err) {
+    console.error('Failed to load security demo results:', err)
+    return []
+  }
+}
+
 /**
  * Security red-team testing page.
  * Allows evaluators to test prompt injection attacks and see defense in action.
  */
 function SecurityDemo() {
   const [inputText, setInputText] = useState('')
-  const [results, setResults] = useState<TestResult[]>([])
+  const [results, setResults] = useState<TestResult[]>(loadSavedResults)
+  const [resultFilter, setResultFilter] = useState<ResultFilter>('all')
   const [loading, setLoading] = useState(false)
   const [examples, setExamples] = useState<{
     injection_examples: AttackExample[]
@@ -43,6 +66,18 @@ function SecurityDemo() {
   useEffect(() => {
     fetchExamples()
   }, [])
+
+  useEffect(() => {
+    try {
+      if (results.length === 0) {
+        localStorage.removeItem(SECURITY_DEMO_RESULTS_STORAGE_KEY)
+      } else {
+        localStorage.setItem(SECURITY_DEMO_RESULTS_STORAGE_KEY, JSON.stringify(results.slice(0, 100)))
+      }
+    } catch (err) {
+      console.error('Failed to save security demo results:', err)
+    }
+  }, [results])
 
   const fetchExamples = async () => {
     try {
@@ -105,6 +140,21 @@ function SecurityDemo() {
       testInput(inputText.trim())
     }
   }
+
+  const clearResults = () => {
+    setResults([])
+    localStorage.removeItem(SECURITY_DEMO_RESULTS_STORAGE_KEY)
+  }
+
+  const blockedCount = results.filter(r => r.is_blocked).length
+  const warningCount = results.filter(r => !r.is_blocked && r.blocked_by === 'high_risk_intent').length
+  const allowedCount = results.filter(r => !r.is_blocked && r.blocked_by !== 'high_risk_intent').length
+  const filteredResults = results.filter((result) => {
+    if (resultFilter === 'blocked') return result.is_blocked
+    if (resultFilter === 'warning') return !result.is_blocked && result.blocked_by === 'high_risk_intent'
+    if (resultFilter === 'allowed') return !result.is_blocked && result.blocked_by !== 'high_risk_intent'
+    return true
+  })
 
   const renderResultItem = (item: TestResult) => {
     const isWarning = !item.is_blocked && item.blocked_by === 'high_risk_intent'
@@ -246,19 +296,31 @@ function SecurityDemo() {
                 检测结果
               </Title>
               <Text style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-                拦截 {results.filter(r => r.is_blocked).length} / 警告 {results.filter(r => !r.is_blocked && r.blocked_by === 'high_risk_intent').length} / 放行 {results.filter(r => !r.is_blocked && r.blocked_by !== 'high_risk_intent').length}
+                拦截 {blockedCount} / 警告 {warningCount} / 放行 {allowedCount}
               </Text>
             </div>
             {results.length > 0 && (
-              <Button size="small" onClick={() => setResults([])}>
+              <Button size="small" onClick={clearResults}>
                 清空
               </Button>
             )}
           </div>
+          <Select<ResultFilter>
+            value={resultFilter}
+            onChange={setResultFilter}
+            size="small"
+            style={{ width: '100%', marginBottom: 10 }}
+            options={[
+              { value: 'all', label: `全部结果（${results.length}）` },
+              { value: 'blocked', label: `只看拦截（${blockedCount}）` },
+              { value: 'warning', label: `只看警告（${warningCount}）` },
+              { value: 'allowed', label: `只看放行（${allowedCount}）` },
+            ]}
+          />
           <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
             <List
-              dataSource={results.slice(0, 20)}
-              locale={{ emptyText: '点击左侧按钮或标签开始测试' }}
+              dataSource={filteredResults.slice(0, 20)}
+              locale={{ emptyText: results.length === 0 ? '点击左侧按钮或标签开始测试' : '当前筛选下暂无结果' }}
               renderItem={renderResultItem}
             />
           </div>
