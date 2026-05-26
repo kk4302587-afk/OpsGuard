@@ -119,7 +119,11 @@ def test_runbook_replay_streams_plan_step_summaries_and_report() -> None:
         assert "执行计划" in contents
         assert "统计目录 /tmp 的占用大小" in contents
         assert "查找 /tmp 下超过 10M 的大文件" in contents
-        assert "工具: 目录大小" in contents
+        assert "工具：目录大小（get_directory_size）" in contents
+        assert "参数：路径=/tmp" in contents
+        assert "调用工具: 目录大小（get_directory_size）" in contents
+        assert "执行参数: 路径=/tmp" in contents
+        assert "目标对象: /tmp" in contents
         assert "技术细节:" not in contents
         assert "结果摘要: 目录占用: 128M" in contents
         assert "结果摘要: 找到 1 个候选大文件" in contents
@@ -131,6 +135,9 @@ def test_runbook_replay_streams_plan_step_summaries_and_report() -> None:
         assert all(event.get("execution_state") == "executed" for event in execution_events)
         assert all(event.get("source") in {"目录大小", "查找大文件"} for event in execution_events)
         assert "执行概览" in summary
+        assert "执行明细" in summary
+        assert "工具：目录大小" in summary
+        assert "参数：路径=/tmp" in summary
         assert "系统影响: 本次只执行读取/检查步骤，没有修改系统。" in summary
         assert "下一步建议" in summary
 

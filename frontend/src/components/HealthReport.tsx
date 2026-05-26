@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button, Card, Tag, Space, Typography, Spin, Progress } from 'antd'
 import {
   MedicineBoxOutlined,
@@ -50,6 +50,27 @@ const sectionIcons: Record<string, any> = {
 function HealthReport() {
   const [report, setReport] = useState<HealthReportData | null>(null)
   const [loading, setLoading] = useState(false)
+  const [initialLoading, setInitialLoading] = useState(true)
+
+  const loadLatestReport = async () => {
+    setInitialLoading(true)
+    try {
+      const res = await fetch('/api/health-report/latest')
+      if (res.ok) {
+        setReport(await res.json())
+      } else if (res.status !== 404) {
+        console.error('Failed to load latest health report:', res.status)
+      }
+    } catch (err) {
+      console.error('Failed to load latest health report:', err)
+    } finally {
+      setInitialLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadLatestReport()
+  }, [])
 
   const generateReport = async () => {
     setLoading(true)
@@ -150,24 +171,24 @@ function HealthReport() {
       </div>
 
       {/* Loading */}
-      {loading && (
+      {(loading || initialLoading) && (
         <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 300 }}>
-          <Spin tip="正在巡检系统..." size="large" />
+          <Spin tip={loading ? '正在巡检系统...' : '正在加载最近一次巡检报告...'} size="large" />
         </div>
       )}
 
       {/* Empty state */}
-      {!loading && !report && (
+      {!loading && !initialLoading && !report && (
         <Card style={{ textAlign: 'center', padding: 40, background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
           <MedicineBoxOutlined style={{ fontSize: 48, color: 'var(--text-muted)', marginBottom: 16 }} />
           <Paragraph style={{ color: 'var(--text-secondary)' }}>
-            点击"开始巡检"生成系统健康报告
+            暂无历史巡检报告，点击“开始巡检”生成系统健康报告
           </Paragraph>
         </Card>
       )}
 
       {/* Report content */}
-      {report && !loading && (
+      {report && !loading && !initialLoading && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* Overall status + gauge charts */}
           <Card size="small" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
@@ -183,6 +204,7 @@ function HealthReport() {
                 <span>主机: <Text code style={{ fontSize: 11 }}>{report.hostname}</Text></span>
                 <span>系统: <Text code style={{ fontSize: 11 }}>{report.os}</Text></span>
                 <span>架构: <Text code style={{ fontSize: 11 }}>{report.arch}</Text></span>
+                <span>巡检时间: <Text code style={{ fontSize: 11 }}>{report.generated_at.slice(0, 19).replace('T', ' ')}</Text></span>
               </div>
             </div>
 

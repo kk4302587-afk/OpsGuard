@@ -1,10 +1,15 @@
 """Health check report generation API."""
 
+import json
 import platform
 from datetime import datetime
+import uuid
 
+import aiosqlite
 import psutil
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+
+from app.database import get_knowledge_db_path
 
 router = APIRouter()
 
@@ -128,8 +133,76 @@ async def generate_health_report():
         report["overall_status"] = "healthy"
 
     report["summary"] = _generate_summary(report)
+    await _save_health_report(report)
 
     return report
+
+
+@router.get("/latest")
+async def get_latest_health_report():
+    """Return the most recent saved health report."""
+    report = await _load_latest_health_report()
+    if report is None:
+        raise HTTPException(status_code=404, detail="暂无历史巡检报告")
+    return report
+
+
+async def ensure_health_report_schema(db: aiosqlite.Connection) -> None:
+    """Create storage for full health report snapshots."""
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS health_reports (
+            id TEXT PRIMARY KEY,
+            generated_at TEXT NOT NULL,
+            overall_status TEXT NOT NULL,
+            hostname TEXT,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_health_reports_generated_at ON health_reports(generated_at)"
+    )
+
+
+async def _save_health_report(report: dict) -> None:
+    async with aiosqlite.connect(get_knowledge_db_path()) as db:
+        await ensure_health_report_schema(db)
+        now = datetime.now().isoformat()
+        await db.execute(
+            """
+            INSERT INTO health_reports
+                (id, generated_at, overall_status, hostname, payload, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                report["generated_at"],
+                report.get("overall_status") or "unknown",
+                report.get("hostname") or "",
+                json.dumps(report, ensure_ascii=False),
+                now,
+            ),
+        )
+        await db.commit()
+
+
+async def _load_latest_health_report() -> dict | None:
+    async with aiosqlite.connect(get_knowledge_db_path()) as db:
+        await ensure_health_report_schema(db)
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT payload FROM health_reports
+            ORDER BY generated_at DESC, created_at DESC
+            LIMIT 1
+            """
+        )
+        row = await cursor.fetchone()
+    if not row:
+        return None
+    return json.loads(row["payload"])
 
 
 def _generate_summary(report: dict) -> str:

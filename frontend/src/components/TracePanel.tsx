@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react'
 import { Typography, Tag, Empty, Button } from 'antd'
 import {
   CheckCircleOutlined,
@@ -11,6 +12,8 @@ import {
   StopOutlined,
   DatabaseOutlined,
   MessageOutlined,
+  DownOutlined,
+  RightOutlined,
 } from '@ant-design/icons'
 import { useChatStore } from '../stores/chatStore'
 import {
@@ -23,6 +26,10 @@ import {
 const { Text, Title } = Typography
 
 interface TraceEvidence {
+  phase: string
+  event_type: string
+  content: string
+  timestamp: string
   claim?: string
   evidence_type?: string
   source?: string
@@ -33,6 +40,14 @@ interface TraceEvidence {
   next_check?: string
 }
 
+interface TraceGroup {
+  id: string
+  title: string
+  startTime: string
+  events: TraceEvidence[]
+  status: 'running' | 'success' | 'failure' | 'blocked'
+}
+
 /**
  * Right panel showing the reasoning trace (ThoughtChain).
  * Visualizes: input → safety check → plan → tool calls → verify → respond
@@ -40,6 +55,47 @@ interface TraceEvidence {
 function TracePanel() {
   const { traceEvents, sendMessage } = useChatStore()
   const visibleTraceEvents = traceEvents.filter((event) => event.phase !== 'recent_changes')
+  const [expandedGroupIds, setExpandedGroupIds] = useState<Record<string, boolean>>({})
+
+  const getRequestGroups = (events: TraceEvidence[]): TraceGroup[] => {
+    const groups: TraceGroup[] = []
+    let current: TraceGroup | null = null
+
+    events.forEach((event, index) => {
+      if (!current || event.phase === 'input_received') {
+        current = {
+          id: `${event.timestamp || index}-${groups.length}`,
+          title: event.phase === 'input_received' ? localizeTraceContent(event.content) : '当前请求',
+          startTime: event.timestamp,
+          events: [],
+          status: 'running',
+        }
+        groups.push(current)
+      }
+      current.events.push(event)
+    })
+
+    return groups.map((group) => {
+      const response = [...group.events].reverse().find((event) => event.phase === 'response')
+      const failed = group.events.some((event) => event.event_type === 'failure')
+      const blocked = group.events.some((event) => event.event_type === 'blocked')
+      return {
+        ...group,
+        status: blocked ? 'blocked' : failed ? 'failure' : response?.event_type === 'success' ? 'success' : 'running',
+      }
+    })
+  }
+
+  const traceGroups = useMemo(() => getRequestGroups(visibleTraceEvents as TraceEvidence[]), [visibleTraceEvents])
+  const latestGroupId = traceGroups[traceGroups.length - 1]?.id
+
+  const isGroupExpanded = (group: TraceGroup) => (
+    expandedGroupIds[group.id] ?? group.id === latestGroupId
+  )
+
+  const toggleGroup = (groupId: string) => {
+    setExpandedGroupIds((state) => ({ ...state, [groupId]: !(state[groupId] ?? groupId === latestGroupId) }))
+  }
 
   const getEvidenceStateColor = (state?: string): string => {
     switch (state) {
@@ -210,6 +266,83 @@ function TracePanel() {
     return localizeTraceContent(content)
   }
 
+  const getGroupStatusColor = (status: TraceGroup['status']) => {
+    switch (status) {
+      case 'success': return 'green'
+      case 'failure': return 'red'
+      case 'blocked': return 'red'
+      default: return 'blue'
+    }
+  }
+
+  const getGroupStatusLabel = (status: TraceGroup['status']) => {
+    switch (status) {
+      case 'success': return '已完成'
+      case 'failure': return '失败'
+      case 'blocked': return '已拦截'
+      default: return '进行中'
+    }
+  }
+
+  const compactGroupTitle = (title: string) => {
+    const text = title.replace(/\s+/g, ' ').trim()
+    if (!text) return '当前请求'
+    return text.length > 34 ? `${text.slice(0, 34)}...` : text
+  }
+
+  const renderTraceEvent = (event: TraceEvidence, index: number, total: number) => (
+    <div
+      key={`${event.timestamp}-${event.phase}-${index}`}
+      style={{
+        display: 'flex',
+        gap: 10,
+        marginBottom: 12,
+        paddingBottom: 12,
+        borderBottom: index < total - 1 ? '1px solid var(--border-color)' : 'none',
+      }}
+    >
+      <div style={{ paddingTop: 2 }}>
+        {getPhaseIcon(event.phase, event.event_type)}
+      </div>
+
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+          <Tag
+            color={getEventColor(event.event_type)}
+            style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}
+          >
+            {getPhaseLabel(event.phase)}
+          </Tag>
+          <Text style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+            {new Date(event.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+          </Text>
+        </div>
+        <Text
+          style={{
+            fontSize: 11,
+            color: event.event_type === 'blocked' ? 'var(--accent-red)' : 'var(--text-secondary)',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {getDisplayContent(event)}
+        </Text>
+        {renderEvidence(event)}
+        {event.phase === 'tool_call' && (event.content.includes('调用工具') || event.content.includes('准备调用工具')) && (
+          <Button
+            size="small"
+            type="link"
+            icon={<BulbOutlined />}
+            style={{ padding: 0, marginTop: 4, fontSize: 11, height: 'auto' }}
+            onClick={() => sendMessage(`请解释这个操作的含义和作用：${getDisplayContent(event)}`)}
+          >
+            解释
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+
   return (
     <div style={{ padding: 16, height: '100%', display: 'flex', flexDirection: 'column' }}>
       <Title level={5} style={{ color: 'var(--text-primary)', marginBottom: 16, fontSize: 14 }}>
@@ -226,60 +359,69 @@ function TracePanel() {
         </div>
       ) : (
         <div style={{ flex: 1, overflow: 'auto' }}>
-          {visibleTraceEvents.map((event, index) => (
+          {traceGroups.map((group, groupIndex) => {
+            const expanded = isGroupExpanded(group)
+            return (
             <div
-              key={index}
+              key={group.id}
               style={{
-                display: 'flex',
-                gap: 10,
-                marginBottom: 12,
-                paddingBottom: 12,
-                borderBottom: index < visibleTraceEvents.length - 1 ? '1px solid var(--border-color)' : 'none',
+                marginBottom: 10,
+                borderBottom: groupIndex < traceGroups.length - 1 ? '1px solid var(--border-color)' : 'none',
+                paddingBottom: 10,
               }}
             >
-              {/* Icon */}
-              <div style={{ paddingTop: 2 }}>
-                {getPhaseIcon(event.phase, event.event_type)}
-              </div>
-
-              {/* Content */}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                  <Tag
-                    color={getEventColor(event.event_type)}
-                    style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}
+              <button
+                type="button"
+                onClick={() => toggleGroup(group.id)}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '6px 0',
+                  background: 'transparent',
+                  border: 0,
+                  color: 'inherit',
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                }}
+              >
+                {expanded ? <DownOutlined style={{ fontSize: 10, color: 'var(--text-muted)' }} /> : <RightOutlined style={{ fontSize: 10, color: 'var(--text-muted)' }} />}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <Text
+                    style={{
+                      display: 'block',
+                      fontSize: 12,
+                      color: 'var(--text-primary)',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
                   >
-                    {getPhaseLabel(event.phase)}
-                  </Tag>
+                    {compactGroupTitle(group.title)}
+                  </Text>
                   <Text style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                    {new Date(event.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                    {new Date(group.startTime).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                    {' · '}
+                    {group.events.length} 个事件
                   </Text>
                 </div>
-                <Text
+                <Tag color={getGroupStatusColor(group.status)} style={{ fontSize: 10, margin: 0 }}>
+                  {getGroupStatusLabel(group.status)}
+                </Tag>
+              </button>
+              {expanded && (
+                <div
                   style={{
-                    fontSize: 11,
-                    color: event.event_type === 'blocked' ? 'var(--accent-red)' : 'var(--text-secondary)',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
+                    marginTop: 4,
+                    paddingLeft: 2,
                   }}
                 >
-                  {getDisplayContent(event)}
-                </Text>
-                {renderEvidence(event)}
-                {event.phase === 'tool_call' && (event.content.includes('调用工具') || event.content.includes('准备调用工具')) && (
-                  <Button
-                    size="small"
-                    type="link"
-                    icon={<BulbOutlined />}
-                    style={{ padding: 0, marginTop: 4, fontSize: 11, height: 'auto' }}
-                    onClick={() => sendMessage(`请解释这个操作的含义和作用：${getDisplayContent(event)}`)}
-                  >
-                    解释
-                  </Button>
-                )}
-              </div>
+                  {group.events.map((event, index) => renderTraceEvent(event, index, group.events.length))}
+                </div>
+              )}
             </div>
-          ))}
+          )})}
         </div>
       )}
     </div>

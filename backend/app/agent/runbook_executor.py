@@ -50,6 +50,37 @@ def _technical_call(tool_name: str, tool_args: dict) -> str:
     return f"{tool_name}({json.dumps(tool_args, ensure_ascii=False)})"
 
 
+def _format_tool_args(tool_args: dict) -> str:
+    """Return compact, user-readable tool arguments for trace cards."""
+    if not tool_args:
+        return "无参数"
+    labels = {
+        "service": "服务",
+        "path": "路径",
+        "filepath": "文件",
+        "dirpath": "目录",
+        "source": "来源",
+        "destination": "目标",
+        "port": "端口",
+        "protocol": "协议",
+        "lines": "行数",
+        "limit": "数量上限",
+        "min_size": "最小大小",
+        "pattern": "匹配条件",
+        "content": "内容",
+        "append": "追加模式",
+    }
+    parts = []
+    for key, value in tool_args.items():
+        label = labels.get(key, key)
+        if isinstance(value, str):
+            display = value if len(value) <= 120 else value[:117] + "..."
+        else:
+            display = json.dumps(value, ensure_ascii=False, default=str)
+        parts.append(f"{label}={display}")
+    return "；".join(parts)
+
+
 def _display_tool_name(tool_name: str, tool_def=None) -> str:
     """Return the Chinese display name for a tool where possible."""
     tool_def = tool_def or tools_registry.get_tool(tool_name)
@@ -124,6 +155,7 @@ def _describe_step(tool_name: str, tool_args: dict, tool_def) -> dict:
         "target": target,
         "risk_label": risk_label,
         "display_name": display_name,
+        "args_text": _format_tool_args(tool_args),
         "technical": _technical_call(tool_name, tool_args),
     }
 
@@ -249,12 +281,14 @@ def _format_plan(runbook_name: str, plan_steps: list[dict]) -> str:
     lines = [
         f"准备执行 Runbook「{runbook_name}」",
         f"共 {len(plan_steps)} 步：只读 {read_count}，写操作 {write_count}，破坏性 {destructive_count}",
-        "执行计划:",
+        "执行计划：",
     ]
     for step in plan_steps:
-        lines.append(
-            f"{step['index']}. [{step['risk_label']}] {step['action']}"
-        )
+        lines.extend([
+            f"{step['index']}. [{step['risk_label']}] {step['action']}",
+            f"   工具：{step['display_name']}（{step['tool_name']}）",
+            f"   参数：{step['args_text']}",
+        ])
     if write_count or destructive_count:
         lines.append("写操作/破坏性步骤会在执行到该步时再次请求审批。")
     else:
@@ -267,7 +301,9 @@ def _format_step_trace(step_info: dict, result_summary: str | None = None) -> st
     lines = [
         f"[步骤 {step_info['index']}/{step_info['total']}] {step_info['action']}",
         f"风险级别: {step_info['risk_label']}",
-        f"工具: {step_info['display_name']}",
+        f"调用工具: {step_info['display_name']}（{step_info['tool_name']}）",
+        f"执行参数: {step_info['args_text']}",
+        f"目标对象: {step_info['target']}",
     ]
     if result_summary:
         lines.append(f"结果摘要: {result_summary}")
@@ -298,32 +334,41 @@ def _format_final_summary(
         changed_text = "Runbook 计划包含写操作/破坏性步骤，但本次没有成功执行系统变更。"
 
     if failed_step is None:
-        header = f"✅ Runbook「{runbook_name}」执行完成"
+        header = f"Runbook「{runbook_name}」执行完成"
         status = f"共 {len(plan_steps)} 步，成功 {success_count} 步。"
     else:
-        header = f"⚠️ Runbook「{runbook_name}」在步骤 {failed_step}/{len(plan_steps)} 中止"
+        header = f"Runbook「{runbook_name}」在步骤 {failed_step}/{len(plan_steps)} 中止"
         status = f"已成功执行 {success_count} 步。原因: {abort_reason or '未知'}"
 
     lines = [
         header,
         "",
-        "执行概览:",
+        "执行概览：",
         f"- {status}",
         f"- 步骤类型: 只读 {read_count}，写操作 {write_count}，破坏性 {destructive_count}",
         f"- 系统影响: {changed_text}",
         "",
-        "步骤结果:",
+        "执行明细：",
     ]
     for item in executed:
-        mark = "✅" if item["success"] else "❌"
-        lines.append(f"{item['step']}. {mark} {item['action']} - {_shorten(item['summary'], 120)}")
+        status_label = "成功" if item["success"] else "失败"
+        lines.append(
+            f"{item['step']}. [{status_label}] {item['action']}\n"
+            f"   工具：{item.get('display_name') or item.get('tool')}\n"
+            f"   参数：{item.get('args_text') or '无参数'}\n"
+            f"   结果：{_shorten(item['summary'], 120)}"
+        )
 
     not_run = [step for step in plan_steps if step["index"] > len(executed)]
     for step in not_run:
-        lines.append(f"{step['index']}. ⏭️ {step['action']} - 未执行")
+        lines.append(
+            f"{step['index']}. [未执行] {step['action']}\n"
+            f"   工具：{step['display_name']}\n"
+            f"   参数：{step['args_text']}"
+        )
 
     if failed_step is None and not (write_count or destructive_count):
-        lines.extend(["", "下一步建议: 如果需要真正清理或修改系统，请基于以上检查结果再发起确认操作。"])
+        lines.extend(["", "下一步建议：如果需要真正清理或修改系统，请基于以上检查结果再发起确认操作。"])
     return "\n".join(lines)
 
 
@@ -458,7 +503,7 @@ async def execute_runbook(
             claim=f"Runbook「{runbook_name}」执行计划已生成",
             evidence_type="user input",
             source="Runbook执行器",
-            observed=f"步骤数 {len(plan_steps)}",
+            observed=_format_plan(runbook_name, plan_steps),
             confidence="medium",
             execution_state="inferred",
         ),
@@ -502,6 +547,8 @@ async def execute_runbook(
             executed.append({
                 "step": idx,
                 "tool": tool_name,
+                "display_name": step_info["display_name"],
+                "args_text": step_info["args_text"],
                 "action": step_info["action"],
                 "risk": step_info["risk_label"],
                 "risk_level": step_info["risk_level"],
@@ -518,7 +565,10 @@ async def execute_runbook(
                 claim=f"准备执行 Runbook 步骤 {idx}",
                 evidence_type="user input",
                 source=step_info["display_name"],
-                observed=f"目标: {step_info['target']}；风险: {step_info['risk_label']}",
+                observed=(
+                    f"工具: {step_info['tool_name']}；参数: {step_info['args_text']}；"
+                    f"目标: {step_info['target']}；风险: {step_info['risk_label']}"
+                ),
                 confidence="medium",
                 execution_state="skipped",
             ),
@@ -610,6 +660,8 @@ async def execute_runbook(
                 executed.append({
                     "step": idx,
                     "tool": tool_name,
+                    "display_name": step_info["display_name"],
+                    "args_text": step_info["args_text"],
                     "action": step_info["action"],
                     "risk": step_info["risk_label"],
                     "risk_level": step_info["risk_level"],
@@ -676,6 +728,8 @@ async def execute_runbook(
             executed.append({
                 "step": idx,
                 "tool": tool_name,
+                "display_name": step_info["display_name"],
+                "args_text": step_info["args_text"],
                 "action": step_info["action"],
                 "risk": step_info["risk_label"],
                 "risk_level": step_info["risk_level"],
@@ -810,6 +864,8 @@ async def execute_runbook(
             executed.append({
                 "step": idx,
                 "tool": tool_name,
+                "display_name": step_info["display_name"],
+                "args_text": step_info["args_text"],
                 "action": step_info["action"],
                 "risk": step_info["risk_label"],
                 "risk_level": step_info["risk_level"],
