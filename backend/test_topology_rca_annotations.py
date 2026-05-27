@@ -208,6 +208,27 @@ def test_topology_latest_scope_uses_only_newest_incident() -> None:
     asyncio.run(scenario())
 
 
+def test_error_log_tools_create_topology_evidence_nodes() -> None:
+    event = {
+        "phase": "execution",
+        "event_type": "success",
+        "detail": "recent errors",
+        "evidence": {
+            "source": "get_recent_errors",
+            "observed": "sshd.service: Failed password for invalid user",
+            "execution_state": "executed",
+        },
+        "metadata": {"tool_name": "get_recent_errors", "tool_args": {"lines": 30}},
+    }
+
+    annotations = topology._annotations_from_event(event)
+    targets = {item.target_id: item for item in annotations}
+    assert "log_get_recent_errors" in targets
+    assert "svc_sshd" in targets
+    assert targets["log_get_recent_errors"].target_type == "log"
+    assert targets["log_get_recent_errors"].rca_role == "suspected_root_cause"
+
+
 def test_apply_annotations_adds_highlights_and_inferred_edges() -> None:
     graph = {
         "nodes": [
@@ -260,6 +281,7 @@ def test_apply_annotations_adds_highlights_and_inferred_edges() -> None:
 def main() -> None:
     test_topology_annotations_from_incident_evidence()
     test_topology_latest_scope_uses_only_newest_incident()
+    test_error_log_tools_create_topology_evidence_nodes()
     test_apply_annotations_adds_highlights_and_inferred_edges()
     print("topology RCA annotations regression OK")
 

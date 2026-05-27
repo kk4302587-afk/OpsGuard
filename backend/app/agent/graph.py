@@ -21,6 +21,7 @@ from app.agent.trace_evidence import (
     trace_event,
     verification_evidence,
 )
+from app.agent.tool_executor import execute_tool, get_tools_for_llm
 from app.agent.tools_registry import tools_registry, RiskLevel
 from app.safety.guardrail import SafetyGuardrail
 from app.audit.logger import audit_logger, AuditPhase, AuditEventType
@@ -225,7 +226,7 @@ async def recent_changes_node(state: AgentState) -> dict:
     ))
 
     try:
-        result = tool_def.function(window_hours=24, limit=30)
+        result = await execute_tool("get_recent_changes", {"window_hours": 24, "limit": 30}, tool_def)
     except Exception as e:
         await send_to_client(trace_event(
             phase="recent_changes",
@@ -341,7 +342,7 @@ async def reasoning_node(state: AgentState) -> dict:
     user_content = user_message + multimodal_hint + knowledge_hint + recent_changes_hint + risk_warning
     messages.append({"role": "user", "content": user_content})
 
-    all_tools = tools_registry.get_all_tools_for_llm()
+    all_tools = await get_tools_for_llm()
     max_iterations = 10
     iteration = 0
     write_tools_called = 0  # Count of WRITE/DESTRUCTIVE tools genuinely invoked this turn
@@ -541,7 +542,7 @@ async def reasoning_node(state: AgentState) -> dict:
                         before_change_state = _capture_pre_change_state(tool_name, tool_args, backup_record)
 
                     current_turn_tool_count += 1
-                    result = tool_def.function(**tool_args)
+                    result = await execute_tool(tool_name, tool_args, tool_def)
                     executed_tools_this_turn.add(tool_name)
                     result_success = bool(getattr(result, "success", True))
                     result_error = getattr(result, "error", None)

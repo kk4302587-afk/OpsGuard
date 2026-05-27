@@ -22,6 +22,7 @@ from typing import Callable
 import aiosqlite
 from loguru import logger
 
+from app.agent.tool_executor import execute_tool
 from app.agent.tools_registry import tools_registry, RiskLevel
 from app.agent.runbook_governance import ensure_runbook_schema, record_runbook_result
 from app.agent.trace_evidence import (
@@ -717,7 +718,7 @@ async def execute_runbook(
 
         # === Execute ===
         try:
-            result = tool_def.function(**tool_args)
+            result = await execute_tool(tool_name, tool_args, tool_def)
             result_repr = result.__dict__ if hasattr(result, "__dict__") else result
             result_str = json.dumps(result_repr, ensure_ascii=False, default=str)
             success = (

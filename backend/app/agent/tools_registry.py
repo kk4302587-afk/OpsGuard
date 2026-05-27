@@ -750,6 +750,19 @@ class ToolsRegistry:
             raise ValueError(f"Unknown tool: {name}")
         return tool.function(**arguments)
 
+    async def execute_tool_async(self, name: str, arguments: dict) -> Any:
+        """Execute a tool through the configured executor.
+
+        This is the preferred path for Agent-facing execution because it can
+        route calls through MCP while preserving the local direct-call fallback.
+        """
+        from app.agent.tool_executor import execute_tool
+
+        tool = self._tools.get(name)
+        if not tool:
+            raise ValueError(f"Unknown tool: {name}")
+        return await execute_tool(name, arguments, tool)
+
 
 # Global registry instance
 tools_registry = ToolsRegistry()

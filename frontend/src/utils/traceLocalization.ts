@@ -80,6 +80,7 @@ export const SOURCE_DISPLAY_NAMES: Record<string, string> = {
   'knowledge_store.search': '知识库检索',
   read_only_intent_guard: '只读意图保护',
   write_completion_guard: '写操作真实性保护',
+  read_tool_truthfulness_guard: '只读检查真实性保护',
   approval_manager: '审批管理器',
   'BackupManager.backup_file': '备份管理器',
   runbook_executor: 'Runbook 执行器',

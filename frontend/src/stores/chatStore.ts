@@ -204,15 +204,39 @@ const mergeMessagesPreservingRuntime = (
 }
 
 const traceKey = (event: TraceEvent): string => [
-  event.timestamp || '',
+  event.phase === 'input_received' ? 'input_received' : event.timestamp || '',
   event.phase || '',
   event.event_type || '',
   event.content || '',
+  event.phase === 'input_received' ? '' : event.source || '',
 ].join('\u0000')
 
-const mergeTraceEvents = (existing: TraceEvent[], incoming: TraceEvent[]): TraceEvent[] => {
+const getTraceTimestamp = (event: TraceEvent) => event.timestamp || ''
+
+const isRecord = (value: unknown): value is Record<string, unknown> => (
+  typeof value === 'object' && value !== null
+)
+
+const normalizeTraceEvent = (event: TraceEvent): TraceEvent => {
+  const evidence = event.metadata?.evidence
+  if (!isRecord(evidence)) return event
+  return {
+    ...event,
+    claim: event.claim ?? evidence.claim as TraceEvent['claim'],
+    evidence_type: event.evidence_type ?? evidence.evidence_type as TraceEvent['evidence_type'],
+    source: event.source ?? evidence.source as TraceEvent['source'],
+    observed: event.observed ?? evidence.observed as TraceEvent['observed'],
+    confidence: event.confidence ?? evidence.confidence as TraceEvent['confidence'],
+    execution_state: event.execution_state ?? evidence.execution_state as TraceEvent['execution_state'],
+    failure_reason: event.failure_reason ?? evidence.failure_reason as TraceEvent['failure_reason'],
+    next_check: event.next_check ?? evidence.next_check as TraceEvent['next_check'],
+  }
+}
+
+const dedupeTraceEvents = (events: TraceEvent[]): TraceEvent[] => {
   const seen = new Set<string>()
-  return [...existing, ...incoming]
+  return events
+    .map(normalizeTraceEvent)
     .filter((event) => event.phase !== 'recent_changes')
     .filter((event) => {
       const key = traceKey(event)
@@ -220,8 +244,43 @@ const mergeTraceEvents = (existing: TraceEvent[], incoming: TraceEvent[]): Trace
       seen.add(key)
       return true
     })
-    .sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''))
 }
+
+const mergeTraceEvents = (existing: TraceEvent[], incoming: TraceEvent[]): TraceEvent[] => (
+  dedupeTraceEvents([...existing, ...incoming])
+)
+
+const mergeHistoricalTraceEvents = (existing: TraceEvent[], incoming: TraceEvent[]): TraceEvent[] => {
+  const localInputByContent = new Map(
+    existing
+      .filter((event) => event.phase === 'input_received' && event.source === 'frontend')
+      .map((event) => [event.content, event]),
+  )
+
+  return dedupeTraceEvents([
+    ...existing.filter((event) => (
+      !(event.phase === 'input_received' && event.source === 'frontend' && incoming.some((item) => (
+        item.phase === 'input_received' && item.content === event.content
+      )))
+    )),
+    ...incoming.map((event) => {
+      if (event.phase !== 'input_received') return event
+      const local = localInputByContent.get(event.content)
+      if (!local) return event
+      return { ...event, timestamp: local.timestamp }
+    }),
+  ])
+    .sort((a, b) => getTraceTimestamp(a).localeCompare(getTraceTimestamp(b)))
+}
+
+const appendUserTurn = (
+  state: Pick<ChatStore, 'messages' | 'traceEvents'>,
+  userMessage: Message,
+) => ({
+  messages: [...state.messages, userMessage],
+  traceEvents: state.traceEvents,
+  isThinking: true,
+})
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   sessions: [],
@@ -332,7 +391,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (get().activeSessionId !== id) return
         if (data.trace) {
           set((state) => {
-            const traceEvents = mergeTraceEvents(state.traceEvents, data.trace)
+            const traceEvents = mergeHistoricalTraceEvents(state.traceEvents, data.trace)
             const messages = state.messages.map((msg) => (
               msg.role === 'progress'
                 ? { ...msg, progressSteps: buildProgressStepsFromTrace(traceEvents) }
@@ -378,8 +437,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               timestamp: new Date().toISOString(),
             }
             set((state) => ({
-              messages: [...state.messages, userMessage],
-              isThinking: true,
+              ...appendUserTurn(state, userMessage),
             }))
             newWs.send(JSON.stringify({ type: 'message', content, multimodal_context: multimodalContext }))
           }
@@ -396,8 +454,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
 
     set((state) => ({
-      messages: [...state.messages, userMessage],
-      isThinking: true,
+      ...appendUserTurn(state, userMessage),
     }))
 
     ws.send(JSON.stringify({ type: 'message', content, multimodal_context: multimodalContext }))
@@ -469,9 +526,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         case 'trace':
           set((state) => {
             // Update trace events panel
-            const newTraceEvents = [
-              ...state.traceEvents,
-              {
+            const newTraceEvents = mergeTraceEvents(
+              state.traceEvents,
+              [{
                 phase: data.phase,
                 event_type: data.event_type,
                 content: data.content,
@@ -485,8 +542,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 execution_state: data.execution_state,
                 failure_reason: data.failure_reason,
                 next_check: data.next_check,
-              },
-            ]
+              }],
+            )
 
             // Update progress message steps based on trace phase
             const updatedMessages = state.messages.map(msg => {

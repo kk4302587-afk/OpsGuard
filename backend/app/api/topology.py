@@ -309,13 +309,21 @@ async def _load_incident_trace_events(session_id: str, latest_only: bool = False
         if latest_only:
             incident_cursor = await db.execute(
                 """
-                SELECT id
-                FROM incidents
-                WHERE session_id = ?
-                ORDER BY updated_at DESC, created_at DESC
+                SELECT i.id
+                FROM incidents i
+                LEFT JOIN (
+                    SELECT incident_id, MAX(timestamp) AS latest_event_at
+                    FROM incident_events
+                    WHERE session_id = ?
+                    GROUP BY incident_id
+                ) e ON e.incident_id = i.id
+                WHERE i.session_id = ?
+                ORDER BY COALESCE(e.latest_event_at, i.updated_at, i.created_at) DESC,
+                         i.updated_at DESC,
+                         i.created_at DESC
                 LIMIT 1
                 """,
-                (session_id,),
+                (session_id, session_id),
             )
             incident_row = await incident_cursor.fetchone()
             latest_incident_id = incident_row["id"] if incident_row else None
@@ -444,6 +452,16 @@ def _annotations_from_event(event: dict) -> list[TopologyAnnotation]:
         for pid, name in _extract_processes(observed):
             target_id = f"proc_{pid}" if pid else f"proc_{_safe_id(name)}"
             add(target_id, "process", "evidence", observed)
+
+    if source in {"get_recent_errors", "get_journal_logs", "tail_log_file", "search_logs", "get_boot_logs"}:
+        log_target = _log_target_id(source, tool_args)
+        role = "suspected_root_cause" if failed or _looks_like_error_log(observed) else "evidence"
+        add(log_target, "log", role, observed, inferred=False)
+        unit = _normalize_service(str(tool_args.get("unit") or ""))
+        if unit:
+            add(f"svc_{unit}", "service", "affected" if failed else "evidence", observed, inferred=True)
+        for service_name in _extract_service_names(observed):
+            add(f"svc_{service_name}", "service", "evidence", observed, inferred=True)
 
     return annotations
 
@@ -605,3 +623,29 @@ def _stronger_role(current: str | None, candidate: str) -> str:
         None: 0,
     }
     return candidate if order.get(candidate, 0) > order.get(current, 0) else (current or candidate)
+
+
+def _log_target_id(source: str, tool_args: dict) -> str:
+    unit = _normalize_service(str(tool_args.get("unit") or ""))
+    filepath = str(tool_args.get("filepath") or "")
+    if unit:
+        return f"log_{_safe_id(unit)}"
+    if filepath:
+        return f"log_{_safe_id(filepath)}"
+    return f"log_{source}"
+
+
+def _looks_like_error_log(observed: str) -> bool:
+    lowered = observed.lower()
+    return any(token in lowered for token in (" error", "err ", "failed", "failure", "critical", "panic", "denied", "exception"))
+
+
+def _extract_service_names(text: str) -> list[str]:
+    lowered = text.lower()
+    names = []
+    for name in ("nginx", "apache", "redis", "mysql", "sshd", "docker", "containerd"):
+        if name in lowered:
+            names.append(name)
+    for match in re.findall(r"\b([A-Za-z0-9_.@-]+)\.service\b", text):
+        names.append(_normalize_service(match))
+    return list(dict.fromkeys(name for name in names if name))

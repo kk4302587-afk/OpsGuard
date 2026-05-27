@@ -6,7 +6,7 @@ from typing import Optional
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
 # Load .env file
@@ -83,6 +83,15 @@ class WebSocketConfig(BaseModel):
     max_message_size: int = 1048576
 
 
+class MCPConfig(BaseModel):
+    enabled: bool = False
+    transport: str = "stdio"
+    command: str = ""
+    args: list[str] = Field(default_factory=lambda: ["-m", "app.mcp_server"])
+    timeout: float = 30.0
+    fallback_to_local: bool = True
+
+
 class Settings(BaseModel):
     app: AppConfig = AppConfig()
     llm: LLMConfig = LLMConfig()
@@ -91,6 +100,7 @@ class Settings(BaseModel):
     knowledge: KnowledgeConfig = KnowledgeConfig()
     audit: AuditConfig = AuditConfig()
     websocket: WebSocketConfig = WebSocketConfig()
+    mcp: MCPConfig = MCPConfig()
 
 
 def _resolve_env_vars(value: str) -> str:

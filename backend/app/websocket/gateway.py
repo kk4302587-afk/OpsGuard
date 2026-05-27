@@ -203,6 +203,22 @@ async def handle_user_message(session_id: str, message: dict):
             return
         content = "请分析我上传的多模态运维信息"
 
+    from app.agent.trace_evidence import build_evidence, trace_event
+
+    await _send_to_session(session_id, trace_event(
+        phase="input_received",
+        event_type="success",
+        content=content,
+        evidence=build_evidence(
+            claim="事件问题描述来自用户输入",
+            evidence_type="user input",
+            source="user",
+            observed=content[:500],
+            confidence="high",
+            execution_state="executed",
+        ),
+    ))
+
     await _persist_user_message(session_id, content)
 
     # === Step 2: Runbook fuzzy match (C side) ===

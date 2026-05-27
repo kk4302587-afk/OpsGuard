@@ -16,6 +16,7 @@ from typing import Any
 import aiosqlite
 from loguru import logger
 
+from app.agent.tool_executor import execute_tool
 from app.agent.tools_registry import RiskLevel, tools_registry
 from app.agent.trace_evidence import build_evidence, trace_event, tool_result_evidence
 from app.database import get_audit_db_path, get_knowledge_db_path
@@ -303,7 +304,7 @@ async def _execute_step(
     )
 
     try:
-        result = tool_def.function(**step.tool_args)
+        result = await execute_tool(step.tool_name, step.tool_args, tool_def)
     except Exception as exc:
         logger.exception(f"Alert auto-triage tool exception: {step.tool_name}")
         evidence = build_evidence(

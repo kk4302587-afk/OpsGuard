@@ -118,6 +118,28 @@ const categoryShapeLabels: Record<string, string> = {
   log: '图钉',
 }
 
+const escapeHtml = (value: string) => (
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+)
+
+const compactText = (value: string, maxLength = 180) => {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized
+}
+
+const formatEvidenceText = (value: string, maxLength = 500) => (
+  compactText(value, maxLength)
+    .split(/(?<=\.)\s+|(?<=。)\s*|(?<=!)\s+|(?<=！)\s+/)
+    .filter(Boolean)
+    .slice(0, 6)
+    .join('\n')
+)
+
 /**
  * Fault correlation topology graph using ECharts.
  * Visualizes relationships between processes, ports, services, configs.
@@ -248,6 +270,17 @@ function TopologyGraph() {
     )
   ), [data])
 
+  const isEvidenceView = viewMode !== 'system' && Boolean(activeSessionId)
+  const hasMappedEvidence = isEvidenceView && hasFaultEvidence
+  const shouldShowEvidenceEmptyState = isEvidenceView && !hasFaultEvidence
+  const visibleNodeCount = shouldShowEvidenceEmptyState ? 0 : displayedNodes.length
+  const emptyEvidenceTitle = viewMode === 'latest' ? '本轮请求暂无拓扑证据' : '整个会话暂无拓扑证据'
+  const emptyEvidenceDescription = (
+    viewMode === 'latest'
+      ? '本轮诊断没有产生可映射到服务、日志、端口、配置或进程的证据。系统状态指标会保留在对话和推理链路中，不作为拓扑实体展示。'
+      : '当前会话还没有可映射到服务、日志、端口、配置或进程的证据。系统状态指标会保留在对话和推理链路中，不作为拓扑实体展示。'
+  )
+
   const fetchTopology = async () => {
     const requestId = requestSeq.current + 1
     requestSeq.current = requestId
@@ -301,14 +334,14 @@ function TopologyGraph() {
   }
 
   const getNodeColor = (node: TopologyNode) => {
-    if (hasFaultEvidence) return node.rca_role ? roleColors[node.rca_role] : backgroundNodeColor
+    if (hasMappedEvidence) return node.rca_role ? roleColors[node.rca_role] : backgroundNodeColor
     return categoryColors[node.category] || backgroundNodeColor
   }
 
   const getNodeStatusLabel = (node?: TopologyNode | null) => {
     if (!node) return '未选择'
     if (node.rca_role) return roleLabels[node.rca_role]
-    return hasFaultEvidence ? '背景节点' : '系统拓扑节点'
+    return hasMappedEvidence ? '背景节点' : '系统拓扑节点'
   }
 
   const toggleCategory = (category: string) => {
@@ -344,6 +377,8 @@ function TopologyGraph() {
       trigger: 'item',
       backgroundColor: '#21252b',
       borderColor: '#2d3139',
+      confine: true,
+      extraCssText: 'max-width: 360px; white-space: normal; word-break: break-word; line-height: 1.5;',
       textStyle: { color: '#e4e7eb', fontSize: 12 },
       formatter: (params: any) => {
         if (params.dataType === 'node') {
@@ -352,9 +387,9 @@ function TopologyGraph() {
           const annotationText = annotations.slice(0, 3).map((item) => (
             `<br/><span style="color:${roleColors[item.rca_role] || '#8b929a'}">${roleLabels[item.rca_role] || item.rca_role}</span>` +
             `<br/><span style="color:#8b929a">来源：${item.source} / ${item.execution_state === 'executed' ? '已执行' : '失败'}</span>` +
-            `<br/>${item.evidence_summary}`
+            `<br/>${escapeHtml(compactText(item.evidence_summary, 160))}`
           )).join('')
-          return `<strong>${params.data.name}</strong><br/><span style="color:#8b929a">类型：${categoryLabels[cat] || cat}</span><br/><span style="color:#8b929a">状态：${params.data.statusLabel}</span>${params.data.value ? `<br/>${params.data.value}` : ''}${annotationText}`
+          return `<strong>${escapeHtml(params.data.name)}</strong><br/><span style="color:#8b929a">类型：${categoryLabels[cat] || cat}</span><br/><span style="color:#8b929a">状态：${params.data.statusLabel}</span>${params.data.value ? `<br/>${escapeHtml(compactText(params.data.value, 120))}` : ''}${annotationText}`
         }
         if (params.dataType === 'edge') {
           const inferred = params.data.inferred ? '<br/><span style="color:#d19a66">推断关系</span>' : '<br/><span style="color:#00d4aa">检测关系</span>'
@@ -405,7 +440,7 @@ function TopologyGraph() {
           const nodeColor = getNodeColor(node)
           const isAnnotated = Boolean(node.highlight || node.annotations?.length)
           const isSelected = selectedNodeId === node.id
-          const isDimmedBackground = hasFaultEvidence && !role && !isAnnotated && !isSelected
+          const isDimmedBackground = hasMappedEvidence && !role && !isAnnotated && !isSelected
 
           return {
             id: node.id,
@@ -419,7 +454,7 @@ function TopologyGraph() {
             symbol: categorySymbols[node.category] || 'circle',
             symbolSize: role ? size + 8 : size,
             label: {
-              show: isSelected || isAnnotated || Boolean(role) || node.category === 'service' || (!hasFaultEvidence && node.category === 'process'),
+              show: isSelected || isAnnotated || Boolean(role) || node.category === 'service' || (!hasMappedEvidence && node.category === 'process'),
               color: isDimmedBackground ? '#6f7782' : '#d8dee9',
               fontWeight: isSelected || isAnnotated || role ? 700 : 500,
             },
@@ -442,10 +477,10 @@ function TopologyGraph() {
             inferred: edge.inferred,
             annotations: edge.annotations || [],
             lineStyle: {
-              color: hasEvidence ? '#00d4aa' : hasFaultEvidence ? '#3d4450' : '#4b5563',
+              color: hasEvidence ? '#00d4aa' : hasMappedEvidence ? '#3d4450' : '#4b5563',
               width: hasEvidence ? 2.8 : edge.inferred ? 1.2 : 1.8,
               curveness: 0.2,
-              opacity: hasEvidence ? 0.9 : hasFaultEvidence ? 0.45 : 0.6,
+              opacity: hasEvidence ? 0.9 : hasMappedEvidence ? 0.45 : 0.6,
               type: edge.inferred || edge.relation === 'connects_to' ? 'dashed' as const : 'solid' as const,
             },
           }
@@ -482,7 +517,7 @@ function TopologyGraph() {
           </Title>
           <Tag>
             <NodeIndexOutlined style={{ marginRight: 4 }} />
-            展示 {displayedNodes.length}/{data.nodes.length} 节点
+            展示 {visibleNodeCount}/{data.nodes.length} 节点
           </Tag>
           {viewMode !== 'system' && activeSessionId && (
             <Tag color={(data.annotations?.length || 0) > 0 ? 'orange' : 'default'}>
@@ -491,14 +526,16 @@ function TopologyGraph() {
           )}
           {viewMode === 'latest' && <Tag color="blue">本轮请求</Tag>}
           {viewMode === 'session' && <Tag color="purple">整个会话</Tag>}
-          {hasFaultEvidence ? (
+          {hasMappedEvidence ? (
             <>
               <Tag color={roleCounts.suspected_root_cause > 0 ? 'orange' : 'default'}>疑似根因 {roleCounts.suspected_root_cause}</Tag>
               <Tag color={roleCounts.affected > 0 ? 'red' : 'default'}>受影响 {roleCounts.affected}</Tag>
               <Tag color={roleCounts.downstream_impact > 0 ? 'gold' : 'default'}>影响范围 {roleCounts.downstream_impact}</Tag>
             </>
           ) : (
-            <Tag color="cyan">系统拓扑视图</Tag>
+            <Tag color={isEvidenceView ? 'default' : 'cyan'}>
+              {isEvidenceView ? '无可映射证据' : '系统拓扑视图'}
+            </Tag>
           )}
         </Space>
         <Space>
@@ -527,13 +564,34 @@ function TopologyGraph() {
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         {/* Graph */}
         <div style={{ flex: 1, padding: 8, minWidth: 0 }}>
-          <ReactECharts
-            key={chartResetKey}
-            option={option}
-            style={{ height: '100%', width: '100%' }}
-            opts={{ renderer: 'canvas' }}
-            onEvents={{ click: handleChartClick }}
-          />
+          {shouldShowEvidenceEmptyState ? (
+            <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description={
+                  <Space direction="vertical" size={6}>
+                    <Text style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{emptyEvidenceTitle}</Text>
+                    <Text style={{ maxWidth: 520, display: 'block', color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+                      {emptyEvidenceDescription}
+                    </Text>
+                  </Space>
+                }
+              >
+                <Space>
+                  <Button onClick={() => setViewMode('system')}>查看系统拓扑</Button>
+                  <Button icon={<ReloadOutlined />} onClick={fetchTopology} loading={loading}>刷新证据</Button>
+                </Space>
+              </Empty>
+            </div>
+          ) : (
+            <ReactECharts
+              key={chartResetKey}
+              option={option}
+              style={{ height: '100%', width: '100%' }}
+              opts={{ renderer: 'canvas' }}
+              onEvents={{ click: handleChartClick }}
+            />
+          )}
         </div>
 
         <aside
@@ -547,7 +605,7 @@ function TopologyGraph() {
           }}
         >
           <Space direction="vertical" size={14} style={{ width: '100%' }}>
-            {hasFaultEvidence ? (
+            {hasMappedEvidence ? (
               <div>
                 <Text strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: 8 }}>
                   颜色含义
@@ -575,19 +633,21 @@ function TopologyGraph() {
                   当前视图
                 </Text>
                 <Text style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
-                  当前展示系统拓扑，图中颜色表示节点类型；选择“本轮请求”或“整个会话”后，会叠加诊断证据形成故障关联图谱。
+                  {isEvidenceView
+                    ? '当前范围没有可映射到拓扑实体的诊断证据，暂时只显示系统拓扑底图。系统指标会保留在报告和证据链中；日志、服务、端口、配置和进程证据会在这里形成故障关联。'
+                    : '当前展示系统拓扑，图中颜色表示节点类型；选择“本轮请求”或“整个会话”后，会叠加诊断证据形成故障关联图谱。'}
                 </Text>
               </div>
             )}
 
             <div>
               <Text strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: 8 }}>
-                {hasFaultEvidence ? '形状与筛选' : '节点类型'}
+                {hasMappedEvidence ? '形状与筛选' : '节点类型'}
               </Text>
               <Space wrap size={[6, 8]}>
                 {data.categories.map((category) => {
                   const checked = enabledCategories.includes(category.name)
-                  const categoryColor = hasFaultEvidence ? backgroundNodeColor : (categoryColors[category.name] || backgroundNodeColor)
+                  const categoryColor = hasMappedEvidence ? backgroundNodeColor : (categoryColors[category.name] || backgroundNodeColor)
                   return (
                     <Tag.CheckableTag
                       key={category.name}
@@ -614,7 +674,7 @@ function TopologyGraph() {
                       />
                       <span style={{ marginRight: 4 }}>{categoryIcons[category.name] || <HddOutlined />}</span>
                       {categoryLabels[category.name] || category.name}
-                      {hasFaultEvidence && (
+                      {hasMappedEvidence && (
                         <span style={{ marginLeft: 4, color: 'var(--text-muted)', fontSize: 11 }}>
                           {visibleCategoryCounts[category.name] || 0}
                         </span>
@@ -623,7 +683,7 @@ function TopologyGraph() {
                   )
                 })}
               </Space>
-              {hasFaultEvidence && (
+              {hasMappedEvidence && (
                 <Text style={{ display: 'block', marginTop: 8, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
                   节点类型由形状区分：{data.categories.map((category) => `${categoryLabels[category.name] || category.name}=${categoryShapeLabels[category.name] || '默认形状'}`).join('，')}。
                 </Text>
@@ -667,30 +727,45 @@ function TopologyGraph() {
                     </Text>
                   )}
                   {(selectedNode.annotations || []).length > 0 ? (
-                    selectedNode.annotations?.slice(0, 4).map((annotation, index) => (
-                      <div
-                        key={`${annotation.target_id}-${index}`}
-                        style={{
-                          padding: '8px 10px',
-                          border: '1px solid var(--border-color)',
-                          borderRadius: 6,
-                          background: 'rgba(255, 255, 255, 0.03)',
-                        }}
-                      >
-                        <Tag color={annotation.rca_role === 'affected' ? 'red' : annotation.rca_role === 'suspected_root_cause' ? 'orange' : 'gold'} style={{ marginBottom: 6 }}>
-                          {roleLabels[annotation.rca_role]}
-                        </Tag>
-                        <Text style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                          {annotation.evidence_summary}
+                    <>
+                      {selectedNode.annotations?.slice(0, 3).map((annotation, index) => (
+                        <div
+                          key={`${annotation.target_id}-${index}`}
+                          style={{
+                            padding: '8px 10px',
+                            border: '1px solid var(--border-color)',
+                            borderRadius: 6,
+                            background: 'rgba(255, 255, 255, 0.03)',
+                          }}
+                        >
+                          <Tag color={annotation.rca_role === 'affected' ? 'red' : annotation.rca_role === 'suspected_root_cause' ? 'orange' : 'gold'} style={{ marginBottom: 6 }}>
+                            {roleLabels[annotation.rca_role]}
+                          </Tag>
+                          <div
+                            style={{
+                              maxHeight: 132,
+                              overflow: 'auto',
+                              paddingRight: 4,
+                            }}
+                          >
+                            <Text style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.6 }}>
+                              {formatEvidenceText(annotation.evidence_summary)}
+                            </Text>
+                          </div>
+                          <Text style={{ display: 'block', marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
+                            来源：{annotation.source} / {annotation.execution_state === 'executed' ? '已执行' : '失败'}
+                          </Text>
+                        </div>
+                      ))}
+                      {(selectedNode.annotations?.length || 0) > 3 && (
+                        <Text style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                          还有 {(selectedNode.annotations?.length || 0) - 3} 条证据，已折叠以保持页面可读。
                         </Text>
-                        <Text style={{ display: 'block', marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
-                          来源：{annotation.source} / {annotation.execution_state === 'executed' ? '已执行' : '失败'}
-                        </Text>
-                      </div>
-                    ))
+                      )}
+                    </>
                   ) : (
                     <Text style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                      {hasFaultEvidence
+                      {hasMappedEvidence
                         ? '该节点暂未绑定故障证据，可点击相邻节点继续查看上下游关系。'
                         : '该节点来自系统拓扑扫描，暂未和当前会话故障证据关联。'}
                     </Text>

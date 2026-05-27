@@ -38,6 +38,7 @@ interface TraceEvidence {
   execution_state?: string
   failure_reason?: string
   next_check?: string
+  metadata?: Record<string, unknown>
 }
 
 interface TraceGroup {
@@ -45,7 +46,7 @@ interface TraceGroup {
   title: string
   startTime: string
   events: TraceEvidence[]
-  status: 'running' | 'success' | 'failure' | 'blocked'
+  status: 'running' | 'success' | 'failure' | 'blocked' | 'corrected'
 }
 
 /**
@@ -77,13 +78,25 @@ function TracePanel() {
 
     return groups.map((group) => {
       const response = [...group.events].reverse().find((event) => event.phase === 'response')
-      const failed = group.events.some((event) => event.event_type === 'failure')
+      const failed = group.events.some((event) => event.event_type === 'failure' && !isNonFatalGuardEvent(event))
       const blocked = group.events.some((event) => event.event_type === 'blocked')
+      const corrected = group.events.some((event) => isNonFatalGuardEvent(event))
       return {
         ...group,
-        status: blocked ? 'blocked' : failed ? 'failure' : response?.event_type === 'success' ? 'success' : 'running',
+        status: blocked ? 'blocked' : failed ? 'failure' : response?.event_type === 'success' ? 'success' : corrected ? 'corrected' : 'running',
       }
     })
+  }
+
+  const isNonFatalGuardEvent = (event: TraceEvidence) => {
+    const metadataEvidence = event.metadata?.evidence as Record<string, unknown> | undefined
+    const source = event.source || (typeof metadataEvidence?.source === 'string' ? metadataEvidence.source : '')
+    const text = `${source} ${event.content || ''} ${event.claim || ''}`
+    return (
+      source === 'read_tool_truthfulness_guard' ||
+      text.includes('真实性守卫') ||
+      text.includes('回复引用未执行的只读工具')
+    )
   }
 
   const traceGroups = useMemo(() => getRequestGroups(visibleTraceEvents as TraceEvidence[]), [visibleTraceEvents])
@@ -151,8 +164,8 @@ function TracePanel() {
       >
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 6 }}>
           {event.execution_state && (
-            <Tag color={getEvidenceStateColor(event.execution_state)} style={{ fontSize: 10, margin: 0 }}>
-              {getEvidenceLabel('execution_state', event.execution_state)}
+            <Tag color={isNonFatalGuardEvent(event) ? 'orange' : getEvidenceStateColor(event.execution_state)} style={{ fontSize: 10, margin: 0 }}>
+              {isNonFatalGuardEvent(event) ? '已修正' : getEvidenceLabel('execution_state', event.execution_state)}
             </Tag>
           )}
           {event.evidence_type && (
@@ -192,8 +205,8 @@ function TracePanel() {
           </Text>
         )}
         {event.failure_reason && (
-          <Text style={{ display: 'block', marginTop: 4, fontSize: 10, color: 'var(--accent-red)' }}>
-            失败原因: {translateTraceText(event.failure_reason)}
+          <Text style={{ display: 'block', marginTop: 4, fontSize: 10, color: isNonFatalGuardEvent(event) ? 'var(--text-muted)' : 'var(--accent-red)' }}>
+            {isNonFatalGuardEvent(event) ? '修正原因' : '失败原因'}: {translateTraceText(event.failure_reason)}
           </Text>
         )}
         {event.next_check && (
@@ -205,9 +218,11 @@ function TracePanel() {
     )
   }
 
-  const getPhaseIcon = (phase: string, eventType: string) => {
+  const getPhaseIcon = (event: TraceEvidence) => {
     const iconStyle = { fontSize: 14 }
+    const { phase, event_type: eventType } = event
 
+    if (isNonFatalGuardEvent(event)) return <BulbOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
     if (eventType === 'blocked') return <StopOutlined style={{ ...iconStyle, color: 'var(--accent-red)' }} />
     if (eventType === 'failure') return <CloseCircleOutlined style={{ ...iconStyle, color: 'var(--accent-red)' }} />
 
@@ -238,6 +253,11 @@ function TracePanel() {
       case 'start': return 'blue'
       default: return 'default'
     }
+  }
+
+  const getTraceEventColor = (event: TraceEvidence): string => {
+    if (isNonFatalGuardEvent(event)) return 'orange'
+    return getEventColor(event.event_type)
   }
 
   const getPhaseLabel = (phase: string) => {
@@ -271,6 +291,7 @@ function TracePanel() {
       case 'success': return 'green'
       case 'failure': return 'red'
       case 'blocked': return 'red'
+      case 'corrected': return 'orange'
       default: return 'blue'
     }
   }
@@ -280,6 +301,7 @@ function TracePanel() {
       case 'success': return '已完成'
       case 'failure': return '失败'
       case 'blocked': return '已拦截'
+      case 'corrected': return '已修正'
       default: return '进行中'
     }
   }
@@ -302,13 +324,13 @@ function TracePanel() {
       }}
     >
       <div style={{ paddingTop: 2 }}>
-        {getPhaseIcon(event.phase, event.event_type)}
+        {getPhaseIcon(event)}
       </div>
 
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
           <Tag
-            color={getEventColor(event.event_type)}
+            color={getTraceEventColor(event)}
             style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}
           >
             {getPhaseLabel(event.phase)}
