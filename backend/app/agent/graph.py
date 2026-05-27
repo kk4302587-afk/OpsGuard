@@ -22,6 +22,11 @@ from app.agent.trace_evidence import (
     verification_evidence,
 )
 from app.agent.tool_executor import execute_tool, get_tools_for_llm
+from app.agent.tool_execution_store import (
+    format_recent_tool_evidence,
+    get_recent_tool_executions,
+    record_tool_execution,
+)
 from app.agent.tools_registry import tools_registry, RiskLevel
 from app.safety.guardrail import SafetyGuardrail
 from app.audit.logger import audit_logger, AuditPhase, AuditEventType
@@ -327,6 +332,20 @@ async def reasoning_node(state: AgentState) -> dict:
     risk_warning = state.get("risk_warning", "")
     knowledge_hint = state.get("knowledge_hint", "")
     recent_changes_hint = state.get("recent_changes_hint", "")
+    history_evidence_hint = ""
+    history_recall_intent = _is_history_recall_intent(user_message)
+    historical_success_tools: set[str] = set()
+    if history_recall_intent:
+        try:
+            recent_executions = await get_recent_tool_executions(session_id, limit=12)
+            history_evidence_hint = format_recent_tool_evidence(recent_executions)
+            historical_success_tools = {
+                item.get("tool_name", "")
+                for item in recent_executions
+                if item.get("status") == "success"
+            }
+        except Exception as e:
+            logger.warning(f"Recent tool evidence lookup failed: {e}")
 
     await send_to_client(trace_event(
         phase="planning",
@@ -339,7 +358,7 @@ async def reasoning_node(state: AgentState) -> dict:
     # Build messages
     messages = list(state.get("messages", []))
     multimodal_hint = state.get("multimodal_hint", "")
-    user_content = user_message + multimodal_hint + knowledge_hint + recent_changes_hint + risk_warning
+    user_content = user_message + multimodal_hint + knowledge_hint + recent_changes_hint + history_evidence_hint + risk_warning
     messages.append({"role": "user", "content": user_content})
 
     all_tools = await get_tools_for_llm()
@@ -546,6 +565,17 @@ async def reasoning_node(state: AgentState) -> dict:
                     executed_tools_this_turn.add(tool_name)
                     result_success = bool(getattr(result, "success", True))
                     result_error = getattr(result, "error", None)
+                    await record_tool_execution(
+                        session_id=session_id,
+                        incident_id=incident_id,
+                        call_id=tool_call.get("id", ""),
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        risk_level=tool_def.risk_level.value,
+                        status="success" if result_success else "failure",
+                        result=result,
+                        error=result_error,
+                    )
                     if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
                         write_tools_called += 1
                         if result_success:
@@ -636,6 +666,17 @@ async def reasoning_node(state: AgentState) -> dict:
 
                 except Exception as e:
                     tool_result_str = json.dumps({"error": str(e)})
+                    await record_tool_execution(
+                        session_id=session_id,
+                        incident_id=incident_id,
+                        call_id=tool_call.get("id", ""),
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        risk_level=tool_def.risk_level.value,
+                        status="failure",
+                        result={"error": str(e)},
+                        error=str(e),
+                    )
                     await send_to_client(trace_event(
                         phase="execution",
                         event_type="failure",
@@ -661,10 +702,23 @@ async def reasoning_node(state: AgentState) -> dict:
             # if the response claims a write operation was completed but NO write tool
             # was actually called this turn, force one retry with an explicit reminder.
             final_content = llm_response.get("content", "") or ""
-            has_write_completion_claim = _has_write_intent(user_message) and _claims_write_completion(final_content)
+            has_write_completion_claim = _claims_write_completion(final_content)
             unsupported_tool_claims = _unsupported_tool_claims(final_content, executed_tools_this_turn)
-            if unsupported_tool_claims:
+            if unsupported_tool_claims and history_recall_intent:
+                unsupported_tool_claims = [
+                    name for name in unsupported_tool_claims if name not in historical_success_tools
+                ]
+            unsupported_observation_claim = (
+                not unsupported_tool_claims
+                and current_turn_tool_count == 0
+                and not history_recall_intent
+                and _requires_fresh_tool_evidence(user_message)
+                and _claims_observation_result(final_content)
+            )
+            if unsupported_tool_claims or unsupported_observation_claim:
                 claim_summary = ", ".join(unsupported_tool_claims[:5])
+                if unsupported_observation_claim:
+                    claim_summary = claim_summary or "本轮状态/文件/验证结果"
                 if hallucination_retry_done:
                     blocked_claim = final_content
                     final_content = (
@@ -725,8 +779,10 @@ async def reasoning_node(state: AgentState) -> dict:
                     "content": (
                         "[系统强制纠正] 你上一条回复引用了工具或检查结果："
                         f"{claim_summary}，但本轮没有这些工具的真实执行记录。"
-                        "请重新处理：如果需要这些事实，必须立即调用对应只读工具；"
-                        "如果不调用工具，就必须明确说明尚未执行检查，不能写成已检查或已返回。"
+                        "请重新处理：如果用户是在请求实际查看/检查/读取，请立即调用对应只读工具；"
+                        "如果用户是在询问含义、作用、参数、风险或让你解释计划，则不要调用工具也不要声称结果，"
+                        "必须明确说明“尚未执行，这只是说明/计划”。"
+                        "不能写成已检查、已返回、已确认或已发现。"
                     ),
                 })
                 continue
@@ -1718,9 +1774,9 @@ _WRITE_COMPLETION_PATTERNS = (
     "已清理", "清理完成", "已成功清理", "已为您清理",
     "已 kill", "已终止", "已杀死", "已为您终止",
     "已修改", "已更新", "已写入", "已追加", "追加完成", "成功追加", "已应用", "已保存", "已成功修改",
-    "成功写入", "成功添加", "成功向",
+    "成功写入", "成功添加", "成功向", "已成功添加", "已成功追加", "已成功写入",
     "已移动", "移动完成", "已重命名", "重命名完成", "已改名", "改名完成",
-    "已复制", "复制完成", "已为您移动", "已为您重命名", "已为您复制",
+    "已复制", "复制完成", "已成功复制", "已成功将", "已为您移动", "已为您重命名", "已为您复制",
     "已执行完毕", "已为您执行", "已为你执行", "执行完毕", "已经执行",
     "已添加", "已创建", "创建完成", "已成功创建", "已新建", "新建完成", "已配置", "已开启", "已关闭", "已禁用", "已启用",
     "已安装", "安装完成", "已卸载", "卸载完成",
@@ -1784,6 +1840,28 @@ def _is_read_only_intent(text: str) -> bool:
     return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in _READ_ONLY_INTENT_PATTERNS)
 
 
+def _is_history_recall_intent(text: str) -> bool:
+    """Return whether the user asks about prior evidence instead of fresh state."""
+    if not text:
+        return False
+
+    import re
+
+    normalized = text.strip()
+    history_markers = (
+        r"(刚刚|刚才|上一轮|上次|之前|前面|刚检测|刚检查|刚分析|刚才检测|刚才检查|刚才分析)",
+        r"(刚刚|刚才).{0,40}(最大风险|风险|结果|结论|检测到|检查到|发现|是什么)",
+        r"\b(previous|last|earlier|just now|before)\b",
+    )
+    fresh_markers = (
+        r"(重新|再次|现在|当前|实时|最新|再检查|重新检查|重新检测|刷新)",
+        r"\b(now|current|latest|refresh|rerun|recheck|again)\b",
+    )
+    if any(re.search(pattern, normalized, re.IGNORECASE) for pattern in fresh_markers):
+        return False
+    return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in history_markers)
+
+
 def _claims_write_completion(text: str) -> bool:
     """Detect whether an LLM text response claims a write operation was completed.
 
@@ -1794,6 +1872,42 @@ def _claims_write_completion(text: str) -> bool:
     if not text:
         return False
     return any(pat in text for pat in _WRITE_COMPLETION_PATTERNS)
+
+
+def _requires_fresh_tool_evidence(user_message: str) -> bool:
+    """Whether the user is asking for current system/file/service evidence."""
+    if not user_message:
+        return False
+
+    import re
+
+    normalized = user_message.strip()
+    evidence_patterns = (
+        r"(验证|确认|检查|查看|读取|获取|查询|列出|显示|对比|diff|当前内容|内容|文件大小|行数|是否存在|状态|日志)",
+        r"\b(verify|validate|check|read|view|show|get|list|stat|status|diff)\b",
+        r"(/[\w./~@:+-]+|[\w.-]+\.(txt|conf|log|json|yaml|yml|ini|env|sh|service))",
+    )
+    return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in evidence_patterns)
+
+
+def _claims_observation_result(text: str) -> bool:
+    """Detect result-like statements that require real read/check evidence."""
+    if not text:
+        return False
+
+    result_markers = (
+        "验证成功", "验证通过", "验证结果", "当前内容", "完整内容", "文件内容",
+        "文件大小", "字节", "行", "总大小", "完全一致", "内容一致",
+        "不存在", "存在", "返回", "显示", "发现", "确认", "读取到", "检查到",
+        "No such file", "not found", "permission denied", "active", "inactive", "failed",
+    )
+    unexecuted_markers = (
+        "尚未执行", "未执行", "没有执行", "尚未调用", "未调用", "没有调用",
+        "只是说明", "只是计划", "无法确认", "不能确认",
+    )
+    if any(marker in text for marker in unexecuted_markers):
+        return False
+    return any(marker in text for marker in result_markers)
 
 
 def _unsupported_tool_claims(text: str, executed_tools: set[str]) -> list[str]:
@@ -1809,22 +1923,42 @@ def _unsupported_tool_claims(text: str, executed_tools: set[str]) -> list[str]:
     import re
 
     mentioned: list[str] = []
+    explicit_unexecuted = (
+        "尚未执行", "未执行", "还没有执行", "没有执行", "并未执行",
+        "尚未调用", "未调用", "还没有调用", "没有调用", "并未调用",
+        "不会执行", "不执行", "只是计划", "仅说明", "用于说明", "准备调用",
+        "计划调用", "建议调用", "将调用", "需要调用", "应调用", "可以调用",
+    )
+    execution_claim_words = (
+        "返回", "显示", "确认", "发现", "结果", "输出", "报错", "错误",
+        "执行成功", "执行失败", "调用成功", "调用失败", "已执行", "已调用",
+        "读取到", "检查到", "检测到", "查询到", "获取到", "看到",
+        "监听", "存在", "不存在", "active", "inactive", "failed", "No such file",
+        "not found", "permission denied", "证据", "关键证据",
+    )
+
+    def looks_like_execution_claim(nearby: str) -> bool:
+        if any(marker in nearby for marker in explicit_unexecuted):
+            return False
+        return any(word in nearby for word in execution_claim_words)
+
     for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\s*\(", text):
         name = match.group(1)
-        if tools_registry.get_tool(name) and name not in mentioned:
+        nearby = text[max(0, match.start() - 48): match.end() + 80]
+        if (
+            tools_registry.get_tool(name)
+            and name not in mentioned
+            and looks_like_execution_claim(nearby)
+        ):
             mentioned.append(name)
 
-    evidence_words = (
-        "返回", "显示", "确认", "发现", "结果", "执行成功", "执行失败",
-        "报错", "监听", "active", "inactive", "failed", "证据", "关键证据",
-    )
     # Backtick-only mentions are common in this UI. Treat them as tool-result
     # claims only when nearby wording looks like evidence, not a suggestion.
     for match in re.finditer(r"`([A-Za-z_][A-Za-z0-9_]{2,})`", text):
         name = match.group(1)
-        nearby = text[max(0, match.start() - 24): match.end() + 40]
+        nearby = text[max(0, match.start() - 48): match.end() + 80]
         if tools_registry.get_tool(name) and name not in mentioned:
-            if any(word in nearby for word in evidence_words):
+            if looks_like_execution_claim(nearby):
                 mentioned.append(name)
 
     return [name for name in mentioned if name not in executed_tools]

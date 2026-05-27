@@ -23,6 +23,14 @@ def command_error(result: subprocess.CompletedProcess, fallback: str = "Command 
     return f"{detail} (exit code {result.returncode})"
 
 
+_PS_SORT_FIELDS = {
+    "cpu": "%cpu",
+    "memory": "%mem",
+    "mem": "%mem",
+    "pid": "pid",
+}
+
+
 def list_processes(sort_by: str = "cpu", limit: int = 20) -> ToolResult:
     """List running processes sorted by resource usage.
 
@@ -31,11 +39,16 @@ def list_processes(sort_by: str = "cpu", limit: int = 20) -> ToolResult:
         limit: Maximum number of processes to return
     """
     try:
-        cmd = ["ps", "aux", "--sort", f"-{sort_by}"]
+        sort_field = _PS_SORT_FIELDS.get(str(sort_by or "cpu").lower())
+        if not sort_field:
+            allowed = ", ".join(sorted(_PS_SORT_FIELDS))
+            return ToolResult(success=False, data="", error=f"Unsupported sort_by: {sort_by}. Allowed: {allowed}")
+
+        cmd = ["ps", "aux", "--sort", f"-{sort_field}"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
         if result.returncode != 0:
-            return ToolResult(success=False, data="", error=result.stderr)
+            return ToolResult(success=False, data="", error=command_error(result))
 
         lines = result.stdout.strip().split("\n")
         header = lines[0]

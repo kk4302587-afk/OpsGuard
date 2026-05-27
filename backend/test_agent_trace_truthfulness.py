@@ -417,6 +417,306 @@ def test_read_tool_claim_without_execution_is_blocked() -> None:
     asyncio.run(scenario())
 
 
+def test_history_recall_can_reference_previous_tool_evidence() -> None:
+    async def scenario() -> None:
+        events: list[dict] = []
+        captured_user_content = ""
+
+        original_call_llm = graph.call_llm
+        original_get_all_tools = graph.tools_registry.get_all_tools_for_llm
+        original_log = graph.audit_logger.log
+        original_get_recent = graph.get_recent_tool_executions
+
+        async def fake_get_recent(session_id, *, limit=12, successful_only=False):
+            return [
+                {
+                    "tool_name": "system_overview",
+                    "tool_args": {},
+                    "status": "success",
+                    "result_summary": "memory used 88.2%, load average 2.1",
+                    "error": "",
+                    "timestamp": "2026-05-27T14:44:38",
+                },
+                {
+                    "tool_name": "health_check",
+                    "tool_args": {},
+                    "status": "success",
+                    "result_summary": "status warning, memory pressure detected",
+                    "error": "",
+                    "timestamp": "2026-05-27T14:44:39",
+                },
+                {
+                    "tool_name": "list_processes",
+                    "tool_args": {"sort_by": "memory", "limit": 20},
+                    "status": "success",
+                    "result_summary": "top process vscode-server",
+                    "error": "",
+                    "timestamp": "2026-05-27T14:44:40",
+                },
+            ]
+
+        async def fake_call_llm(messages, tools=None):
+            nonlocal captured_user_content
+            captured_user_content = messages[-1]["content"]
+            return {
+                "content": (
+                    "刚刚检测到的最大风险是内存压力偏高。"
+                    "上一轮 `system_overview` 显示内存使用 88.2%，"
+                    "`health_check` 给出 warning，`list_processes` 显示主要占用来自 vscode-server。"
+                ),
+                "tool_calls": [],
+            }
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        try:
+            graph.call_llm = fake_call_llm
+            graph.tools_registry.get_all_tools_for_llm = lambda: []
+            graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+            graph.get_recent_tool_executions = fake_get_recent
+
+            result = await graph.reasoning_node({
+                "session_id": "history-recall-evidence",
+                "user_message": "刚刚检测到的最大风险是什么？",
+                "send_to_client": capture_event,
+                "messages": [],
+                "risk_warning": "",
+                "knowledge_hint": "",
+                "recent_changes_hint": "",
+            })
+
+            assert result["final_response"].startswith("刚刚检测到的最大风险")
+            assert "历史工具执行证据" in captured_user_content
+            assert not any(
+                event["phase"] == "response"
+                and event["event_type"] == "failure"
+                and event.get("source") == "read_tool_truthfulness_guard"
+                for event in events
+            )
+        finally:
+            graph.call_llm = original_call_llm
+            graph.tools_registry.get_all_tools_for_llm = original_get_all_tools
+            graph.audit_logger.log = original_log
+            graph.get_recent_tool_executions = original_get_recent
+
+    asyncio.run(scenario())
+
+
+def test_read_tool_explanation_without_execution_is_allowed() -> None:
+    async def scenario() -> None:
+        events: list[dict] = []
+
+        original_call_llm = graph.call_llm
+        original_get_all_tools = graph.tools_registry.get_all_tools_for_llm
+        original_log = graph.audit_logger.log
+
+        async def fake_call_llm(messages, tools=None):
+            return {
+                "content": (
+                    "这只是操作含义说明，尚未执行 `read_file`。\n\n"
+                    "`read_file(filepath)` 用于读取指定文本文件内容；如果需要确认文件是否存在，"
+                    "我需要先调用只读工具获取真实结果。"
+                ),
+                "tool_calls": [],
+            }
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        try:
+            graph.call_llm = fake_call_llm
+            graph.tools_registry.get_all_tools_for_llm = lambda: []
+            graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+
+            result = await graph.reasoning_node({
+                "session_id": "read-tool-explanation",
+                "user_message": "请解释读取 /tmp/not-exist-opsguard 这个操作的含义",
+                "send_to_client": capture_event,
+                "messages": [],
+                "risk_warning": "",
+                "knowledge_hint": "",
+                "recent_changes_hint": "",
+            })
+
+            assert result["final_response"].startswith("这只是操作含义说明")
+            assert not any(
+                event["phase"] == "response"
+                and event["event_type"] == "failure"
+                and event.get("source") == "read_tool_truthfulness_guard"
+                for event in events
+            )
+        finally:
+            graph.call_llm = original_call_llm
+            graph.tools_registry.get_all_tools_for_llm = original_get_all_tools
+            graph.audit_logger.log = original_log
+
+    asyncio.run(scenario())
+
+
+def test_bare_read_request_fabricated_file_error_is_blocked() -> None:
+    async def scenario() -> None:
+        events: list[dict] = []
+        llm_calls = 0
+
+        original_call_llm = graph.call_llm
+        original_get_all_tools = graph.tools_registry.get_all_tools_for_llm
+        original_log = graph.audit_logger.log
+
+        async def fake_call_llm(messages, tools=None):
+            nonlocal llm_calls
+            llm_calls += 1
+            return {
+                "content": "结论：`read_file(\"/tmp/not-exist-opsguard\")` 返回 No such file or directory。",
+                "tool_calls": [],
+            }
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        try:
+            graph.call_llm = fake_call_llm
+            graph.tools_registry.get_all_tools_for_llm = lambda: []
+            graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+
+            result = await graph.reasoning_node({
+                "session_id": "bare-read-fabricated",
+                "user_message": "读取 /tmp/not-exist-opsguard",
+                "send_to_client": capture_event,
+                "messages": [],
+                "risk_warning": "",
+                "knowledge_hint": "",
+                "recent_changes_hint": "",
+            })
+
+            assert llm_calls == 2
+            assert result["final_response"].startswith("本次不能确认这些检查已经真实执行")
+            assert "No such file or directory" not in result["final_response"]
+            assert any(
+                event["phase"] == "response"
+                and event["event_type"] == "failure"
+                and event.get("source") == "read_tool_truthfulness_guard"
+                and "read_file" in event.get("observed", "")
+                for event in events
+            )
+        finally:
+            graph.call_llm = original_call_llm
+            graph.tools_registry.get_all_tools_for_llm = original_get_all_tools
+            graph.audit_logger.log = original_log
+
+    asyncio.run(scenario())
+
+
+def test_followup_append_completion_without_write_tool_is_blocked() -> None:
+    async def scenario() -> None:
+        events: list[dict] = []
+        llm_calls = 0
+
+        original_call_llm = graph.call_llm
+        original_get_all_tools = graph.tools_registry.get_all_tools_for_llm
+        original_log = graph.audit_logger.log
+
+        async def fake_call_llm(messages, tools=None):
+            nonlocal llm_calls
+            llm_calls += 1
+            return {
+                "content": "结论：已成功添加 hello! 中国软件杯! 到 `/tmp/opsguard-manual-test/sample.txt`，当前文件共 3 行。",
+                "tool_calls": [],
+            }
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        try:
+            graph.call_llm = fake_call_llm
+            graph.tools_registry.get_all_tools_for_llm = lambda: []
+            graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+
+            result = await graph.reasoning_node({
+                "session_id": "followup-append-fake-success",
+                "user_message": "继续追加hello! 中国软件杯!",
+                "send_to_client": capture_event,
+                "messages": [
+                    {"role": "user", "content": "在 /tmp/opsguard-manual-test/sample.txt 写入 hello_kiki"},
+                    {"role": "assistant", "content": "已通过工具写入 hello_kiki。"},
+                ],
+                "risk_warning": "",
+                "knowledge_hint": "",
+                "recent_changes_hint": "",
+            })
+
+            assert llm_calls == 2
+            assert result["final_response"].startswith("本次没有执行该写操作")
+            assert "已成功添加" not in result["final_response"]
+            assert any(
+                event["phase"] == "response"
+                and event["event_type"] == "failure"
+                and event.get("source") == "write_completion_guard"
+                for event in events
+            )
+        finally:
+            graph.call_llm = original_call_llm
+            graph.tools_registry.get_all_tools_for_llm = original_get_all_tools
+            graph.audit_logger.log = original_log
+
+    asyncio.run(scenario())
+
+
+def test_verification_claim_without_read_tool_is_blocked() -> None:
+    async def scenario() -> None:
+        events: list[dict] = []
+        llm_calls = 0
+
+        original_call_llm = graph.call_llm
+        original_get_all_tools = graph.tools_registry.get_all_tools_for_llm
+        original_log = graph.audit_logger.log
+
+        async def fake_call_llm(messages, tools=None):
+            nonlocal llm_calls
+            llm_calls += 1
+            return {
+                "content": "结论：验证成功！`/tmp/opsguard-manual-test/sample.txt` 当前内容完整、准确，共 3 行，54 字节。",
+                "tool_calls": [],
+            }
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        try:
+            graph.call_llm = fake_call_llm
+            graph.tools_registry.get_all_tools_for_llm = lambda: []
+            graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+
+            result = await graph.reasoning_node({
+                "session_id": "verification-fake-success",
+                "user_message": "执行验证操作",
+                "send_to_client": capture_event,
+                "messages": [
+                    {"role": "user", "content": "继续追加hello! 中国软件杯!"},
+                    {"role": "assistant", "content": "已成功添加 hello! 中国软件杯!。"},
+                ],
+                "risk_warning": "",
+                "knowledge_hint": "",
+                "recent_changes_hint": "",
+            })
+
+            assert llm_calls == 2
+            assert result["final_response"].startswith("本次不能确认这些检查已经真实执行")
+            assert "验证成功" not in result["final_response"]
+            assert any(
+                event["phase"] == "response"
+                and event["event_type"] == "failure"
+                and event.get("source") == "read_tool_truthfulness_guard"
+                for event in events
+            )
+        finally:
+            graph.call_llm = original_call_llm
+            graph.tools_registry.get_all_tools_for_llm = original_get_all_tools
+            graph.audit_logger.log = original_log
+
+    asyncio.run(scenario())
+
+
 def main() -> None:
     test_tool_result_failure_is_traced_as_failure()
     test_read_only_status_request_blocks_write_tool_choice()
@@ -425,6 +725,11 @@ def main() -> None:
     test_path_first_append_completion_claim_without_tool_is_blocked()
     test_planning_trace_evidence_is_chinese()
     test_read_tool_claim_without_execution_is_blocked()
+    test_history_recall_can_reference_previous_tool_evidence()
+    test_read_tool_explanation_without_execution_is_allowed()
+    test_bare_read_request_fabricated_file_error_is_blocked()
+    test_followup_append_completion_without_write_tool_is_blocked()
+    test_verification_claim_without_read_tool_is_blocked()
     print("agent trace truthfulness regression OK")
 
 

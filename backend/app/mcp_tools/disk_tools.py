@@ -3,8 +3,38 @@
 Atomic tools for disk space analysis and file management.
 """
 
+import re
 import subprocess
 from app.mcp_tools.process_tools import ToolResult, command_error
+
+
+_SIZE_RE = re.compile(r"^\s*(\d+)\s*([bBkKmMgGcCwW]?)(?:i?[bB])?\s*$")
+
+
+def _normalize_find_size(size: str) -> str | None:
+    """Normalize human-friendly size strings to GNU find -size suffixes."""
+    match = _SIZE_RE.match(str(size or ""))
+    if not match:
+        return None
+    number, unit = match.groups()
+    normalized_unit = {
+        "": "c",
+        "b": "c",
+        "B": "c",
+        "c": "c",
+        "C": "c",
+        "w": "w",
+        "W": "w",
+        "k": "k",
+        "K": "k",
+        "m": "M",
+        "M": "M",
+        "g": "G",
+        "G": "G",
+    }.get(unit)
+    if not normalized_unit:
+        return None
+    return f"{number}{normalized_unit}"
 
 
 def get_disk_usage(path: str = "/") -> ToolResult:
@@ -32,7 +62,11 @@ def find_large_files(path: str = "/", min_size: str = "100M", limit: int = 20) -
         limit: Maximum number of results
     """
     try:
-        cmd = ["find", path, "-type", "f", "-size", f"+{min_size}", "-exec", "ls", "-lh", "{}", ";"]
+        normalized_size = _normalize_find_size(min_size)
+        if not normalized_size:
+            return ToolResult(success=False, data="", error=f"Unsupported min_size: {min_size}")
+
+        cmd = ["find", path, "-type", "f", "-size", f"+{normalized_size}", "-exec", "ls", "-lh", "{}", ";"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             return ToolResult(success=False, data="", error=command_error(result))

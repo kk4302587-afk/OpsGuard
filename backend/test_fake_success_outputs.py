@@ -13,7 +13,7 @@ from types import SimpleNamespace
 os.chdir(Path(__file__).parent)
 
 from app.api import topology
-from app.mcp_tools import config_tools, firewall_tools, network_tools
+from app.mcp_tools import config_tools, disk_tools, firewall_tools, network_tools, process_tools
 
 
 def _result(returncode: int, stdout: str = "", stderr: str = "") -> SimpleNamespace:
@@ -29,6 +29,50 @@ def test_network_command_failure() -> None:
         assert "ss missing" in (result.error or "")
     finally:
         network_tools.subprocess.run = original
+
+
+def test_list_processes_maps_friendly_sort_names() -> None:
+    original = process_tools.subprocess.run
+    calls = []
+    try:
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return _result(0, stdout="USER PID %CPU %MEM COMMAND\nroot 1 0.0 0.1 init\n")
+
+        process_tools.subprocess.run = fake_run
+
+        assert process_tools.list_processes(sort_by="cpu").success
+        assert calls[-1] == ["ps", "aux", "--sort", "-%cpu"]
+
+        assert process_tools.list_processes(sort_by="memory").success
+        assert calls[-1] == ["ps", "aux", "--sort", "-%mem"]
+
+        assert process_tools.list_processes(sort_by="pid").success
+        assert calls[-1] == ["ps", "aux", "--sort", "-pid"]
+    finally:
+        process_tools.subprocess.run = original
+
+
+def test_list_processes_rejects_unknown_sort_name() -> None:
+    result = process_tools.list_processes(sort_by="rss")
+    assert not result.success
+    assert "Unsupported sort_by" in (result.error or "")
+
+
+def test_find_large_files_normalizes_uppercase_kilobytes() -> None:
+    original = disk_tools.subprocess.run
+    calls = []
+    try:
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return _result(0, stdout="")
+
+        disk_tools.subprocess.run = fake_run
+        result = disk_tools.find_large_files("/tmp", min_size="1KB", limit=5)
+        assert result.success
+        assert calls[-1][:6] == ["find", "/tmp", "-type", "f", "-size", "+1k"]
+    finally:
+        disk_tools.subprocess.run = original
 
 
 def test_config_syntax_invalid_is_explicit() -> None:
@@ -102,6 +146,9 @@ def test_topology_marks_inferred_edges() -> None:
 
 def main() -> None:
     test_network_command_failure()
+    test_list_processes_maps_friendly_sort_names()
+    test_list_processes_rejects_unknown_sort_name()
+    test_find_large_files_normalizes_uppercase_kilobytes()
     test_config_syntax_invalid_is_explicit()
     test_firewalld_reload_failure_is_not_success()
     test_topology_marks_inferred_edges()
