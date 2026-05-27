@@ -364,6 +364,59 @@ def test_planning_trace_evidence_is_chinese() -> None:
     asyncio.run(scenario())
 
 
+def test_read_tool_claim_without_execution_is_blocked() -> None:
+    async def scenario() -> None:
+        events: list[dict] = []
+        llm_calls = 0
+
+        original_call_llm = graph.call_llm
+        original_get_all_tools = graph.tools_registry.get_all_tools_for_llm
+        original_log = graph.audit_logger.log
+
+        async def fake_call_llm(messages, tools=None):
+            nonlocal llm_calls
+            llm_calls += 1
+            return {
+                "content": "结论：`check_port(22)` 返回 sshd 正在监听，`get_service_status(\"sshd\")` 显示 active。",
+                "tool_calls": [],
+            }
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        try:
+            graph.call_llm = fake_call_llm
+            graph.tools_registry.get_all_tools_for_llm = lambda: []
+            graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+
+            result = await graph.reasoning_node({
+                "session_id": "read-tool-claim-block",
+                "user_message": "查看 22 端口是谁在监听，并分析关联进程",
+                "send_to_client": capture_event,
+                "messages": [],
+                "risk_warning": "",
+                "knowledge_hint": "",
+                "recent_changes_hint": "",
+            })
+
+            assert llm_calls == 2
+            assert result["final_response"].startswith("本次不能确认这些检查已经真实执行")
+            assert "check_port(22) 返回" not in result["final_response"]
+            assert any(
+                event["phase"] == "response"
+                and event["event_type"] == "failure"
+                and event.get("source") == "read_tool_truthfulness_guard"
+                and "check_port" in event.get("observed", "")
+                for event in events
+            )
+        finally:
+            graph.call_llm = original_call_llm
+            graph.tools_registry.get_all_tools_for_llm = original_get_all_tools
+            graph.audit_logger.log = original_log
+
+    asyncio.run(scenario())
+
+
 def main() -> None:
     test_tool_result_failure_is_traced_as_failure()
     test_read_only_status_request_blocks_write_tool_choice()
@@ -371,6 +424,7 @@ def main() -> None:
     test_file_rename_completion_claim_without_tool_is_blocked()
     test_path_first_append_completion_claim_without_tool_is_blocked()
     test_planning_trace_evidence_is_chinese()
+    test_read_tool_claim_without_execution_is_blocked()
     print("agent trace truthfulness regression OK")
 
 

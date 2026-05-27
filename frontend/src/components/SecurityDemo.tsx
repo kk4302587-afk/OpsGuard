@@ -212,15 +212,15 @@ function SecurityDemo() {
 
   return (
     <div style={{ padding: 24, height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
-      <Title level={4} style={{ color: 'var(--text-primary)' }}>
+      <Title level={4} style={{ color: 'var(--text-primary)', flexShrink: 0 }}>
         <SafetyOutlined style={{ marginRight: 8, color: 'var(--accent-green)' }} />
         安全攻防演示
       </Title>
-      <Paragraph style={{ color: 'var(--text-secondary)' }}>
+      <Paragraph style={{ color: 'var(--text-secondary)', flexShrink: 0 }}>
         测试 OpsGuard 的三层安全防御系统。尝试输入注入攻击或危险命令，观察系统如何识别和拦截。
       </Paragraph>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 390px', gap: 16, flex: 1, minHeight: 0 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 390px', gap: 16, flex: '1 1 0', minHeight: 0, overflow: 'hidden' }}>
         <div style={{ minWidth: 0, overflow: 'auto', paddingRight: 4 }}>
           {/* Input area */}
           <Card size="small" style={{ marginBottom: 16, background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
@@ -280,9 +280,11 @@ function SecurityDemo() {
         <section
           style={{
             minWidth: 0,
+            minHeight: 0,
             height: '100%',
             display: 'flex',
             flexDirection: 'column',
+            overflow: 'hidden',
             background: 'var(--bg-secondary)',
             border: '1px solid var(--border-color)',
             borderRadius: 6,
@@ -290,7 +292,7 @@ function SecurityDemo() {
             boxSizing: 'border-box',
           }}
         >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 12, flexShrink: 0 }}>
             <div style={{ minWidth: 0 }}>
               <Title level={5} style={{ color: 'var(--text-primary)', margin: 0 }}>
                 检测结果
@@ -309,7 +311,7 @@ function SecurityDemo() {
             value={resultFilter}
             onChange={setResultFilter}
             size="small"
-            style={{ width: '100%', marginBottom: 10 }}
+            style={{ width: '100%', marginBottom: 10, flexShrink: 0 }}
             options={[
               { value: 'all', label: `全部结果（${results.length}）` },
               { value: 'blocked', label: `只看拦截（${blockedCount}）` },
@@ -317,7 +319,18 @@ function SecurityDemo() {
               { value: 'allowed', label: `只看放行（${allowedCount}）` },
             ]}
           />
-          <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+          <div
+            className="security-results-scroll"
+            style={{
+              flex: '1 1 0',
+              minHeight: 0,
+              overflowY: 'auto',
+              overflowX: 'hidden',
+              paddingRight: 6,
+              scrollbarGutter: 'stable',
+              overscrollBehavior: 'contain',
+            }}
+          >
             <List
               dataSource={filteredResults.slice(0, 20)}
               locale={{ emptyText: results.length === 0 ? '点击左侧按钮或标签开始测试' : '当前筛选下暂无结果' }}

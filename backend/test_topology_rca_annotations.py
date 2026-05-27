@@ -125,6 +125,89 @@ def test_topology_annotations_from_incident_evidence() -> None:
     asyncio.run(scenario())
 
 
+def test_topology_latest_scope_uses_only_newest_incident() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "knowledge.db")
+            session_id = "topology-latest-session"
+            original_db = topology.get_knowledge_db_path
+            original_incident_db = incident_store.get_knowledge_db_path
+            try:
+                topology.get_knowledge_db_path = lambda: db_path
+                incident_store.get_knowledge_db_path = lambda: db_path
+
+                old_incident_id = await incident_store.create_incident(
+                    session_id=session_id,
+                    problem_statement="Old nginx check",
+                    source="test",
+                    db_path=db_path,
+                )
+                await incident_store.record_incident_event(
+                    incident_id=old_incident_id,
+                    session_id=session_id,
+                    phase="execution",
+                    event_type="success",
+                    title="old service status",
+                    detail="nginx inactive",
+                    evidence={
+                        "claim": "old nginx check",
+                        "evidence_type": "command",
+                        "source": "get_service_status",
+                        "observed": "nginx inactive",
+                        "confidence": "high",
+                        "execution_state": "executed",
+                    },
+                    metadata={"tool_name": "get_service_status", "tool_args": {"service": "nginx"}},
+                    timestamp="2026-05-20T00:00:00",
+                    db_path=db_path,
+                )
+                await incident_store.finalize_incident(
+                    incident_id=old_incident_id,
+                    final_summary="old done",
+                    db_path=db_path,
+                )
+
+                new_incident_id = await incident_store.create_incident(
+                    session_id=session_id,
+                    problem_statement="New redis check",
+                    source="test",
+                    db_path=db_path,
+                )
+                await incident_store.record_incident_event(
+                    incident_id=new_incident_id,
+                    session_id=session_id,
+                    phase="execution",
+                    event_type="success",
+                    title="new service status",
+                    detail="redis inactive",
+                    evidence={
+                        "claim": "new redis check",
+                        "evidence_type": "command",
+                        "source": "get_service_status",
+                        "observed": "redis inactive",
+                        "confidence": "high",
+                        "execution_state": "executed",
+                    },
+                    metadata={"tool_name": "get_service_status", "tool_args": {"service": "redis"}},
+                    timestamp="2026-05-21T00:00:00",
+                    db_path=db_path,
+                )
+
+                latest = await topology.build_topology_annotations(session_id, scope="latest")
+                whole_session = await topology.build_topology_annotations(session_id, scope="session")
+            finally:
+                topology.get_knowledge_db_path = original_db
+                incident_store.get_knowledge_db_path = original_incident_db
+
+        latest_targets = {item["target_id"] for item in latest}
+        session_targets = {item["target_id"] for item in whole_session}
+        assert "svc_redis" in latest_targets
+        assert "svc_nginx" not in latest_targets
+        assert {"svc_redis", "svc_nginx"}.issubset(session_targets)
+
+    asyncio.run(scenario())
+
+
 def test_apply_annotations_adds_highlights_and_inferred_edges() -> None:
     graph = {
         "nodes": [
@@ -176,10 +259,10 @@ def test_apply_annotations_adds_highlights_and_inferred_edges() -> None:
 
 def main() -> None:
     test_topology_annotations_from_incident_evidence()
+    test_topology_latest_scope_uses_only_newest_incident()
     test_apply_annotations_adds_highlights_and_inferred_edges()
     print("topology RCA annotations regression OK")
 
 
 if __name__ == "__main__":
     main()
-

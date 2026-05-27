@@ -23,7 +23,7 @@ function Sidebar() {
         icon={<PlusOutlined />}
         block
         onClick={createSession}
-        style={{ marginBottom: 16, borderRadius: 8, height: 36 }}
+        style={{ marginBottom: 16, borderRadius: 8, height: 42 }}
       >
         新建会话
       </Button>
@@ -35,7 +35,7 @@ function Sidebar() {
             onClick={() => setActiveSession(session.id)}
             className="session-item"
             style={{
-              padding: '10px 12px',
+              padding: '12px 14px',
               borderRadius: 8,
               marginBottom: 4,
               cursor: 'pointer',
@@ -58,12 +58,12 @@ function Sidebar() {
             }}
           >
             <Space size={8}>
-              <MessageOutlined style={{ color: session.id === activeSessionId ? 'var(--accent-green)' : 'var(--text-muted)', fontSize: 13 }} />
+              <MessageOutlined style={{ color: session.id === activeSessionId ? 'var(--accent-green)' : 'var(--text-muted)', fontSize: 15 }} />
               <Text
                 ellipsis
                 style={{
                   maxWidth: 120,
-                  fontSize: 13,
+                  fontSize: 14,
                   color: session.id === activeSessionId ? 'var(--text-primary)' : 'var(--text-secondary)',
                 }}
               >
@@ -75,7 +75,7 @@ function Sidebar() {
                 e.stopPropagation()
                 deleteSession(session.id)
               }}
-              style={{ color: 'var(--text-muted)', fontSize: 11, opacity: 0.5 }}
+              style={{ color: 'var(--text-muted)', fontSize: 13, opacity: 0.5 }}
             />
           </div>
         ))}
@@ -83,7 +83,7 @@ function Sidebar() {
         {sessions.length === 0 && (
           <div style={{ textAlign: 'center', padding: '40px 0' }}>
             <MessageOutlined style={{ fontSize: 24, color: 'var(--text-muted)', marginBottom: 8 }} />
-            <Text style={{ display: 'block', color: 'var(--text-muted)', fontSize: 12 }}>
+            <Text style={{ display: 'block', color: 'var(--text-muted)', fontSize: 13 }}>
               暂无会话
             </Text>
           </div>

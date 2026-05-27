@@ -1,12 +1,14 @@
 import { useEffect } from 'react'
-import { Space, Tag, Typography } from 'antd'
+import { Button, Space, Tag, Tooltip, Typography } from 'antd'
 import {
   DashboardOutlined,
   HddOutlined,
   CloudServerOutlined,
   SafetyCertificateOutlined,
+  ApartmentOutlined,
 } from '@ant-design/icons'
 import { useSystemStore } from '../stores/systemStore'
+import { useChatStore } from '../stores/chatStore'
 
 const { Text } = Typography
 
@@ -16,6 +18,7 @@ const { Text } = Typography
  */
 function StatusBar() {
   const { status, fetchStatus } = useSystemStore()
+  const activeSessionId = useChatStore((state) => state.activeSessionId)
 
   useEffect(() => {
     fetchStatus()
@@ -27,6 +30,10 @@ function StatusBar() {
     if (percent > 90) return 'var(--accent-red)'
     if (percent > 70) return 'var(--accent-yellow)'
     return 'var(--accent-green)'
+  }
+
+  const openTopology = () => {
+    window.dispatchEvent(new CustomEvent('opsguard:navigate', { detail: 'topology' }))
   }
 
   return (
@@ -42,23 +49,33 @@ function StatusBar() {
       </Space>
 
       <Space size="large">
+        <Tooltip title={activeSessionId ? '查看当前会话的故障关联图谱' : '查看系统故障关联图谱'}>
+          <Button
+            size="small"
+            icon={<ApartmentOutlined />}
+            onClick={openTopology}
+            className="topology-header-button"
+          >
+            故障图谱
+          </Button>
+        </Tooltip>
         <Space size={4}>
           <DashboardOutlined style={{ color: getStatusColor(status?.cpu?.percent || 0) }} />
-          <Text style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+          <Text style={{ fontFamily: 'var(--font-mono)', fontSize: 14 }}>
             CPU {status?.cpu?.percent || 0}%
           </Text>
         </Space>
 
         <Space size={4}>
           <CloudServerOutlined style={{ color: getStatusColor(status?.memory?.percent || 0) }} />
-          <Text style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+          <Text style={{ fontFamily: 'var(--font-mono)', fontSize: 14 }}>
             MEM {status?.memory?.percent || 0}%
           </Text>
         </Space>
 
         <Space size={4}>
           <HddOutlined style={{ color: getStatusColor(status?.disk?.percent || 0) }} />
-          <Text style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+          <Text style={{ fontFamily: 'var(--font-mono)', fontSize: 14 }}>
             DISK {status?.disk?.percent || 0}%
           </Text>
         </Space>

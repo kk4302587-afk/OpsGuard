@@ -120,6 +120,14 @@ interface ChatStore {
   disconnectWebSocket: () => void
 }
 
+const createClientId = (prefix: string) => {
+  if (globalThis.crypto?.randomUUID) {
+    return `${prefix}-${globalThis.crypto.randomUUID()}`
+  }
+
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
 const createDefaultProgressSteps = (): ProgressStep[] => [
   { title: '安全校验', status: 'process' },
   { title: '知识检索', status: 'wait' },
@@ -174,7 +182,7 @@ const buildProgressStepsFromTrace = (traceEvents: TraceEvent[]): ProgressStep[] 
 )
 
 const createProgressMessage = (traceEvents: TraceEvent[] = []): Message => ({
-  id: 'progress-' + crypto.randomUUID(),
+  id: createClientId('progress'),
   role: 'progress',
   content: '',
   timestamp: new Date().toISOString(),
@@ -364,7 +372,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const { ws: newWs } = get()
           if (newWs && newWs.readyState === WebSocket.OPEN) {
             const userMessage: Message = {
-              id: crypto.randomUUID(),
+              id: createClientId('user'),
               role: 'user',
               content,
               timestamp: new Date().toISOString(),
@@ -381,7 +389,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
 
     const userMessage: Message = {
-      id: crypto.randomUUID(),
+      id: createClientId('user'),
       role: 'user',
       content,
       timestamp: new Date().toISOString(),
@@ -425,7 +433,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               messages: [
                 ...state.messages,
                 {
-                  id: 'progress-' + crypto.randomUUID(),
+                  id: createClientId('progress'),
                   role: 'progress' as const,
                   content: '',
                   timestamp: new Date().toISOString(),
@@ -448,7 +456,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             messages: [
               ...state.messages.filter(m => m.role !== 'progress'),
               {
-                id: data.message_id || crypto.randomUUID(),
+                id: data.message_id || createClientId('assistant'),
                 role: 'assistant' as const,
                 content: data.content,
                 timestamp: data.timestamp || new Date().toISOString(),
@@ -536,7 +544,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             messages: [
               ...state.messages,
               {
-                id: crypto.randomUUID(),
+                id: createClientId('approval'),
                 role: 'assistant',
                 content: `[需要确认] ${data.command}\n风险等级: ${data.risk_level}${data.impact ? '\n影响评估: ' + data.impact : ''}`,
                 timestamp: new Date().toISOString(),
@@ -567,7 +575,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             messages: [
               ...state.messages.filter((m) => m.role !== 'progress'),
               {
-                id: crypto.randomUUID(),
+                id: createClientId('runbook'),
                 role: 'assistant',
                 content: `[Runbook建议] ${data.name}\n步骤数: ${data.step_count}\n版本: v${data.version || 1}\n健康: ${data.staleness_status || 'fresh'}\n成功/失败: ${data.success_count || 0}/${data.failure_count || 0}\n相似度: ${Math.round((data.match_ratio || 0) * 100)}%${data.last_failure_reason ? '\n最近失败: ' + data.last_failure_reason : ''}\n${data.description || ''}`,
                 timestamp: new Date().toISOString(),
@@ -582,7 +590,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             messages: [
               ...state.messages,
               {
-                id: crypto.randomUUID(),
+                id: createClientId('error'),
                 role: 'assistant',
                 content: `[错误] ${data.content}`,
                 timestamp: new Date().toISOString(),

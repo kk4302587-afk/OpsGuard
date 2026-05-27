@@ -1,8 +1,8 @@
 /* Markdown content styles for chat messages */
 
 .md-content {
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 15px;
+  line-height: 1.78;
   color: var(--text-primary);
   word-break: break-word;
 }
@@ -18,13 +18,13 @@
 }
 
 .md-content h3 {
-  font-size: 13px;
+  font-size: 15px;
   border-bottom: 1px solid var(--border-color);
   padding-bottom: 4px;
 }
 
 .md-content h4 {
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .md-content p {
@@ -43,7 +43,7 @@
 
 .md-content code {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   background: var(--bg-primary);
   padding: 1px 5px;
   border-radius: 3px;
@@ -68,7 +68,7 @@
   background: none;
   border: none;
   padding: 0;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.5;
 }
 

@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactECharts from 'echarts-for-react'
-import { Button, Spin, Empty, Typography, Space, Tag } from 'antd'
+import { Button, Spin, Empty, Typography, Space, Tag, Segmented } from 'antd'
 import {
   ApartmentOutlined,
   ApiOutlined,
+  ArrowLeftOutlined,
   ClusterOutlined,
   DatabaseOutlined,
   FileTextOutlined,
@@ -35,6 +36,7 @@ interface TopologyEdge {
 }
 
 type RcaRole = 'affected' | 'suspected_root_cause' | 'downstream_impact' | 'evidence'
+type TopologyViewMode = 'system' | 'latest' | 'session'
 
 interface TopologyAnnotation {
   target_id: string
@@ -107,6 +109,15 @@ const categoryIcons: Record<string, JSX.Element> = {
   log: <DatabaseOutlined />,
 }
 
+const categoryShapeLabels: Record<string, string> = {
+  service: '圆角方块',
+  process: '圆形',
+  port: '菱形',
+  config: '方块',
+  remote: '三角形',
+  log: '图钉',
+}
+
 /**
  * Fault correlation topology graph using ECharts.
  * Visualizes relationships between processes, ports, services, configs.
@@ -116,11 +127,20 @@ function TopologyGraph() {
   const [data, setData] = useState<TopologyData | null>(null)
   const [loading, setLoading] = useState(false)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-  const [showAllNodes, setShowAllNodes] = useState(false)
+  const [showAllNodes, setShowAllNodes] = useState(true)
   const [enabledCategories, setEnabledCategories] = useState<string[]>([])
+  const [chartResetKey, setChartResetKey] = useState(0)
+  const [viewMode, setViewMode] = useState<TopologyViewMode>('system')
+  const requestSeq = useRef(0)
 
   useEffect(() => {
     fetchTopology()
+  }, [activeSessionId, viewMode])
+
+  useEffect(() => {
+    if (viewMode !== 'system') {
+      setViewMode('system')
+    }
   }, [activeSessionId])
 
   const categoryMap = useMemo(() => {
@@ -214,6 +234,13 @@ function TopologyGraph() {
     { affected: 0, suspected_root_cause: 0, downstream_impact: 0, evidence: 0 }
   ), [data])
 
+  const visibleCategoryCounts = useMemo(() => (
+    displayedNodes.reduce<Record<string, number>>((acc, node) => {
+      acc[node.category] = (acc[node.category] || 0) + 1
+      return acc
+    }, {})
+  ), [displayedNodes])
+
   const hasFaultEvidence = useMemo(() => (
     Boolean(
       (data?.annotations?.length || 0) > 0 ||
@@ -222,13 +249,21 @@ function TopologyGraph() {
   ), [data])
 
   const fetchTopology = async () => {
+    const requestId = requestSeq.current + 1
+    requestSeq.current = requestId
     setLoading(true)
     try {
-      const endpoint = activeSessionId ? `/api/topology/graph/${activeSessionId}` : '/api/topology/graph'
+      const endpoint = (
+        activeSessionId && viewMode !== 'system'
+          ? `/api/topology/graph/${activeSessionId}?scope=${viewMode === 'latest' ? 'latest' : 'session'}`
+          : '/api/topology/graph'
+      )
       const res = await fetch(endpoint)
       if (res.ok) {
         const result = await res.json()
+        if (requestId !== requestSeq.current) return
         setData(result)
+        setSelectedNodeId(null)
         const categoryNames = (result.categories || []).map((category: { name: string }) => category.name)
         setEnabledCategories((current) => (
           current.length > 0 ? current.filter((name) => categoryNames.includes(name)) : categoryNames
@@ -237,7 +272,9 @@ function TopologyGraph() {
     } catch (err) {
       console.error('Failed to fetch topology:', err)
     } finally {
-      setLoading(false)
+      if (requestId === requestSeq.current) {
+        setLoading(false)
+      }
     }
   }
 
@@ -287,6 +324,18 @@ function TopologyGraph() {
     if (params.dataType === 'node' && params.data?.id) {
       setSelectedNodeId(params.data.id)
     }
+  }
+
+  const resetView = () => {
+    setViewMode('system')
+    setSelectedNodeId(null)
+    setShowAllNodes(true)
+    setEnabledCategories(data?.categories.map((category) => category.name) || [])
+    setChartResetKey((value) => value + 1)
+  }
+
+  const returnToChat = () => {
+    window.dispatchEvent(new CustomEvent('opsguard:navigate', { detail: 'chat' }))
   }
 
   const option = {
@@ -435,11 +484,13 @@ function TopologyGraph() {
             <NodeIndexOutlined style={{ marginRight: 4 }} />
             展示 {displayedNodes.length}/{data.nodes.length} 节点
           </Tag>
-          {activeSessionId && (
+          {viewMode !== 'system' && activeSessionId && (
             <Tag color={(data.annotations?.length || 0) > 0 ? 'orange' : 'default'}>
               根因线索 {data.annotations?.length || 0}
             </Tag>
           )}
+          {viewMode === 'latest' && <Tag color="blue">本轮请求</Tag>}
+          {viewMode === 'session' && <Tag color="purple">整个会话</Tag>}
           {hasFaultEvidence ? (
             <>
               <Tag color={roleCounts.suspected_root_cause > 0 ? 'orange' : 'default'}>疑似根因 {roleCounts.suspected_root_cause}</Tag>
@@ -450,15 +501,34 @@ function TopologyGraph() {
             <Tag color="cyan">系统拓扑视图</Tag>
           )}
         </Space>
-        <Button icon={<ReloadOutlined />} onClick={fetchTopology} loading={loading}>
-          刷新
-        </Button>
+        <Space>
+          <Segmented
+            size="small"
+            value={viewMode}
+            onChange={(value) => setViewMode(value as TopologyViewMode)}
+            options={[
+              { label: '系统拓扑', value: 'system' },
+              { label: '本轮请求', value: 'latest', disabled: !activeSessionId },
+              { label: '整个会话', value: 'session', disabled: !activeSessionId },
+            ]}
+          />
+          <Button icon={<ArrowLeftOutlined />} onClick={returnToChat}>
+            返回对话
+          </Button>
+          <Button onClick={resetView}>
+            恢复默认
+          </Button>
+          <Button icon={<ReloadOutlined />} onClick={fetchTopology} loading={loading}>
+            刷新
+          </Button>
+        </Space>
       </div>
 
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         {/* Graph */}
         <div style={{ flex: 1, padding: 8, minWidth: 0 }}>
           <ReactECharts
+            key={chartResetKey}
             option={option}
             style={{ height: '100%', width: '100%' }}
             opts={{ renderer: 'canvas' }}
@@ -480,20 +550,24 @@ function TopologyGraph() {
             {hasFaultEvidence ? (
               <div>
                 <Text strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: 8 }}>
-                  故障状态
+                  颜色含义
                 </Text>
                 {([
-                  ['受影响', roleColors.affected],
-                  ['疑似根因', roleColors.suspected_root_cause],
-                  ['影响范围', roleColors.downstream_impact],
-                  ['证据关联', roleColors.evidence],
-                  ['背景节点', backgroundNodeColor],
-                ] as Array<[string, string]>).map(([label, color]) => (
+                  ['受影响', roleColors.affected, roleCounts.affected],
+                  ['疑似根因', roleColors.suspected_root_cause, roleCounts.suspected_root_cause],
+                  ['影响范围', roleColors.downstream_impact, roleCounts.downstream_impact],
+                  ['证据关联', roleColors.evidence, roleCounts.evidence],
+                  ['背景节点', backgroundNodeColor, displayedNodes.filter((node) => !node.rca_role && !node.annotations?.length && !node.highlight).length],
+                ] as Array<[string, string, number]>).map(([label, color, count]) => (
                   <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                     <span style={{ width: 10, height: 10, borderRadius: 10, background: color, display: 'inline-block' }} />
-                    <Text style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{label}</Text>
+                    <Text style={{ fontSize: 12, color: 'var(--text-secondary)', flex: 1 }}>{label}</Text>
+                    <Text style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{count}</Text>
                   </div>
                 ))}
+                <Text style={{ display: 'block', marginTop: 6, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                  当前故障视图中，颜色只表示证据角色，不表示节点类型。
+                </Text>
               </div>
             ) : (
               <div>
@@ -501,46 +575,59 @@ function TopologyGraph() {
                   当前视图
                 </Text>
                 <Text style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
-                  当前没有会话故障证据，图中颜色表示节点类型；发起一次诊断后，页面会切换为故障关联视图。
+                  当前展示系统拓扑，图中颜色表示节点类型；选择“本轮请求”或“整个会话”后，会叠加诊断证据形成故障关联图谱。
                 </Text>
               </div>
             )}
 
             <div>
               <Text strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: 8 }}>
-                节点类型
+                {hasFaultEvidence ? '形状与筛选' : '节点类型'}
               </Text>
               <Space wrap size={[6, 8]}>
                 {data.categories.map((category) => {
                   const checked = enabledCategories.includes(category.name)
+                  const categoryColor = hasFaultEvidence ? backgroundNodeColor : (categoryColors[category.name] || backgroundNodeColor)
                   return (
                     <Tag.CheckableTag
                       key={category.name}
                       checked={checked}
                       onChange={() => toggleCategory(category.name)}
                       style={{
-                        border: `1px solid ${checked ? (categoryColors[category.name] || 'var(--border-color)') : 'var(--border-color)'}`,
+                        border: `1px solid ${checked ? categoryColor : 'var(--border-color)'}`,
                         borderRadius: 4,
                         color: checked ? 'var(--text-primary)' : 'var(--text-muted)',
-                        background: checked ? `${categoryColors[category.name] || '#00d4aa'}22` : 'transparent',
+                        background: checked ? `${categoryColor}22` : 'transparent',
                       }}
                     >
                       <span
                         style={{
                           width: 7,
                           height: 7,
-                          borderRadius: 7,
-                          background: categoryColors[category.name] || backgroundNodeColor,
+                          borderRadius: category.name === 'process' ? 7 : category.name === 'service' ? 2 : 0,
+                          transform: category.name === 'port' ? 'rotate(45deg)' : undefined,
+                          clipPath: category.name === 'remote' ? 'polygon(50% 0, 100% 100%, 0 100%)' : undefined,
+                          background: categoryColor,
                           display: 'inline-block',
                           marginRight: 5,
                         }}
                       />
                       <span style={{ marginRight: 4 }}>{categoryIcons[category.name] || <HddOutlined />}</span>
                       {categoryLabels[category.name] || category.name}
+                      {hasFaultEvidence && (
+                        <span style={{ marginLeft: 4, color: 'var(--text-muted)', fontSize: 11 }}>
+                          {visibleCategoryCounts[category.name] || 0}
+                        </span>
+                      )}
                     </Tag.CheckableTag>
                   )
                 })}
               </Space>
+              {hasFaultEvidence && (
+                <Text style={{ display: 'block', marginTop: 8, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                  节点类型由形状区分：{data.categories.map((category) => `${categoryLabels[category.name] || category.name}=${categoryShapeLabels[category.name] || '默认形状'}`).join('，')}。
+                </Text>
+              )}
             </div>
 
             <div>
@@ -622,7 +709,7 @@ function TopologyGraph() {
       {/* Footer hint */}
       <div style={{ padding: '8px 24px', borderTop: '1px solid var(--border-color)' }}>
         <Text style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-          拖拽节点调整布局 / 滚轮缩放 / 点击节点查看证据 / 默认展示高相关节点
+          拖拽节点调整布局 / 滚轮缩放 / 点击节点查看证据 / 默认进入系统拓扑视图
         </Text>
       </div>
     </div>

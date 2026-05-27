@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 import aiosqlite
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from app.database import get_audit_db_path, get_knowledge_db_path
@@ -195,7 +195,10 @@ async def get_topology_graph():
 
 
 @router.get("/graph/{session_id}")
-async def get_topology_with_diagnosis(session_id: str):
+async def get_topology_with_diagnosis(
+    session_id: str,
+    scope: str = Query(default="session", pattern="^(latest|session)$"),
+):
     """Get topology graph merged with dynamic diagnosis findings for a session."""
     base = await get_topology_graph()
 
@@ -227,7 +230,7 @@ async def get_topology_with_diagnosis(session_id: str):
             if node["id"] in updates.fault_node_ids:
                 node["highlight"] = True
 
-    annotations = await build_topology_annotations(session_id)
+    annotations = await build_topology_annotations(session_id, scope=scope)
     _apply_annotations(base, annotations)
 
     return base
@@ -274,10 +277,10 @@ def add_diagnosis_finding(session_id: str, nodes: list[dict], edges: list[dict],
         existing.fault_node_ids.extend(fault_ids)
 
 
-async def build_topology_annotations(session_id: str) -> list[dict]:
+async def build_topology_annotations(session_id: str, scope: str = "session") -> list[dict]:
     """Build topology RCA annotations from persisted trace/incident evidence."""
-    events = await _load_incident_trace_events(session_id)
-    if not events:
+    events = await _load_incident_trace_events(session_id, latest_only=(scope == "latest"))
+    if not events and scope != "latest":
         events = await _load_audit_trace_events(session_id)
 
     annotations: list[TopologyAnnotation] = []
@@ -297,20 +300,43 @@ async def build_topology_annotations(session_id: str) -> list[dict]:
     return [annotation.dict() for annotation in annotations]
 
 
-async def _load_incident_trace_events(session_id: str) -> list[dict]:
+async def _load_incident_trace_events(session_id: str, latest_only: bool = False) -> list[dict]:
     """Load incident events for a session, preserving evidence if available."""
     async with aiosqlite.connect(get_knowledge_db_path()) as db:
         await ensure_incident_schema(db)
         db.row_factory = aiosqlite.Row
+        latest_incident_id = None
+        if latest_only:
+            incident_cursor = await db.execute(
+                """
+                SELECT id
+                FROM incidents
+                WHERE session_id = ?
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            )
+            incident_row = await incident_cursor.fetchone()
+            latest_incident_id = incident_row["id"] if incident_row else None
+            if not latest_incident_id:
+                return []
+
+        where_clause = "session_id = ?"
+        params: tuple[Any, ...] = (session_id,)
+        if latest_incident_id:
+            where_clause = "session_id = ? AND incident_id = ?"
+            params = (session_id, latest_incident_id)
+
         cursor = await db.execute(
-            """
+            f"""
             SELECT event_type, phase, title, detail, evidence, metadata, timestamp
             FROM incident_events
-            WHERE session_id = ?
+            WHERE {where_clause}
             ORDER BY timestamp ASC, id ASC
             LIMIT 300
             """,
-            (session_id,),
+            params,
         )
         rows = await cursor.fetchall()
     return [_row_event(row) for row in rows]
@@ -358,15 +384,21 @@ def _annotations_from_event(event: dict) -> list[TopologyAnnotation]:
     event_type = str(event.get("event_type") or "")
     failed = execution_state == "failed" or event_type == "failure"
     annotations: list[TopologyAnnotation] = []
+    seen_annotations: set[tuple[str, str, str, str]] = set()
 
     def add(target_id: str, target_type: str, role: str, summary: str, inferred: bool = False) -> None:
         if not target_id:
             return
+        summary_text = _compact(summary)
+        key = (target_id, target_type, role, summary_text)
+        if key in seen_annotations:
+            return
+        seen_annotations.add(key)
         annotations.append(TopologyAnnotation(
             target_id=target_id,
             target_type=target_type,
             rca_role=role,
-            evidence_summary=_compact(summary),
+            evidence_summary=summary_text,
             source=source or "trace",
             phase=phase,
             event_type=event_type,
@@ -396,6 +428,9 @@ def _annotations_from_event(event: dict) -> list[TopologyAnnotation]:
                 add(f"svc_{svc}", "service", "suspected_root_cause", observed, inferred=True)
 
     if source in {"get_listening_ports", "check_port"}:
+        explicit_port = tool_args.get("port")
+        if explicit_port not in (None, ""):
+            add(f"port_{explicit_port}", "port", "downstream_impact", observed)
         for port in _extract_ports(observed):
             add(f"port_{port}", "port", "downstream_impact", observed)
         for pid, name in _extract_processes(observed):
@@ -403,6 +438,9 @@ def _annotations_from_event(event: dict) -> list[TopologyAnnotation]:
             add(target_id, "process", "downstream_impact", observed)
 
     if source in {"get_process_detail", "list_processes"}:
+        explicit_pid = tool_args.get("pid")
+        if explicit_pid not in (None, ""):
+            add(f"proc_{explicit_pid}", "process", "evidence", observed)
         for pid, name in _extract_processes(observed):
             target_id = f"proc_{pid}" if pid else f"proc_{_safe_id(name)}"
             add(target_id, "process", "evidence", observed)

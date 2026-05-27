@@ -347,6 +347,7 @@ async def reasoning_node(state: AgentState) -> dict:
     write_tools_called = 0  # Count of WRITE/DESTRUCTIVE tools genuinely invoked this turn
     write_tools_succeeded = 0
     write_tool_failures: list[str] = []
+    executed_tools_this_turn: set[str] = set()
     current_turn_tool_count = 0
     hallucination_retry_done = False  # Guard so we only retry once
 
@@ -541,6 +542,7 @@ async def reasoning_node(state: AgentState) -> dict:
 
                     current_turn_tool_count += 1
                     result = tool_def.function(**tool_args)
+                    executed_tools_this_turn.add(tool_name)
                     result_success = bool(getattr(result, "success", True))
                     result_error = getattr(result, "error", None)
                     if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
@@ -659,6 +661,74 @@ async def reasoning_node(state: AgentState) -> dict:
             # was actually called this turn, force one retry with an explicit reminder.
             final_content = llm_response.get("content", "") or ""
             has_write_completion_claim = _has_write_intent(user_message) and _claims_write_completion(final_content)
+            unsupported_tool_claims = _unsupported_tool_claims(final_content, executed_tools_this_turn)
+            if unsupported_tool_claims:
+                claim_summary = ", ".join(unsupported_tool_claims[:5])
+                if hallucination_retry_done:
+                    blocked_claim = final_content
+                    final_content = (
+                        "本次不能确认这些检查已经真实执行。\n\n"
+                        f"原因：回复中提到了工具或检查 `{claim_summary}`，但本轮推理链路没有对应的真实工具执行记录。\n\n"
+                        "为避免把未验证内容当作事实，系统已阻断该回复。请重新发起诊断，或要求我先调用对应只读工具获取证据。"
+                    )
+                    llm_response["content"] = final_content
+                    await audit_logger.log(
+                        session_id,
+                        AuditPhase.RESPONSE,
+                        AuditEventType.FAILURE,
+                        "真实性守卫: 回复引用未执行的只读工具，已阻断最终回复",
+                        {"unsupported_tool_claims": unsupported_tool_claims, "original_response": blocked_claim[:500]},
+                    )
+                    await send_to_client(trace_event(
+                        phase="response",
+                        event_type="failure",
+                        content="已阻断未验证的工具检查声明，改为安全回复",
+                        evidence=build_evidence(
+                            claim="模型回复引用了本轮未真实执行的工具检查",
+                            evidence_type="command",
+                            source="read_tool_truthfulness_guard",
+                            observed=claim_summary,
+                            confidence="high",
+                            execution_state="failed",
+                            failure_reason="回复中的工具名没有对应的真实执行事件",
+                            next_check="请先调用对应只读工具，再基于工具结果生成回复。",
+                        ),
+                    ))
+                    break
+                hallucination_retry_done = True
+                await audit_logger.log(
+                    session_id,
+                    AuditPhase.RESPONSE,
+                    AuditEventType.FAILURE,
+                    "真实性守卫: 回复引用未执行的只读工具，强制重试",
+                    {"unsupported_tool_claims": unsupported_tool_claims, "original_response": final_content[:500]},
+                )
+                await send_to_client(trace_event(
+                    phase="response",
+                    event_type="failure",
+                    content=f"⚠️ 检测到回复引用未真实执行的工具检查：{claim_summary}，已强制重新分析",
+                    evidence=build_evidence(
+                        claim="模型回复引用了本轮未真实执行的工具检查",
+                        evidence_type="command",
+                        source="read_tool_truthfulness_guard",
+                        observed=claim_summary,
+                        confidence="high",
+                        execution_state="failed",
+                        failure_reason="回复中的工具名没有对应的真实执行事件",
+                        next_check="请调用对应只读工具，或明确说明尚未执行这些检查。",
+                    ),
+                ))
+                messages.append({"role": "assistant", "content": final_content})
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[系统强制纠正] 你上一条回复引用了工具或检查结果："
+                        f"{claim_summary}，但本轮没有这些工具的真实执行记录。"
+                        "请重新处理：如果需要这些事实，必须立即调用对应只读工具；"
+                        "如果不调用工具，就必须明确说明尚未执行检查，不能写成已检查或已返回。"
+                    ),
+                })
+                continue
             if (
                 write_tools_called == 0
                 and has_write_completion_claim
@@ -1723,3 +1793,37 @@ def _claims_write_completion(text: str) -> bool:
     if not text:
         return False
     return any(pat in text for pat in _WRITE_COMPLETION_PATTERNS)
+
+
+def _unsupported_tool_claims(text: str, executed_tools: set[str]) -> list[str]:
+    """Return tool names mentioned in a final reply without same-turn evidence.
+
+    This guards read-only truthfulness: a final answer may summarize only tools
+    that were actually invoked in the current turn. Historical context can still
+    be discussed in plain language, but not as if a fresh tool check happened.
+    """
+    if not text:
+        return []
+
+    import re
+
+    mentioned: list[str] = []
+    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\s*\(", text):
+        name = match.group(1)
+        if tools_registry.get_tool(name) and name not in mentioned:
+            mentioned.append(name)
+
+    evidence_words = (
+        "返回", "显示", "确认", "发现", "结果", "执行成功", "执行失败",
+        "报错", "监听", "active", "inactive", "failed", "证据", "关键证据",
+    )
+    # Backtick-only mentions are common in this UI. Treat them as tool-result
+    # claims only when nearby wording looks like evidence, not a suggestion.
+    for match in re.finditer(r"`([A-Za-z_][A-Za-z0-9_]{2,})`", text):
+        name = match.group(1)
+        nearby = text[max(0, match.start() - 24): match.end() + 40]
+        if tools_registry.get_tool(name) and name not in mentioned:
+            if any(word in nearby for word in evidence_words):
+                mentioned.append(name)
+
+    return [name for name in mentioned if name not in executed_tools]

@@ -10,8 +10,8 @@
 }
 
 .status-header {
-  height: 48px;
-  min-height: 48px;
+  height: 56px;
+  min-height: 56px;
   padding: 0 var(--space-5);
   border-bottom: 1px solid var(--border-color);
   background: var(--glass-bg);
@@ -23,8 +23,8 @@
 
 /* Left navigation rail */
 .nav-rail {
-  width: 56px;
-  min-width: 56px;
+  width: 64px;
+  min-width: 64px;
   height: 100%;
   background: var(--bg-primary);
   border-right: 1px solid var(--border-color);
@@ -36,15 +36,15 @@
 }
 
 .nav-rail-item {
-  width: 36px;
-  height: 36px;
+  width: 42px;
+  height: 42px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--text-muted);
-  font-size: 16px;
+  font-size: 18px;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
 }
@@ -92,4 +92,17 @@
   border-left: 1px solid var(--border-color);
   background: var(--bg-primary);
   overflow-y: auto;
+}
+
+.topology-header-button {
+  height: 30px !important;
+  color: var(--text-secondary) !important;
+  border-color: var(--border-color-strong) !important;
+  background: var(--bg-elevated) !important;
+}
+
+.topology-header-button:hover {
+  color: var(--accent-green) !important;
+  border-color: rgba(52, 211, 153, 0.28) !important;
+  background: var(--accent-green-dim) !important;
 }

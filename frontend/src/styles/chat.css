@@ -32,7 +32,7 @@
 }
 
 .welcome-title {
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 600;
   color: var(--text-primary);
   margin-bottom: var(--space-2);
@@ -40,7 +40,7 @@
 }
 
 .welcome-subtitle {
-  font-size: 14px;
+  font-size: 15px;
   color: var(--text-muted);
   margin-bottom: var(--space-6);
 }
@@ -96,14 +96,14 @@
 
 /* Avatars */
 .message-avatar {
-  width: 28px;
-  height: 28px;
-  min-width: 28px;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
   border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
+  font-size: 14px;
   margin-top: 4px;
 }
 
@@ -119,7 +119,7 @@
 
 /* Message bubbles */
 .message-bubble {
-  max-width: 72%;
+  max-width: 76%;
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-md);
   line-height: 1.65;
@@ -148,7 +148,7 @@
 }
 
 .message-sender {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -156,12 +156,12 @@
 }
 
 .message-time {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-dim);
 }
 
 .msg-text {
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.7;
   color: var(--text-primary);
   font-family: var(--font-sans);
@@ -188,7 +188,7 @@
 .msg-approval-body code {
   display: block;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-primary);
   background: var(--bg-base);
   padding: var(--space-2) var(--space-3);
@@ -373,7 +373,7 @@
   border: none !important;
   box-shadow: none !important;
   font-family: var(--font-sans) !important;
-  font-size: 14px !important;
+  font-size: 15px !important;
   line-height: 1.6 !important;
   resize: none !important;
   padding: 2px 0 !important;

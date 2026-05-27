@@ -7,6 +7,11 @@ import subprocess
 from app.mcp_tools.process_tools import ToolResult, command_error
 
 
+_READ_ONLY_SERVICE_ALIASES = {
+    "ssh": ["sshd"],
+}
+
+
 def list_services(state: str | None = None) -> ToolResult:
     """List systemd services, optionally filtered by state.
 
@@ -32,9 +37,23 @@ def get_service_status(service: str) -> ToolResult:
     Args:
         service: Service name (e.g., "nginx", "sshd")
     """
+    service_candidates = [service]
+    service_candidates.extend(_READ_ONLY_SERVICE_ALIASES.get(service.replace(".service", ""), []))
+
     try:
-        cmd = ["systemctl", "status", service, "--no-pager"]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        last_result = None
+        for candidate in service_candidates:
+            cmd = ["systemctl", "status", candidate, "--no-pager"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            last_result = result
+            if result.returncode != 0 and "could not be found" in (result.stdout + result.stderr).lower():
+                continue
+            if candidate != service:
+                data = f"[service alias: {service} -> {candidate}]\n{result.stdout.strip()}"
+            else:
+                data = result.stdout.strip()
+            return ToolResult(success=True, data=data)
+        result = last_result
         if result.returncode != 0 and "could not be found" in (result.stdout + result.stderr).lower():
             return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())
@@ -116,9 +135,24 @@ def get_service_logs(service: str, lines: int = 50) -> ToolResult:
         lines: Number of log lines
     """
     lines = min(lines, 200)
+    service_candidates = [service]
+    service_candidates.extend(_READ_ONLY_SERVICE_ALIASES.get(service.replace(".service", ""), []))
+
     try:
-        cmd = ["journalctl", "-u", service, "--no-pager", "-n", str(lines)]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        last_result = None
+        for candidate in service_candidates:
+            cmd = ["journalctl", "-u", candidate, "--no-pager", "-n", str(lines)]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            last_result = result
+            if result.returncode != 0 and "could not be found" in (result.stdout + result.stderr).lower():
+                continue
+            if result.returncode != 0:
+                return ToolResult(success=False, data="", error=command_error(result))
+            data = result.stdout.strip()
+            if candidate != service:
+                data = f"[service alias: {service} -> {candidate}]\n{data}"
+            return ToolResult(success=True, data=data)
+        result = last_result
         if result.returncode != 0:
             return ToolResult(success=False, data="", error=command_error(result))
         return ToolResult(success=True, data=result.stdout.strip())

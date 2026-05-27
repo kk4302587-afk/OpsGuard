@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Tooltip } from 'antd'
 import {
   MessageOutlined,
@@ -41,6 +41,18 @@ const navItems = [
 function App() {
   const { pendingApproval, clearApproval } = useChatStore()
   const [activePage, setActivePage] = useState<PageKey>('chat')
+
+  useEffect(() => {
+    const handleNavigate = (event: Event) => {
+      const page = (event as CustomEvent<PageKey>).detail
+      if (navItems.some((item) => item.key === page)) {
+        setActivePage(page)
+      }
+    }
+
+    window.addEventListener('opsguard:navigate', handleNavigate)
+    return () => window.removeEventListener('opsguard:navigate', handleNavigate)
+  }, [])
 
   const renderContent = () => {
     switch (activePage) {
