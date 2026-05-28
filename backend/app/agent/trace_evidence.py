@@ -112,11 +112,15 @@ def tool_result_evidence(
 
     target = _target_from_args(tool_args)
     display_name = _display_tool_name(tool_name, tool_def)
-    default_claim = (
-        f"{display_name} 已对 {target} 执行完成"
-        if success
-        else f"{display_name} 对 {target} 执行失败"
-    )
+    risk_level = getattr(getattr(tool_def, "risk_level", None), "value", getattr(tool_def, "risk_level", ""))
+    if success and risk_level == "read":
+        default_claim = f"{display_name} 已返回 {target} 的只读结果"
+    else:
+        default_claim = (
+            f"{display_name} 已对 {target} 执行完成"
+            if success
+            else f"{display_name} 对 {target} 执行失败"
+        )
     return build_evidence(
         claim=claim or default_claim,
         evidence_type=evidence_type,
@@ -221,6 +225,7 @@ def _display_tool_name(name: str, tool_def: Any = None) -> str:
         "approval_manager": "审批管理器",
         "read_only_intent_guard": "只读意图保护",
         "write_completion_guard": "写操作真实性保护",
+        "fresh_evidence_guard": "实时证据保护",
         "BackupManager.backup_file": "备份管理器",
         "assess_impact": "影响评估",
         "runbook_executor": "Runbook执行器",

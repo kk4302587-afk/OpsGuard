@@ -204,11 +204,11 @@ const mergeMessagesPreservingRuntime = (
 }
 
 const traceKey = (event: TraceEvent): string => [
-  event.phase === 'input_received' ? 'input_received' : event.timestamp || '',
+  event.timestamp || '',
   event.phase || '',
   event.event_type || '',
   event.content || '',
-  event.phase === 'input_received' ? '' : event.source || '',
+  event.source || '',
 ].join('\u0000')
 
 const getTraceTimestamp = (event: TraceEvent) => event.timestamp || ''

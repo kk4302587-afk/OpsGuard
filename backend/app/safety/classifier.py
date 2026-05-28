@@ -10,7 +10,6 @@ Latency: ~20-50ms per inference on CPU
 """
 
 import json
-import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +36,7 @@ class PromptClassifier:
     def __init__(self):
         self._session = None  # ONNX InferenceSession
         self._tokenizer = None
+        self._np = None
         self._label_map: dict[int, str] = {0: "safe", 1: "injection"}
         self._available = False
         self._max_length = 512
@@ -61,6 +61,7 @@ class PromptClassifier:
             return
 
         try:
+            import numpy as np
             import onnxruntime as ort
 
             # Load ONNX model
@@ -94,11 +95,12 @@ class PromptClassifier:
                     raw_map = json.load(f)
                     self._label_map = {int(k): v for k, v in raw_map.items()}
 
+            self._np = np
             self._available = True
             logger.info(f"Prompt classifier loaded successfully from {onnx_path}")
 
         except ImportError as e:
-            logger.warning(f"onnxruntime or tokenizers not installed: {e}. Classifier disabled.")
+            logger.warning(f"numpy, onnxruntime, or tokenizers not installed: {e}. Classifier disabled.")
             if not settings.safety.classifier.fallback_on_error:
                 raise
         except Exception as e:
@@ -162,6 +164,10 @@ class PromptClassifier:
             return ClassifierResult(is_safe=True, confidence=0.0, label="safe_cjk")
 
         try:
+            np = self._np
+            if np is None:
+                return ClassifierResult(is_safe=True, confidence=0.0, label="safe")
+
             # Tokenize
             encoding = self._tokenizer.encode(text)
             input_ids = np.array([encoding.ids], dtype=np.int64)

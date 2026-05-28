@@ -46,7 +46,7 @@ interface TraceGroup {
   title: string
   startTime: string
   events: TraceEvidence[]
-  status: 'running' | 'success' | 'failure' | 'blocked' | 'corrected'
+  status: 'running' | 'success' | 'failure' | 'blocked' | 'corrected' | 'rejected'
 }
 
 /**
@@ -78,14 +78,98 @@ function TracePanel() {
 
     return groups.map((group) => {
       const response = [...group.events].reverse().find((event) => event.phase === 'response')
-      const failed = group.events.some((event) => event.event_type === 'failure' && !isNonFatalGuardEvent(event))
+      const rejected = group.events.some((event) => isApprovalRejectedEvent(event))
+      const failureIndexes = group.events
+        .map((event, index) => (isFatalFailureEvent(event) ? index : -1))
+        .filter((index) => index >= 0)
+      const latestFailureIndex = failureIndexes[failureIndexes.length - 1] ?? -1
+      const failed = failureIndexes.length > 0
+      const recovered = (
+        failed
+        && !!response
+        && isCompletionResponse(response)
+        && group.events.some((event, index) => (
+          index > latestFailureIndex && isOperationalSuccessEvent(event)
+        ))
+      )
       const blocked = group.events.some((event) => event.event_type === 'blocked')
       const corrected = group.events.some((event) => isNonFatalGuardEvent(event))
       return {
         ...group,
-        status: blocked ? 'blocked' : failed ? 'failure' : response?.event_type === 'success' ? 'success' : corrected ? 'corrected' : 'running',
+        status: blocked ? 'blocked' : rejected ? 'rejected' : failed && !recovered ? 'failure' : response?.event_type === 'success' ? 'success' : corrected ? 'corrected' : 'running',
       }
     })
+  }
+
+  const traceText = (event: TraceEvidence) => {
+    const metadataEvidence = event.metadata?.evidence as Record<string, unknown> | undefined
+    const metadataObserved = typeof metadataEvidence?.observed === 'string' ? metadataEvidence.observed : ''
+    const metadataClaim = typeof metadataEvidence?.claim === 'string' ? metadataEvidence.claim : ''
+    return [event.content, event.observed, event.claim, metadataObserved, metadataClaim]
+      .filter(Boolean)
+      .join(' ')
+  }
+
+  const isFatalFailureEvent = (event: TraceEvidence) => (
+    event.event_type === 'failure'
+    && !isNonFatalGuardEvent(event)
+    && !isApprovalRejectedEvent(event)
+  )
+
+  const isOperationalSuccessEvent = (event: TraceEvidence) => (
+    event.event_type === 'success'
+    && ['execution', 'verification', 'tool_call'].includes(event.phase)
+  )
+
+  const isCompletionResponse = (event: TraceEvidence) => {
+    if (event.phase !== 'response' || event.event_type !== 'success') return false
+    const text = traceText(event)
+    const cancellationMarkers = [
+      '操作已取消',
+      '未执行',
+      '未完成',
+      '未成功',
+      '没有成功',
+      '无法完成',
+      '不能确认',
+      '没有真实执行',
+    ]
+    const completionMarkers = [
+      '成功',
+      '已完成',
+      '操作完成',
+      '已执行',
+      '已复制',
+      '已写入',
+      '已创建',
+      '已删除',
+      '已移动',
+      '已重命名',
+      '已启动',
+      '已停止',
+      '已重启',
+      '内容完全一致',
+    ]
+    return completionMarkers.some((marker) => text.includes(marker))
+      && !cancellationMarkers.some((marker) => text.includes(marker))
+  }
+
+  const isApprovalRejectedEvent = (event: TraceEvidence) => {
+    const metadataEvidence = event.metadata?.evidence as Record<string, unknown> | undefined
+    const source = event.source || (typeof metadataEvidence?.source === 'string' ? metadataEvidence.source : '')
+    const failureReason = event.failure_reason || (typeof metadataEvidence?.failure_reason === 'string' ? metadataEvidence.failure_reason : '')
+    const observed = event.observed || (typeof metadataEvidence?.observed === 'string' ? metadataEvidence.observed : '')
+    const text = `${event.content || ''} ${failureReason} ${observed}`
+    return (
+      event.phase === 'approval_response'
+      && event.event_type === 'failure'
+      && source === 'approval_manager'
+      && (
+        text.includes('用户拒绝')
+        || text.includes('用户未批准')
+        || text.includes('审批超时')
+      )
+    )
   }
 
   const isNonFatalGuardEvent = (event: TraceEvidence) => {
@@ -223,6 +307,7 @@ function TracePanel() {
     const { phase, event_type: eventType } = event
 
     if (isNonFatalGuardEvent(event)) return <BulbOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
+    if (isApprovalRejectedEvent(event)) return <CloseCircleOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
     if (eventType === 'blocked') return <StopOutlined style={{ ...iconStyle, color: 'var(--accent-red)' }} />
     if (eventType === 'failure') return <CloseCircleOutlined style={{ ...iconStyle, color: 'var(--accent-red)' }} />
 
@@ -257,6 +342,7 @@ function TracePanel() {
 
   const getTraceEventColor = (event: TraceEvidence): string => {
     if (isNonFatalGuardEvent(event)) return 'orange'
+    if (isApprovalRejectedEvent(event)) return 'orange'
     return getEventColor(event.event_type)
   }
 
@@ -292,6 +378,7 @@ function TracePanel() {
       case 'failure': return 'red'
       case 'blocked': return 'red'
       case 'corrected': return 'orange'
+      case 'rejected': return 'orange'
       default: return 'blue'
     }
   }
@@ -302,6 +389,7 @@ function TracePanel() {
       case 'failure': return '失败'
       case 'blocked': return '已拦截'
       case 'corrected': return '已修正'
+      case 'rejected': return '已拒绝'
       default: return '进行中'
     }
   }
