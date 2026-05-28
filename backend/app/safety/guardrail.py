@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
+import re
 
 from loguru import logger
 
@@ -80,6 +81,22 @@ class SafetyGuardrail:
             layers_checked.append("classifier")
 
             if not classifier_result.is_safe:
+                if _is_bounded_operational_request(text):
+                    logger.warning(
+                        "Classifier flagged a bounded operational request; "
+                        "downgrading to advisory so approval policy can handle it "
+                        f"(confidence: {classifier_result.confidence:.2f})"
+                    )
+                    layers_checked.append("classifier_advisory")
+                    return SafetyCheckResult(
+                        is_safe=True,
+                        layers_checked=layers_checked,
+                        is_warning=True,
+                        detail=(
+                            "分类器提示存在风险，但请求具备明确受限目标；"
+                            "已交由后续审批策略处理。"
+                        ),
+                    )
                 logger.warning(
                     f"Input blocked by classifier (confidence: {classifier_result.confidence:.2f})"
                 )
@@ -123,3 +140,26 @@ class SafetyGuardrail:
             )
 
         return SafetyCheckResult(is_safe=True, layers_checked=["rule_engine"])
+
+
+def _is_bounded_operational_request(text: str) -> bool:
+    """Return True for scoped ops requests that should go to approval, not block.
+
+    This prevents the English prompt-injection classifier from hard-blocking
+    benign Chinese maintenance requests that contain many ASCII path/file
+    tokens, for example "清理 /tmp/x 下的临时文件，只删除 large.bin".
+    Obvious prompt-injection and mass-destructive phrases still stay blocked by
+    rules or by this guard returning False.
+    """
+    if not text:
+        return False
+    lowered = text.lower()
+    if re.search(r"(ignore previous|ignore all previous|system prompt|developer mode|jailbreak|dan mode)", lowered):
+        return False
+    if re.search(r"(rm\s+-rf|--no-preserve-root|/etc/passwd|/etc/shadow|/etc/sudoers|/boot)", lowered):
+        return False
+    if re.search(r"(所有|全部|整个|根目录|清空|all|everything|entire)", text, re.IGNORECASE):
+        return False
+    has_scoped_target = bool(re.search(r"(/tmp/|/var/tmp/|/var/lib/opsguard/|[A-Za-z0-9_.@+-]+\.[A-Za-z0-9_.@+-]+)", text))
+    has_ops_verb = bool(re.search(r"(清理|删除|移除|写入|追加|创建|添加|修改|复制|移动|改名|重命名|clean|delete|remove|write|append|create|add|modify|copy|move|rename)", text, re.IGNORECASE))
+    return has_scoped_target and has_ops_verb

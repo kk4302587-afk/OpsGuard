@@ -33,6 +33,9 @@ async def ensure_tool_execution_schema(db: aiosqlite.Connection) -> None:
         )
         """
     )
+    await _ensure_column(db, "tool_executions", "execution_state", "TEXT")
+    await _ensure_column(db, "tool_executions", "is_write", "INTEGER DEFAULT 0")
+    await _ensure_column(db, "tool_executions", "approval_granted", "INTEGER DEFAULT 0")
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_tool_executions_session_time ON tool_executions(session_id, timestamp)"
     )
@@ -52,6 +55,9 @@ async def record_tool_execution(
     status: str,
     result: Any = None,
     error: str | None = None,
+    execution_state: str | None = None,
+    is_write: bool | None = None,
+    approval_granted: bool | None = None,
 ) -> None:
     """Persist one real tool execution attempt.
 
@@ -68,6 +74,11 @@ async def record_tool_execution(
         error_text = error
         if not error_text and isinstance(result_dict, dict):
             error_text = result_dict.get("error")
+        normalized_risk = str(risk_level or "").lower()
+        normalized_status = str(status or "").lower()
+        state = execution_state or ("executed" if normalized_status == "success" else "failed")
+        write_flag = bool(is_write) if is_write is not None else normalized_risk in {"write", "destructive"}
+        approval_flag = bool(approval_granted) if approval_granted is not None else False
 
         async with aiosqlite.connect(get_knowledge_db_path()) as db:
             await ensure_tool_execution_schema(db)
@@ -75,8 +86,9 @@ async def record_tool_execution(
                 """
                 INSERT INTO tool_executions
                     (session_id, incident_id, call_id, tool_name, tool_args, risk_level,
-                     status, result_summary, error, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     status, result_summary, error, timestamp, execution_state, is_write,
+                     approval_granted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -89,6 +101,9 @@ async def record_tool_execution(
                     result_summary,
                     compact_observed(error_text, max_chars=500) if error_text else None,
                     datetime.now().isoformat(),
+                    state,
+                    1 if write_flag else 0,
+                    1 if approval_flag else 0,
                 ),
             )
             await db.commit()
@@ -114,7 +129,8 @@ async def get_recent_tool_executions(
         cursor = await db.execute(
             f"""
             SELECT id, session_id, incident_id, call_id, tool_name, tool_args,
-                   risk_level, status, result_summary, error, timestamp
+                   risk_level, status, result_summary, error, timestamp,
+                   execution_state, is_write, approval_granted
             FROM tool_executions
             {where}
             ORDER BY timestamp DESC, id DESC
@@ -168,7 +184,32 @@ def _row_to_execution(row: aiosqlite.Row) -> dict[str, Any]:
         "result_summary": row["result_summary"] or "",
         "error": row["error"] or "",
         "timestamp": row["timestamp"],
+        "execution_state": _row_get(row, "execution_state") or (
+            "executed" if row["status"] == "success" else "failed"
+        ),
+        "is_write": bool(_row_get(row, "is_write", 0)),
+        "approval_granted": bool(_row_get(row, "approval_granted", 0)),
     }
+
+
+async def _ensure_column(
+    db: aiosqlite.Connection,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    cursor = await db.execute(f"PRAGMA table_info({table_name})")
+    rows = await cursor.fetchall()
+    existing = {row[1] for row in rows}
+    if column_name not in existing:
+        await db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+
+
+def _row_get(row: aiosqlite.Row, key: str, default: Any = "") -> Any:
+    try:
+        return row[key]
+    except Exception:
+        return default
 
 
 def _json_loads(value: str | None, default: Any) -> Any:

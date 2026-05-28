@@ -225,6 +225,7 @@ def _display_tool_name(name: str, tool_def: Any = None) -> str:
         "approval_manager": "审批管理器",
         "read_only_intent_guard": "只读意图保护",
         "write_completion_guard": "写操作真实性保护",
+        "structured_final_response_guard": "结构化最终回复校验",
         "fresh_evidence_guard": "实时证据保护",
         "BackupManager.backup_file": "备份管理器",
         "assess_impact": "影响评估",

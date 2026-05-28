@@ -23,6 +23,11 @@ from app.agent.trace_evidence import (
     trace_event,
     verification_evidence,
 )
+from app.agent.final_response import (
+    generate_structured_final_reply,
+    make_tool_ledger_entry,
+    render_conservative_reply,
+)
 from app.agent.tool_executor import execute_tool, get_tools_for_llm
 from app.agent.tool_execution_store import (
     format_recent_tool_evidence,
@@ -336,16 +341,10 @@ async def reasoning_node(state: AgentState) -> dict:
     recent_changes_hint = state.get("recent_changes_hint", "")
     history_evidence_hint = ""
     history_recall_intent = _is_history_recall_intent(user_message)
-    historical_success_tools: set[str] = set()
     if history_recall_intent:
         try:
             recent_executions = await get_recent_tool_executions(session_id, limit=12)
             history_evidence_hint = format_recent_tool_evidence(recent_executions)
-            historical_success_tools = {
-                item.get("tool_name", "")
-                for item in recent_executions
-                if item.get("status") == "success"
-            }
         except Exception as e:
             logger.warning(f"Recent tool evidence lookup failed: {e}")
 
@@ -369,15 +368,11 @@ async def reasoning_node(state: AgentState) -> dict:
     all_tools = await get_tools_for_llm()
     max_iterations = 10
     iteration = 0
-    write_tools_called = 0  # Count of WRITE/DESTRUCTIVE tools genuinely invoked this turn
-    write_tools_succeeded = 0
-    write_tool_failures: list[str] = []
-    executed_tools_this_turn: set[str] = set()
-    read_tools_this_turn: set[str] = set()
     current_turn_tool_count = 0
-    hallucination_retry_done = False  # Guard so we only retry once
     guard_blocked_final_response = False
     approval_rejected_final_response = False
+    tool_ledger_this_turn: list[dict] = []
+    policy_compiled_tool_used = False
 
     if fresh_read_plan:
         preflight = await _execute_forced_read_tools(
@@ -388,24 +383,76 @@ async def reasoning_node(state: AgentState) -> dict:
             send_to_client=send_to_client,
         )
         current_turn_tool_count += preflight["tool_count"]
-        executed_tools_this_turn.update(preflight["executed_tools"])
-        read_tools_this_turn.update(preflight["read_tools"])
+        tool_ledger_this_turn.extend(preflight.get("tool_ledger", []))
 
     while iteration < max_iterations:
         iteration += 1
         llm_response = await call_llm(messages, tools=all_tools)
+
+        if not llm_response["tool_calls"] and not policy_compiled_tool_used:
+            compiled_tool_call = _compile_deterministic_tool_call(user_message)
+            if compiled_tool_call:
+                policy_compiled_tool_used = True
+                llm_response["tool_calls"] = [compiled_tool_call]
+                await send_to_client(trace_event(
+                    phase="planning",
+                    event_type="success",
+                    content=(
+                        "策略层已将高确定性运维意图编译为工具调用："
+                        f"{compiled_tool_call['name']}({json.dumps(compiled_tool_call['arguments'], ensure_ascii=False)})"
+                    ),
+                    evidence=build_evidence(
+                        claim="后端策略层已补全模型未发起的必要工具调用",
+                        evidence_type="user input",
+                        source="intent_policy_compiler",
+                        observed={
+                            "user_message": user_message,
+                            "tool_name": compiled_tool_call["name"],
+                            "tool_args": compiled_tool_call["arguments"],
+                        },
+                        confidence="high",
+                        execution_state="inferred",
+                    ),
+                ))
 
         if llm_response["tool_calls"]:
             for tool_call in llm_response["tool_calls"]:
                 tool_name = tool_call["name"]
                 tool_args = tool_call["arguments"]
                 tool_def = tools_registry.get_tool(tool_name)
+                call_id = tool_call.get("id", "") or f"{tool_name}_{iteration}_{uuid.uuid4().hex[:8]}"
 
                 if not tool_def:
+                    error_text = f"Unknown tool '{tool_name}'"
                     messages.append({"role": "assistant", "content": None, "tool_calls": [
-                        {"id": tool_call.get("id", ""), "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}
+                        {"id": call_id, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}
                     ]})
-                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": f"Error: Unknown tool '{tool_name}'"})
+                    messages.append({"role": "tool", "tool_call_id": call_id, "content": f"Error: {error_text}"})
+                    ledger_entry = make_tool_ledger_entry(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        risk_level="unknown",
+                        status="failure",
+                        result={"success": False, "data": "", "error": error_text},
+                        error=error_text,
+                        execution_state="failed",
+                        approval_granted=False,
+                    )
+                    tool_ledger_this_turn.append(ledger_entry)
+                    await record_tool_execution(
+                        session_id=session_id,
+                        incident_id=incident_id,
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        risk_level="unknown",
+                        status="failure",
+                        result={"success": False, "data": "", "error": error_text},
+                        error=error_text,
+                        execution_state="failed",
+                        approval_granted=False,
+                    )
                     continue
 
                 display_name = tool_def.display_name or tool_name
@@ -415,9 +462,34 @@ async def reasoning_node(state: AgentState) -> dict:
                         f"已阻断工具: {display_name}"
                     )
                     messages.append({"role": "assistant", "content": None, "tool_calls": [
-                        {"id": tool_call.get("id", ""), "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)}}
+                        {"id": call_id, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)}}
                     ]})
-                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": f"BLOCKED_READ_ONLY_INTENT: {block_reason}"})
+                    messages.append({"role": "tool", "tool_call_id": call_id, "content": f"BLOCKED_READ_ONLY_INTENT: {block_reason}"})
+                    ledger_entry = make_tool_ledger_entry(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        risk_level=tool_def.risk_level.value,
+                        status="blocked",
+                        result={"success": False, "data": "", "error": block_reason},
+                        error=block_reason,
+                        execution_state="skipped",
+                        approval_granted=False,
+                    )
+                    tool_ledger_this_turn.append(ledger_entry)
+                    await record_tool_execution(
+                        session_id=session_id,
+                        incident_id=incident_id,
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        risk_level=tool_def.risk_level.value,
+                        status="blocked",
+                        result={"success": False, "data": "", "error": block_reason},
+                        error=block_reason,
+                        execution_state="skipped",
+                        approval_granted=False,
+                    )
                     await audit_logger.log(
                         session_id,
                         AuditPhase.TOOL_CALL,
@@ -455,9 +527,34 @@ async def reasoning_node(state: AgentState) -> dict:
                     cmd_check = _guardrail.check_command(json.dumps(tool_args))
                     if not cmd_check.is_safe:
                         messages.append({"role": "assistant", "content": None, "tool_calls": [
-                            {"id": tool_call.get("id", ""), "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}
+                            {"id": call_id, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}
                         ]})
-                        messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": f"BLOCKED: {cmd_check.detail}"})
+                        messages.append({"role": "tool", "tool_call_id": call_id, "content": f"BLOCKED: {cmd_check.detail}"})
+                        ledger_entry = make_tool_ledger_entry(
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            risk_level=tool_def.risk_level.value,
+                            status="blocked",
+                            result={"success": False, "data": "", "error": cmd_check.detail},
+                            error=cmd_check.detail,
+                            execution_state="skipped",
+                            approval_granted=False,
+                        )
+                        tool_ledger_this_turn.append(ledger_entry)
+                        await record_tool_execution(
+                            session_id=session_id,
+                            incident_id=incident_id,
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            risk_level=tool_def.risk_level.value,
+                            status="blocked",
+                            result={"success": False, "data": "", "error": cmd_check.detail},
+                            error=cmd_check.detail,
+                            execution_state="skipped",
+                            approval_granted=False,
+                        )
                         await send_to_client(trace_event(
                             phase="tool_call",
                             event_type="blocked",
@@ -478,7 +575,7 @@ async def reasoning_node(state: AgentState) -> dict:
                     from app.websocket.approval import approval_manager
                     import asyncio as _asyncio
 
-                    request_id = tool_call.get("id", "") or f"{tool_name}_{iteration}"
+                    request_id = call_id
                     impact_text = await assess_impact(tool_name, tool_args, session_id, send_to_client)
 
                     loop = _asyncio.get_running_loop()
@@ -520,9 +617,35 @@ async def reasoning_node(state: AgentState) -> dict:
 
                     if not approved:
                         messages.append({"role": "assistant", "content": None, "tool_calls": [
-                            {"id": tool_call.get("id", ""), "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}
+                            {"id": call_id, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}
                         ]})
-                        messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": "REJECTED: User denied this operation"})
+                        messages.append({"role": "tool", "tool_call_id": call_id, "content": "REJECTED: User denied this operation"})
+                        reject_reason = "用户拒绝或审批超时"
+                        ledger_entry = make_tool_ledger_entry(
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            risk_level=tool_def.risk_level.value,
+                            status="rejected",
+                            result={"success": False, "data": "", "error": reject_reason},
+                            error=reject_reason,
+                            execution_state="skipped",
+                            approval_granted=False,
+                        )
+                        tool_ledger_this_turn.append(ledger_entry)
+                        await record_tool_execution(
+                            session_id=session_id,
+                            incident_id=incident_id,
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            risk_level=tool_def.risk_level.value,
+                            status="rejected",
+                            result={"success": False, "data": "", "error": reject_reason},
+                            error=reject_reason,
+                            execution_state="skipped",
+                            approval_granted=False,
+                        )
                         await send_to_client(trace_event(
                             phase="approval_response",
                             event_type="failure",
@@ -589,28 +712,34 @@ async def reasoning_node(state: AgentState) -> dict:
 
                     current_turn_tool_count += 1
                     result = await execute_tool(tool_name, tool_args, tool_def)
-                    executed_tools_this_turn.add(tool_name)
                     result_success = bool(getattr(result, "success", True))
                     result_error = getattr(result, "error", None)
-                    await record_tool_execution(
-                        session_id=session_id,
-                        incident_id=incident_id,
-                        call_id=tool_call.get("id", ""),
+                    approval_granted = tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE)
+                    ledger_entry = make_tool_ledger_entry(
+                        call_id=call_id,
                         tool_name=tool_name,
                         tool_args=tool_args,
                         risk_level=tool_def.risk_level.value,
                         status="success" if result_success else "failure",
                         result=result,
                         error=result_error,
+                        execution_state="executed" if result_success else "failed",
+                        approval_granted=approval_granted,
                     )
-                    if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
-                        write_tools_called += 1
-                        if result_success:
-                            write_tools_succeeded += 1
-                        else:
-                            write_tool_failures.append(f"{tool_name}: {result_error or 'success=False'}")
-                    elif tool_def.risk_level == RiskLevel.READ:
-                        read_tools_this_turn.add(tool_name)
+                    tool_ledger_this_turn.append(ledger_entry)
+                    await record_tool_execution(
+                        session_id=session_id,
+                        incident_id=incident_id,
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        risk_level=tool_def.risk_level.value,
+                        status="success" if result_success else "failure",
+                        result=result,
+                        error=result_error,
+                        execution_state="executed" if result_success else "failed",
+                        approval_granted=approval_granted,
+                    )
                     tool_result_str = json.dumps(result.__dict__ if hasattr(result, '__dict__') else result, ensure_ascii=False, default=str)
 
                     # Post-action verification for write operations
@@ -695,16 +824,31 @@ async def reasoning_node(state: AgentState) -> dict:
 
                 except Exception as e:
                     tool_result_str = json.dumps({"error": str(e)})
+                    approval_granted = tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE)
+                    ledger_entry = make_tool_ledger_entry(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        risk_level=tool_def.risk_level.value,
+                        status="failure",
+                        result={"success": False, "data": "", "error": str(e)},
+                        error=str(e),
+                        execution_state="failed",
+                        approval_granted=approval_granted,
+                    )
+                    tool_ledger_this_turn.append(ledger_entry)
                     await record_tool_execution(
                         session_id=session_id,
                         incident_id=incident_id,
-                        call_id=tool_call.get("id", ""),
+                        call_id=call_id,
                         tool_name=tool_name,
                         tool_args=tool_args,
                         risk_level=tool_def.risk_level.value,
                         status="failure",
                         result={"error": str(e)},
                         error=str(e),
+                        execution_state="failed",
+                        approval_granted=approval_granted,
                     )
                     await send_to_client(trace_event(
                         phase="execution",
@@ -723,362 +867,127 @@ async def reasoning_node(state: AgentState) -> dict:
                     ))
 
                 messages.append({"role": "assistant", "content": None, "tool_calls": [
-                    {"id": tool_call.get("id", ""), "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}
+                    {"id": call_id, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}
                 ]})
-                messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": tool_result_str})
+                messages.append({"role": "tool", "tool_call_id": call_id, "content": tool_result_str})
             if approval_rejected_final_response:
                 break
         else:
-            # LLM returned text only. Before accepting, check for hallucination:
-            # if the response claims a write operation was completed but NO write tool
-            # was actually called this turn, force one retry with an explicit reminder.
-            final_content = llm_response.get("content", "") or ""
-            has_write_completion_claim = _claims_write_completion(final_content)
-            has_unsupported_write_completion_claim = (
-                has_write_completion_claim
-                and write_tools_called == 0
-                and (
-                    _has_write_intent(user_message)
-                    or _claims_state_changing_completion(final_content)
-                )
-            )
-            unsupported_tool_claims = _unsupported_tool_claims(final_content, executed_tools_this_turn)
-            if unsupported_tool_claims and history_recall_intent:
-                unsupported_tool_claims = [
-                    name for name in unsupported_tool_claims if name not in historical_success_tools
-                ]
-            if unsupported_tool_claims and fresh_read_plan:
-                expected_fresh_tools = {item["tool_name"] for item in fresh_read_plan}
-                has_fresh_read_evidence = bool(read_tools_this_turn & expected_fresh_tools)
-                if has_fresh_read_evidence:
-                    unsupported_tool_claims = [
-                        name for name in unsupported_tool_claims if name not in expected_fresh_tools
-                    ]
-            unsupported_observation_claim = (
-                not unsupported_tool_claims
-                and current_turn_tool_count == 0
-                and not history_recall_intent
-                and _requires_fresh_tool_evidence(user_message)
-                and _claims_observation_result(final_content)
-            )
-            requires_post_write_verification = write_tools_called > 0 and _claims_post_write_verification_result(final_content)
-            unsupported_fresh_read_result = (
-                current_turn_tool_count > 0
-                and not history_recall_intent
-                and _requires_fresh_tool_evidence(user_message)
-                and _claims_observation_result(final_content)
-                and not read_tools_this_turn
-                and requires_post_write_verification
-            )
-            unsupported_read_result_summary = ""
-            if unsupported_fresh_read_result:
-                unsupported_read_result_summary = _summarize_executed_tools_for_guard(executed_tools_this_turn)
-            if unsupported_tool_claims or unsupported_observation_claim:
-                claim_summary = ", ".join(unsupported_tool_claims[:5])
-                if unsupported_observation_claim:
-                    claim_summary = claim_summary or "本轮状态/文件/验证结果"
-                if hallucination_retry_done:
-                    blocked_claim = final_content
-                    final_content = (
-                        "本次不能确认这些检查已经真实执行。\n\n"
-                        f"原因：回复中提到了工具或检查 `{claim_summary}`，但本轮推理链路没有对应的真实工具执行记录。\n\n"
-                        "为避免把未验证内容当作事实，系统已阻断该回复。请重新发起诊断，或要求我先调用对应只读工具获取证据。"
-                    )
-                    llm_response["content"] = final_content
-                    await audit_logger.log(
-                        session_id,
-                        AuditPhase.RESPONSE,
-                        AuditEventType.FAILURE,
-                        "真实性守卫: 回复引用未执行的只读工具，已阻断最终回复",
-                        {"unsupported_tool_claims": unsupported_tool_claims, "original_response": blocked_claim[:500]},
-                    )
-                    await send_to_client(trace_event(
-                        phase="response",
-                        event_type="failure",
-                        content="已阻断未验证的工具检查声明，改为安全回复",
-                        evidence=build_evidence(
-                            claim="模型回复引用了本轮未真实执行的工具检查",
-                            evidence_type="command",
-                            source="read_tool_truthfulness_guard",
-                            observed=claim_summary,
-                            confidence="high",
-                            execution_state="failed",
-                            failure_reason="回复中的工具名没有对应的真实执行事件",
-                            next_check="请先调用对应只读工具，再基于工具结果生成回复。",
-                        ),
-                    ))
-                    guard_blocked_final_response = True
-                    break
-                hallucination_retry_done = True
-                await audit_logger.log(
-                    session_id,
-                    AuditPhase.RESPONSE,
-                    AuditEventType.FAILURE,
-                    "真实性守卫: 回复引用未执行的只读工具，强制重试",
-                    {"unsupported_tool_claims": unsupported_tool_claims, "original_response": final_content[:500]},
-                )
-                await send_to_client(trace_event(
-                    phase="response",
-                    event_type="failure",
-                    content=f"⚠️ 检测到回复引用未真实执行的工具检查：{claim_summary}，已强制重新分析",
-                    evidence=build_evidence(
-                        claim="模型回复引用了本轮未真实执行的工具检查",
-                        evidence_type="command",
-                        source="read_tool_truthfulness_guard",
-                        observed=claim_summary,
-                        confidence="high",
-                        execution_state="failed",
-                        failure_reason="回复中的工具名没有对应的真实执行事件",
-                        next_check="请调用对应只读工具，或明确说明尚未执行这些检查。",
-                    ),
-                ))
-                messages.append({"role": "assistant", "content": final_content})
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        "[系统强制纠正] 你上一条回复引用了工具或检查结果："
-                        f"{claim_summary}，但本轮没有这些工具的真实执行记录。"
-                        "请重新处理：如果用户是在请求实际查看/检查/读取，请立即调用对应只读工具；"
-                        "如果用户是在询问含义、作用、参数、风险或让你解释计划，则不要调用工具也不要声称结果，"
-                        "必须明确说明“尚未执行，这只是说明/计划”。"
-                        "不能写成已检查、已返回、已确认或已发现。"
-                    ),
-                })
-                continue
-            if unsupported_fresh_read_result:
-                if hallucination_retry_done:
-                    blocked_claim = final_content
-                    final_content = _guarded_read_response(
-                        "本次写操作已执行，但不能确认后续验证结论。",
-                        "模型回复给出了当前状态/文件内容/一致性等验证结论，但本轮没有真实只读验证工具执行证据。",
-                        unsupported_read_result_summary,
-                    )
-                    llm_response["content"] = final_content
-                    await audit_logger.log(
-                        session_id,
-                        AuditPhase.RESPONSE,
-                        AuditEventType.FAILURE,
-                        "真实性守卫: 写操作后缺少只读验证证据，已阻断最终回复",
-                        {"executed_tools": sorted(executed_tools_this_turn), "original_response": blocked_claim[:500]},
-                    )
-                    await send_to_client(trace_event(
-                        phase="response",
-                        event_type="failure",
-                        content="已阻断缺少只读证据的当前状态结论，改为安全回复",
-                        evidence=build_evidence(
-                            claim="模型给出了写后验证结论，但没有真实只读验证证据",
-                            evidence_type="command",
-                            source="read_tool_truthfulness_guard",
-                            observed=unsupported_read_result_summary or blocked_claim[:500],
-                            confidence="high",
-                            execution_state="failed",
-                            failure_reason="本轮写工具已执行，但没有真实执行只读验证工具",
-                            next_check="请先调用只读工具验证写后状态，再基于工具结果回复。",
-                        ),
-                    ))
-                    guard_blocked_final_response = True
-                    break
-                hallucination_retry_done = True
-                await audit_logger.log(
-                    session_id,
-                    AuditPhase.RESPONSE,
-                    AuditEventType.FAILURE,
-                    "真实性守卫: 写操作后缺少真实只读验证证据，强制重试",
-                    {"executed_tools": sorted(executed_tools_this_turn), "original_response": final_content[:500]},
-                )
-                await send_to_client(trace_event(
-                    phase="response",
-                    event_type="failure",
-                    content="检测到回复给出了写后验证结论，但本轮没有真实只读验证证据，已强制重新分析",
-                    evidence=build_evidence(
-                        claim="模型给出了写后验证结论，但没有真实只读验证证据",
-                        evidence_type="command",
-                        source="read_tool_truthfulness_guard",
-                        observed=unsupported_read_result_summary or final_content[:500],
-                        confidence="high",
-                        execution_state="failed",
-                        failure_reason="本轮写工具已执行，但没有真实执行只读验证工具",
-                        next_check="请调用对应只读验证工具，或仅说明写工具返回结果并明确尚未验证。",
-                    ),
-                ))
-                messages.append({"role": "assistant", "content": final_content})
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        "[系统强制纠正] 本轮写工具已经真实执行，但你上一条回复额外给出了"
-                        "当前状态、文件内容、一致性或验证结论。"
-                        "这些验证结论需要只读工具结果支撑。"
-                        "请重新处理：要么调用对应只读工具验证写后状态；"
-                        "要么只基于写工具返回值说明写操作已执行/失败，并明确尚未做额外验证。"
-                    ),
-                })
-                continue
-            if (
-                has_unsupported_write_completion_claim
-            ):
-                if hallucination_retry_done:
-                    blocked_claim = final_content
-                    final_content = (
-                        "本次没有执行该写操作。\n\n"
-                        "原因：系统检测到模型回复声称操作已完成，但本轮没有真实调用任何写操作工具，"
-                        "因此已阻断该回复。\n\n"
-                        "当前状态不能仅凭模型文字确认。请重新发起操作，系统会先展示影响评估并等待你确认；"
-                        "只有工具返回成功后，才会回复执行成功。"
-                    )
-                    llm_response["content"] = final_content
-                    await audit_logger.log(
-                        session_id,
-                        AuditPhase.RESPONSE,
-                        AuditEventType.FAILURE,
-                        "幻觉守卫: 重试后仍声称完成写操作，已阻断最终回复",
-                        {"original_response": blocked_claim[:500]},
-                    )
-                    await send_to_client(trace_event(
-                        phase="response",
-                        event_type="failure",
-                        content="已阻断未验证的写操作完成声明，改为安全回复",
-                        evidence=build_evidence(
-                            claim="模型再次声称写操作已完成，但没有真实执行证据",
-                            evidence_type="user input",
-                            source="write_completion_guard",
-                            observed=blocked_claim[:500],
-                            confidence="high",
-                            execution_state="failed",
-                            failure_reason="重试后仍没有调用写操作或破坏性工具",
-                            next_check="请重新发起明确执行请求，以便系统走审批和真实工具执行。",
-                        ),
-                    ))
-                    guard_blocked_final_response = True
-                    break
-                hallucination_retry_done = True
-                logger.warning(
-                    f"Hallucination guard triggered: LLM claimed completion without "
-                    f"invoking any tool. Response head: {final_content[:200]!r}"
-                )
-                await audit_logger.log(
-                    session_id,
-                    AuditPhase.RESPONSE,
-                    AuditEventType.FAILURE,
-                    "幻觉守卫: 模型声称完成写操作但未调用工具，强制重试",
-                    {"original_response": final_content[:500]},
-                )
-                await send_to_client(trace_event(
-                    phase="response",
-                    event_type="failure",
-                    content="⚠️ 检测到模型声称已完成写操作但未真实调用工具，已强制重新分析",
-                    evidence=build_evidence(
-                        claim="模型声称写操作已完成，但没有真实执行证据",
-                        evidence_type="user input",
-                        source="write_completion_guard",
-                        observed=final_content[:500],
-                        confidence="high",
-                        execution_state="failed",
-                        failure_reason="本轮没有调用写操作或破坏性工具",
-                        next_check="请让智能体执行已审批工具，或明确撤回该完成声明。",
-                    ),
-                ))
-                # Inject the assistant's bogus message so the LLM sees its own claim,
-                # then a strong system-role correction.
-                messages.append({"role": "assistant", "content": final_content})
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        "[系统强制纠正] 你上一条回复中声称已完成某个写操作（如\"已重启\"、\"已删除\"、\"已清理\"），"
-                        "但本轮你**没有调用任何工具**，操作根本没有发生。"
-                        "请立即重新处理用户请求：\n"
-                        "1) 如果用户确实需要执行该写操作，**立刻调用对应的工具**（如 start_service、restart_service、delete_file 等）来真正执行；\n"
-                        "2) 如果你认为不应执行（参数不全、风险过高、用户其实在询问），明确告知用户'尚未执行 / 我不会执行'并说明原因，绝不要使用'已...'之类的完成措辞。\n"
-                        "不允许再次仅用文字声称完成。"
-                    ),
-                })
-                continue  # Retry one more LLM round with reminder in context
-            if (
-                write_tool_failures
-                and write_tools_succeeded == 0
-                and has_write_completion_claim
-            ):
-                failure_summary = "; ".join(write_tool_failures)[:500]
-                if hallucination_retry_done:
-                    blocked_claim = final_content
-                    final_content = (
-                        "本次写操作没有成功完成。\n\n"
-                        f"真实工具返回失败：{failure_summary}\n\n"
-                        "系统已阻断模型继续声称操作成功。请根据失败原因修复后重试；"
-                        "只有写操作工具返回成功后，才会回复执行成功。"
-                    )
-                    llm_response["content"] = final_content
-                    await audit_logger.log(
-                        session_id,
-                        AuditPhase.RESPONSE,
-                        AuditEventType.FAILURE,
-                        "幻觉守卫: 写操作失败后仍声称完成，已阻断最终回复",
-                        {"tool_failures": write_tool_failures[:5], "original_response": blocked_claim[:500]},
-                    )
-                    await send_to_client(trace_event(
-                        phase="response",
-                        event_type="failure",
-                        content="已阻断失败写操作的完成声明，改为安全回复",
-                        evidence=build_evidence(
-                            claim="写操作工具失败后，模型再次声称操作已完成",
-                            evidence_type="command",
-                            source="write_completion_guard",
-                            observed=failure_summary,
-                            confidence="high",
-                            execution_state="failed",
-                            failure_reason=failure_summary,
-                            next_check="请先处理工具失败原因，再重试写操作。",
-                        ),
-                    ))
-                    guard_blocked_final_response = True
-                    break
-                hallucination_retry_done = True
-                logger.warning(
-                    f"Hallucination guard triggered: LLM claimed completion after "
-                    f"failed write tools. Failures: {failure_summary!r}"
-                )
-                await audit_logger.log(
-                    session_id,
-                    AuditPhase.RESPONSE,
-                    AuditEventType.FAILURE,
-                    "幻觉守卫: 写工具返回失败但模型声称完成，强制重试",
-                    {"tool_failures": write_tool_failures[:5], "original_response": final_content[:500]},
-                )
-                await send_to_client(trace_event(
-                    phase="response",
-                    event_type="failure",
-                    content="⚠️ 写操作工具返回失败，但模型声称已完成，已强制重新分析",
-                    evidence=build_evidence(
-                        claim="写操作工具失败后，模型仍声称操作已完成",
-                        evidence_type="command",
-                        source="write_completion_guard",
-                        observed=failure_summary,
-                        confidence="high",
-                        execution_state="failed",
-                        failure_reason=failure_summary,
-                        next_check="请基于失败工具输出重新生成回复，明确说明操作未成功。",
-                    ),
-                ))
-                messages.append({"role": "assistant", "content": final_content})
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        "[系统强制纠正] 本轮写操作工具已经真实调用，但返回失败："
-                        f"{failure_summary}。你上一条回复却声称操作已完成。"
-                        "请重新生成回复：必须明确说明操作未成功/未完成，并基于工具错误给出下一步建议；"
-                        "除非再次调用工具并得到 success=True，否则绝不能说已完成。"
-                    ),
-                })
-                continue
+            # LLM returned text only. Treat it as a draft; the final answer is
+            # validated later through structured JSON plus the tool ledger.
             break
 
-    final_response = llm_response.get("content", "") or "分析完成，请查看推理链路了解详情。"
+    draft_final_response = llm_response.get("content", "") or "分析完成，请查看推理链路了解详情。"
+    final_response = draft_final_response
+    structured_validation_result: dict | None = None
+    should_structure_final_response = (
+        not guard_blocked_final_response
+        and not approval_rejected_final_response
+        and (
+            bool(tool_ledger_this_turn)
+            or _requires_fresh_tool_evidence(user_message)
+            or _has_write_intent(user_message)
+        )
+    )
+    if should_structure_final_response:
+        try:
+            structured_validation_result = await generate_structured_final_reply(
+                user_message=user_message,
+                messages=messages,
+                draft_response=draft_final_response,
+                tool_ledger=tool_ledger_this_turn,
+                llm_call=call_llm,
+                require_grounded_output=(
+                    _requires_fresh_tool_evidence(user_message)
+                    or _has_write_intent(user_message)
+                ),
+                max_retries=1,
+            )
+            final_response = structured_validation_result["markdown"]
+            if not structured_validation_result.get("valid"):
+                guard_blocked_final_response = True
+                await audit_logger.log(
+                    session_id,
+                    AuditPhase.RESPONSE,
+                    AuditEventType.FAILURE,
+                    "结构化最终回复校验失败，已使用后端保守回复",
+                    {"errors": structured_validation_result.get("errors", [])},
+                )
+                await send_to_client(trace_event(
+                    phase="response",
+                    event_type="failure",
+                    content="结构化最终回复未通过账本校验，已使用后端保守回复",
+                    evidence=build_evidence(
+                        claim="最终回复结构化校验未通过",
+                        evidence_type="command",
+                        source="structured_final_response_guard",
+                        observed=structured_validation_result.get("errors", []),
+                        confidence="high",
+                        execution_state="failed",
+                        failure_reason="claims 或 executed_actions 未能匹配工具账本 call_id",
+                        next_check="请基于工具账本重新生成带 evidence_call_ids 的结构化最终回复。",
+                    ),
+                ))
+            else:
+                await send_to_client(trace_event(
+                    phase="response",
+                    event_type="success",
+                    content="结构化最终回复已通过工具账本校验",
+                    evidence=build_evidence(
+                        claim="最终回复中的事实已通过工具账本 call_id 校验",
+                        evidence_type="command",
+                        source="structured_final_response_guard",
+                        observed={
+                            "claims": len((structured_validation_result.get("data") or {}).get("claims") or []),
+                            "ledger_entries": len(tool_ledger_this_turn),
+                        },
+                        confidence="high",
+                        execution_state="executed",
+                    ),
+                ))
+        except Exception as e:
+            logger.warning(f"Structured final response guard failed unexpectedly: {e}")
+            guard_blocked_final_response = True
+            final_response = render_conservative_reply(tool_ledger_this_turn, str(e))
+            await audit_logger.log(
+                session_id,
+                AuditPhase.RESPONSE,
+                AuditEventType.FAILURE,
+                "结构化最终回复守卫异常，已使用后端保守回复",
+                {"error": str(e)},
+            )
+            await send_to_client(trace_event(
+                phase="response",
+                event_type="failure",
+                content="结构化最终回复守卫异常，已使用后端保守回复",
+                evidence=build_evidence(
+                    claim="最终回复结构化校验异常",
+                    evidence_type="command",
+                    source="structured_final_response_guard",
+                    observed=str(e),
+                    confidence="high",
+                    execution_state="failed",
+                    failure_reason=str(e),
+                ),
+            ))
     if not guard_blocked_final_response:
         await audit_logger.log(session_id, AuditPhase.RESPONSE, AuditEventType.SUCCESS, f"生成回复: {final_response[:200]}")
         await send_to_client(trace_event(
             phase="response",
             event_type="success",
             content="回复已生成",
-            evidence=inference_evidence("Final response was generated from prior evidence and messages", "LLM", final_response[:500]),
+            evidence=build_evidence(
+                claim=(
+                    "最终回复已由后端根据结构化 JSON 和工具账本渲染"
+                    if structured_validation_result
+                    else "已基于现有证据和上下文生成最终回复"
+                ),
+                evidence_type="command" if structured_validation_result else "user input",
+                source="structured_final_response_guard" if structured_validation_result else "LLM",
+                observed=final_response[:500],
+                confidence="high" if structured_validation_result else "medium",
+                execution_state="executed" if structured_validation_result else "inferred",
+            ),
         ))
     else:
         await audit_logger.log(session_id, AuditPhase.RESPONSE, AuditEventType.FAILURE, f"最终回复由真实性守卫替换: {final_response[:200]}")
@@ -1089,7 +998,7 @@ async def reasoning_node(state: AgentState) -> dict:
         "iteration": iteration,
         "current_turn_tool_count": current_turn_tool_count,
         "is_blocked": guard_blocked_final_response,
-        "block_reason": "truthfulness_guard" if guard_blocked_final_response else "",
+        "block_reason": "structured_final_response_guard" if guard_blocked_final_response else "",
     }
 
 
@@ -1520,6 +1429,10 @@ def _fresh_read_tool_plan(user_message: str) -> list[dict]:
     )):
         add("get_listening_ports", {}, "获取当前监听端口")
 
+    port_owner = _extract_port_owner_lookup(text)
+    if port_owner is not None:
+        add("check_port", {"port": port_owner}, f"精确检查 {port_owner} 端口被哪个进程占用")
+
     service_name = _extract_service_status_target(text)
     if service_name:
         add("get_service_status", {"service": service_name}, f"获取 {service_name} 当前服务状态")
@@ -1560,10 +1473,16 @@ async def _execute_forced_read_tools(
     """Execute deterministic read-only preflight tools and append tool results."""
     executed_tools: set[str] = set()
     read_tools: set[str] = set()
+    tool_ledger: list[dict] = []
     tool_count = 0
 
     if not plan:
-        return {"tool_count": 0, "executed_tools": executed_tools, "read_tools": read_tools}
+        return {
+            "tool_count": 0,
+            "executed_tools": executed_tools,
+            "read_tools": read_tools,
+            "tool_ledger": tool_ledger,
+        }
 
     await send_to_client(trace_event(
         phase="planning",
@@ -1608,6 +1527,18 @@ async def _execute_forced_read_tools(
             result = await execute_tool(tool_name, tool_args, tool_def)
             result_success = bool(getattr(result, "success", True))
             result_error = getattr(result, "error", None)
+            ledger_entry = make_tool_ledger_entry(
+                call_id=call_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                risk_level=tool_def.risk_level.value,
+                status="success" if result_success else "failure",
+                result=result,
+                error=result_error,
+                execution_state="executed" if result_success else "failed",
+                approval_granted=False,
+            )
+            tool_ledger.append(ledger_entry)
             await record_tool_execution(
                 session_id=session_id,
                 incident_id=incident_id,
@@ -1618,6 +1549,8 @@ async def _execute_forced_read_tools(
                 status="success" if result_success else "failure",
                 result=result,
                 error=result_error,
+                execution_state="executed" if result_success else "failed",
+                approval_granted=False,
             )
             tool_count += 1
             executed_tools.add(tool_name)
@@ -1668,6 +1601,18 @@ async def _execute_forced_read_tools(
             read_tools.add(tool_name)
             tool_result_str = json.dumps({"success": False, "data": "", "error": str(e)}, ensure_ascii=False)
             messages.append({"role": "tool", "tool_call_id": call_id, "content": tool_result_str})
+            ledger_entry = make_tool_ledger_entry(
+                call_id=call_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                risk_level=tool_def.risk_level.value,
+                status="failure",
+                result={"success": False, "data": "", "error": str(e)},
+                error=str(e),
+                execution_state="failed",
+                approval_granted=False,
+            )
+            tool_ledger.append(ledger_entry)
             await record_tool_execution(
                 session_id=session_id,
                 incident_id=incident_id,
@@ -1678,6 +1623,8 @@ async def _execute_forced_read_tools(
                 status="failure",
                 result={"success": False, "data": "", "error": str(e)},
                 error=str(e),
+                execution_state="failed",
+                approval_granted=False,
             )
             await send_to_client(trace_event(
                 phase="execution",
@@ -1695,7 +1642,12 @@ async def _execute_forced_read_tools(
                 ),
             ))
 
-    return {"tool_count": tool_count, "executed_tools": executed_tools, "read_tools": read_tools}
+    return {
+        "tool_count": tool_count,
+        "executed_tools": executed_tools,
+        "read_tools": read_tools,
+        "tool_ledger": tool_ledger,
+    }
 
 
 def _format_forced_read_plan(plan: list[dict]) -> str:
@@ -1710,6 +1662,149 @@ def _format_forced_read_plan(plan: list[dict]) -> str:
 
 def _matches_any(text: str, patterns: tuple[str, ...]) -> bool:
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+
+def _compile_deterministic_tool_call(user_message: str) -> dict | None:
+    """Compile high-confidence operational intents when the LLM only wrote prose.
+
+    This is intentionally narrow: it covers requests where the target, operation
+    and tool arguments are explicit enough that the backend can safely route to
+    the normal approval/execution path instead of trusting the model to remember
+    to emit a tool call.
+    """
+    if not user_message:
+        return None
+
+    text = user_message.strip()
+
+    append_plan = _extract_append_file_intent(text)
+    if append_plan:
+        return _tool_call("write_file", append_plan)
+
+    cleanup_plan = _extract_bounded_tmp_cleanup_intent(text)
+    if cleanup_plan:
+        return _tool_call("delete_file", cleanup_plan)
+
+    cron_plan = _extract_add_cron_intent(text)
+    if cron_plan:
+        return _tool_call("add_cron_job", cron_plan)
+
+    return None
+
+
+def _tool_call(name: str, arguments: dict) -> dict:
+    return {
+        "id": f"policy_{name}_{uuid.uuid4().hex[:8]}",
+        "name": name,
+        "arguments": arguments,
+    }
+
+
+def _extract_port_owner_lookup(text: str) -> int | None:
+    if not _matches_any(text, (
+        r"(端口).{0,20}(谁|哪个|进程|占用|监听)",
+        r"(谁|哪个|进程).{0,20}(占用|监听).{0,20}(端口)",
+        r"\b(port)\b.{0,30}\b(who|owner|process|pid|listening|occupied)\b",
+    )):
+        return None
+    match = re.search(r"\b([1-9][0-9]{0,4})\b", text)
+    if not match:
+        return None
+    port = int(match.group(1))
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def _extract_append_file_intent(text: str) -> dict | None:
+    if not _matches_any(text, (r"(追加|写入|加到|补一行|append)",)):
+        return None
+    path_match = re.search(r"(/[^\s`'\"，。；;]+)", text)
+    if not path_match:
+        return None
+    filepath = path_match.group(1).rstrip("。；;,，")
+
+    content = ""
+    # Common evaluator/user style: "追加 hello-from-opsguard".
+    after_append = re.search(r"(?:追加|写入|加到|补一行)\s*([^，。；;]+)", text)
+    if after_append:
+        content = after_append.group(1).strip()
+        # Drop leading target-path fragments when the user says "在 <path> 追加 X".
+        if filepath in content:
+            content = content.split(filepath, 1)[-1].strip()
+    quoted = re.search(r"[`'\"“”]([^`'\"“”]+)[`'\"“”]", text)
+    if quoted:
+        content = quoted.group(1).strip()
+
+    # If the phrase was "在 <path> 追加 X", extract the tail after the path.
+    tail_after_path = text.split(filepath, 1)[-1]
+    tail_match = re.search(r"(?:追加|写入|加到|补一行)\s*([^，。；;]+)", tail_after_path)
+    if tail_match:
+        content = tail_match.group(1).strip()
+
+    content = content.strip(" ：:，,。；;`'\"“”")
+    if not content or content in {"内容", "一行"}:
+        return None
+    return {"filepath": filepath, "content": content, "append": True}
+
+
+def _extract_bounded_tmp_cleanup_intent(text: str) -> dict | None:
+    if not _matches_any(text, (r"(清理|删除|移除)", r"\b(clean|delete|remove)\b")):
+        return None
+    if "/tmp/" not in text and not text.strip().startswith("/tmp"):
+        return None
+    if _matches_any(text, (r"(所有|全部|整个|递归|rm\s+-rf|根目录)", r"\b(all|everything|recursive)\b")):
+        return None
+
+    path_matches = re.findall(r"(/[^\s`'\"，。；;]+)", text)
+    file_match = re.search(r"\b([A-Za-z0-9_.@+-]+\.[A-Za-z0-9_.@+-]+)\b", text)
+    if file_match:
+        from pathlib import Path
+
+        filename = file_match.group(1)
+        base_dir = ""
+        for path in path_matches:
+            candidate = path.rstrip("。；;,，")
+            if candidate.startswith("/tmp/") and not candidate.endswith(filename):
+                base_dir = candidate
+                break
+        if base_dir:
+            return {"filepath": str(Path(base_dir) / filename)}
+
+    if path_matches:
+        filepath = path_matches[-1].rstrip("。；;,，")
+        # Only compile concrete file deletes, not directory cleanup.
+        if re.search(r"\.[A-Za-z0-9_.@+-]+$", filepath):
+            return {"filepath": filepath}
+    return None
+
+
+def _extract_add_cron_intent(text: str) -> dict | None:
+    if not _matches_any(text, (r"(定时任务|cron)",)):
+        return None
+    if not _matches_any(text, (r"(添加|创建|新增|add|create)",)):
+        return None
+
+    schedule = ""
+    if _matches_any(text, (r"(每分钟|每 1 分钟|每一分钟)",)):
+        schedule = "* * * * *"
+    quoted_schedule = re.search(r"([*0-9/, -]+\s+[*0-9/, -]+\s+[*0-9/, -]+\s+[*0-9/, -]+\s+[*0-9/, -]+)", text)
+    if quoted_schedule:
+        schedule = " ".join(quoted_schedule.group(1).split())
+    if not schedule:
+        return None
+
+    command = ""
+    command_match = re.search(r"(?:执行|运行|run)\s*(.+?)(?:的定时任务|定时任务|$)", text, re.IGNORECASE)
+    if command_match:
+        command = command_match.group(1).strip()
+    quoted = re.search(r"[`'\"“”]([^`'\"“”]+)[`'\"“”]", text)
+    if quoted:
+        command = quoted.group(1).strip()
+    command = command.strip(" ：:，,。；;`'\"“”")
+    if not command:
+        return None
+    return {"schedule": schedule, "command": command}
 
 
 def _extract_service_status_target(text: str) -> str:
@@ -2229,6 +2324,15 @@ _WRITE_INTENT_PATTERNS = (
 )
 
 
+_READ_ONLY_MUTATION_STATE_PATTERNS = (
+    # "请检查 nginx 是否已停止" asks for state, not for stop_service.
+    r"(查看|查询|检查|检测|确认|验证|看看|判断).{0,80}(是否|是不是|有没有|是否已经|是否已|是否.*已经).{0,50}(启动|重启|停止|关闭|删除|清理|修改|写入|追加|保存|应用|启用|禁用|添加|创建|安装|卸载|改名|重命名|移动|复制)",
+    # "查看 nginx 启动状态" / "查询已停止的服务" are read-only status/list requests.
+    r"(查看|查询|检查|检测|获取|列出|显示).{0,80}(启动|重启|停止|启用|禁用|安装|卸载|删除|修改).{0,24}(状态|记录|历史|列表|服务)",
+    r"(查看|查询|列出|显示).{0,40}已(启动|重启|停止|启用|禁用|安装|卸载|删除|修改).{0,24}(服务|任务|软件|文件|记录|列表)",
+)
+
+
 _READ_ONLY_INTENT_PATTERNS = (
     r"(查看|查询|读取|获取|检查|检测|分析|列出|显示|搜索|检索|生成.*报告|当前状态|状态|是否运行|是否启动|健康|日志|配置|文件内容)",
     r"\b(show|status|get|check|inspect|read|list|view|query|search|describe|report)\b",
@@ -2243,6 +2347,8 @@ def _has_write_intent(text: str) -> bool:
     import re
 
     normalized = text.strip()
+    if any(re.search(pattern, normalized, re.IGNORECASE) for pattern in _READ_ONLY_MUTATION_STATE_PATTERNS):
+        return False
     return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in _WRITE_INTENT_PATTERNS)
 
 
@@ -2279,38 +2385,6 @@ def _is_history_recall_intent(text: str) -> bool:
     return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in history_markers)
 
 
-def _claims_write_completion(text: str) -> bool:
-    """Detect whether an LLM text response claims a write operation was completed.
-
-    Used as a hallucination guard: if the LLM produced this kind of claim without
-    actually invoking any tool, the agent must re-prompt itself to either really
-    call the tool or retract the false claim.
-    """
-    if not text:
-        return False
-    return any(pat in text for pat in _WRITE_COMPLETION_PATTERNS)
-
-
-_STATE_CHANGING_COMPLETION_PATTERNS = (
-    "已重启", "重启完成", "重启成功",
-    "已停止", "停止完成",
-    "已启动", "启动完成",
-    "已删除", "删除完成", "已清除", "已清理", "清理完成",
-    "已修改", "已更新", "已写入", "已追加", "追加完成", "已保存", "已应用",
-    "已移动", "移动完成", "已重命名", "重命名完成", "已改名", "改名完成",
-    "已复制", "复制完成",
-    "已添加", "已创建", "创建完成", "已新建", "新建完成",
-    "已配置", "已开启", "已关闭", "已禁用", "已启用",
-    "已安装", "安装完成", "已卸载", "卸载完成",
-)
-
-
-def _claims_state_changing_completion(text: str) -> bool:
-    if not text:
-        return False
-    return any(pat in text for pat in _STATE_CHANGING_COMPLETION_PATTERNS)
-
-
 def _requires_fresh_tool_evidence(user_message: str) -> bool:
     """Whether the user is asking for current system/file/service evidence."""
     if not user_message:
@@ -2325,114 +2399,3 @@ def _requires_fresh_tool_evidence(user_message: str) -> bool:
         r"(/[\w./~@:+-]+|[\w.-]+\.(txt|conf|log|json|yaml|yml|ini|env|sh|service))",
     )
     return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in evidence_patterns)
-
-
-def _claims_observation_result(text: str) -> bool:
-    """Detect result-like statements that require real read/check evidence."""
-    if not text:
-        return False
-
-    result_markers = (
-        "验证成功", "验证通过", "验证结果", "当前内容", "完整内容", "文件内容",
-        "文件大小", "字节", "行", "总大小", "完全一致", "内容一致",
-        "不存在", "存在", "返回", "显示", "发现", "确认", "读取到", "检查到",
-        "No such file", "not found", "permission denied", "active", "inactive", "failed",
-    )
-    unexecuted_markers = (
-        "尚未执行", "未执行", "没有执行", "尚未调用", "未调用", "没有调用",
-        "只是说明", "只是计划", "无法确认", "不能确认",
-    )
-    if any(marker in text for marker in unexecuted_markers):
-        return False
-    return any(marker in text for marker in result_markers)
-
-
-def _claims_post_write_verification_result(text: str) -> bool:
-    """Detect claims that verify state beyond the write tool's own return."""
-    if not text:
-        return False
-
-    verification_markers = (
-        "验证成功", "验证通过", "验证结果", "已验证", "经验证",
-        "当前内容", "完整内容", "文件内容", "内容如下",
-        "文件大小", "字节", "共 ", "共", "行", "总大小",
-        "完全一致", "内容一致", "一致，", "状态为", "当前状态",
-        "文件存在", "文件不存在", "目录存在", "目录不存在",
-    )
-    unverified_markers = (
-        "尚未验证", "未验证", "没有验证", "尚未执行验证", "未执行验证",
-        "没有执行验证", "尚未读取", "未读取", "没有读取",
-    )
-    if any(marker in text for marker in unverified_markers):
-        return False
-    return any(marker in text for marker in verification_markers)
-
-
-def _summarize_executed_tools_for_guard(executed_tools: set[str]) -> str:
-    if not executed_tools:
-        return "本轮没有真实工具执行记录"
-    return "本轮真实执行工具：" + ", ".join(sorted(executed_tools))
-
-
-def _guarded_read_response(title: str, reason: str, observed: str = "") -> str:
-    detail = f"\n\n证据状态：{observed}" if observed else ""
-    return (
-        f"{title}\n\n"
-        f"原因：{reason}{detail}\n\n"
-        "为避免把未验证内容当作事实，系统已阻断该回复。请重新发起诊断，"
-        "或要求我先调用对应只读工具获取证据。"
-    )
-
-
-def _unsupported_tool_claims(text: str, executed_tools: set[str]) -> list[str]:
-    """Return tool names mentioned in a final reply without same-turn evidence.
-
-    This guards read-only truthfulness: a final answer may summarize only tools
-    that were actually invoked in the current turn. Historical context can still
-    be discussed in plain language, but not as if a fresh tool check happened.
-    """
-    if not text:
-        return []
-
-    import re
-
-    mentioned: list[str] = []
-    explicit_unexecuted = (
-        "尚未执行", "未执行", "还没有执行", "没有执行", "并未执行",
-        "尚未调用", "未调用", "还没有调用", "没有调用", "并未调用",
-        "不会执行", "不执行", "只是计划", "仅说明", "用于说明", "准备调用",
-        "计划调用", "建议调用", "将调用", "需要调用", "应调用", "可以调用",
-    )
-    execution_claim_words = (
-        "返回", "显示", "确认", "发现", "结果", "输出", "报错", "错误",
-        "执行成功", "执行失败", "调用成功", "调用失败", "已执行", "已调用",
-        "读取到", "检查到", "检测到", "查询到", "获取到", "看到",
-        "监听", "存在", "不存在", "active", "inactive", "failed", "No such file",
-        "not found", "permission denied", "证据", "关键证据",
-    )
-
-    def looks_like_execution_claim(nearby: str) -> bool:
-        if any(marker in nearby for marker in explicit_unexecuted):
-            return False
-        return any(word in nearby for word in execution_claim_words)
-
-    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\s*\(", text):
-        name = match.group(1)
-        nearby = text[max(0, match.start() - 48): match.end() + 80]
-        if (
-            tools_registry.get_tool(name)
-            and name not in mentioned
-            and looks_like_execution_claim(nearby)
-        ):
-            mentioned.append(name)
-
-    # Backtick-only mentions are common in this UI. Treat them as tool-result
-    # claims only when nearby wording looks like evidence, not a suggestion.
-    for match in re.finditer(r"`([A-Za-z_][A-Za-z0-9_]{2,})`", text):
-        name = match.group(1)
-        nearby = text[max(0, match.start() - 48): match.end() + 80]
-        if tools_registry.get_tool(name) and name not in mentioned:
-            if looks_like_execution_claim(nearby):
-                mentioned.append(name)
-
-    return [name for name in mentioned if name not in executed_tools]
