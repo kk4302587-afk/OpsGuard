@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState } from 'react'
-import { Input, Button, Typography, Tag, Tooltip, message as antdMessage } from 'antd'
+import { Collapse, Input, Button, Typography, Tag, Tooltip, message as antdMessage } from 'antd'
 import {
   SendOutlined,
   RobotOutlined,
@@ -18,6 +18,7 @@ import { MultimodalRecognitionResult, useChatStore } from '../stores/chatStore'
 import DiagnosisProgress from './DiagnosisProgress'
 import MarkdownRenderer from './MarkdownRenderer'
 import { displayTraceName } from '../utils/traceLocalization'
+import { summarizeOperation } from '../utils/operationSummary'
 import '../styles/chat.css'
 
 const { TextArea } = Input
@@ -325,6 +326,7 @@ function ChatPanel() {
     if (content.startsWith('[需要确认]')) {
       const lines = content.split('\n')
       const command = lines[0].replace('[需要确认] ', '')
+      const summary = summarizeOperation(command)
       return (
         <div className="msg-approval-card">
           <div className="msg-approval-header">
@@ -332,10 +334,41 @@ function ChatPanel() {
             <Text strong style={{ color: 'var(--accent-yellow)' }}>操作需要确认</Text>
           </div>
           <div className="msg-approval-body">
-            <code>{command}</code>
-            {lines.slice(1).map((line, i) => (
-              <div key={i} style={{ marginTop: 4, fontSize: 12, color: 'var(--text-secondary)' }}>{line}</div>
-            ))}
+            <div className="approval-summary">
+              <div className="approval-summary-row">
+                <span className="approval-summary-label">操作</span>
+                <span className="approval-summary-value">{summary.title}</span>
+              </div>
+              {summary.target && (
+                <div className="approval-summary-row">
+                  <span className="approval-summary-label">目标</span>
+                  <span className="approval-summary-value">{summary.target}</span>
+                </div>
+              )}
+              {summary.detail && (
+                <div className="approval-summary-row">
+                  <span className="approval-summary-label">内容</span>
+                  <span className="approval-summary-value">{summary.detail}</span>
+                </div>
+              )}
+            </div>
+            <Collapse
+              ghost
+              size="small"
+              className="approval-detail-collapse"
+              items={[{
+                key: 'details',
+                label: '查看原始命令和风险详情',
+                children: (
+                  <>
+                    <code>{command}</code>
+                    {lines.slice(1).map((line, i) => (
+                      <div key={i} style={{ marginTop: 4, fontSize: 12, color: 'var(--text-secondary)' }}>{line}</div>
+                    ))}
+                  </>
+                ),
+              }]}
+            />
             <Button
               size="small"
               type="link"
@@ -359,6 +392,21 @@ function ChatPanel() {
       const name = lines[0].replace('[Runbook建议] ', '')
       const isActive =
         !!pendingRunbookSuggestion && pendingRunbookSuggestion.name === name
+      const preflight = pendingRunbookSuggestion?.preflight
+      const isNotApplicable = preflight?.status === 'not_applicable'
+      const missingVariables = preflight?.missing_variables || []
+      const needsClarification = Boolean(preflight?.requires_clarification || missingVariables.length)
+      const variables = preflight?.extracted_variables || {}
+      const lastSuccess = pendingRunbookSuggestion?.last_success
+      const preconditionLabel = preflight?.preconditions_summary?.label
+      const rollbackLabel = preflight?.rollback_coverage?.label
+      const rollbackTotal = preflight?.rollback_coverage?.total_mutating_steps || 0
+      const formatDate = (value?: string | null) => value ? new Date(value).toLocaleString() : ''
+      const visibleLines = lines.slice(1).filter((line) => (
+        line
+        && !line.startsWith('Runbook状态:')
+        && !line.startsWith('预检结论:')
+      ))
       return (
         <div className="msg-approval-card" style={{ borderColor: 'var(--accent-blue, #61afef)' }}>
           <div className="msg-approval-header">
@@ -369,7 +417,39 @@ function ChatPanel() {
           </div>
           <div className="msg-approval-body">
             <div style={{ fontWeight: 600, marginBottom: 4 }}>{name}</div>
-            {lines.slice(1).map((line, i) => (
+            {preflight?.status && (
+              <div style={{ marginBottom: 6 }}>
+                <Tag color={preflight.status === 'applicable' ? 'green' : preflight.status === 'not_applicable' ? 'red' : 'orange'}>
+                  {needsClarification ? '缺少参数，可改用 Agent' : preflight.status === 'applicable' ? '当前证据支持执行' : preflight.status === 'not_applicable' ? '当前证据不适用' : '需要补充确认'}
+                </Tag>
+                {Object.keys(variables).length > 0 && (
+                  <Text style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                    参数：{Object.entries(variables).map(([key, value]) => `${key}=${value}`).join('，')}
+                  </Text>
+                )}
+              </div>
+            )}
+            {needsClarification && (
+              <div style={{ marginBottom: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
+                {preflight?.clarification_prompt || `缺少参数：${missingVariables.join('，')}。你可以补充参数后再执行 Runbook，也可以改用 Agent 正常分析。`}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
+              {lastSuccess && (
+                <Tag color="green">最后成功 {formatDate(lastSuccess)}</Tag>
+              )}
+              {preconditionLabel && (
+                <Tag color={preflight?.preconditions_summary?.counts?.failed ? 'red' : preflight?.preconditions_summary?.counts?.warning || preflight?.preconditions_summary?.counts?.unknown ? 'orange' : 'blue'}>
+                  预检 {preconditionLabel}
+                </Tag>
+              )}
+              {rollbackLabel && (
+                <Tag color={rollbackTotal === 0 ? 'default' : rollbackLabel.includes('未覆盖') ? 'orange' : 'purple'}>
+                  回滚 {rollbackLabel}
+                </Tag>
+              )}
+            </div>
+            {visibleLines.map((line, i) => (
               line ? (
                 <div key={i} style={{ marginTop: 2, fontSize: 12, color: 'var(--text-secondary)' }}>
                   {line}
@@ -381,10 +461,10 @@ function ChatPanel() {
                 size="small"
                 type="primary"
                 icon={<PlayCircleOutlined />}
-                disabled={!isActive || isThinking}
+                disabled={!isActive || isThinking || isNotApplicable || needsClarification}
                 onClick={acceptRunbookSuggestion}
               >
-                按 Runbook 执行
+                {needsClarification ? '补充参数后执行' : '按 Runbook 执行'}
               </Button>
               <Button
                 size="small"
@@ -392,7 +472,7 @@ function ChatPanel() {
                 disabled={!isActive || isThinking}
                 onClick={dismissRunbookSuggestion}
               >
-                重新分析
+                {needsClarification || isNotApplicable ? '改用 Agent 分析' : '重新分析'}
               </Button>
               {!isActive && (
                 <Text style={{ fontSize: 11, color: 'var(--text-muted)', alignSelf: 'center' }}>

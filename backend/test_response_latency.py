@@ -1,6 +1,7 @@
 """Regression checks for response delivery not waiting on post-processing."""
 
 import asyncio
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -10,6 +11,22 @@ os.chdir(Path(__file__).parent)
 from app.agent import graph
 from app.agent.tools_registry import RiskLevel, ToolDefinition
 from app.mcp_tools.process_tools import ToolResult
+
+
+def _is_structured_final_reply_call(messages) -> bool:
+    return bool(
+        messages
+        and isinstance(messages[0], dict)
+        and "最终回复结构化器" in str(messages[0].get("content", ""))
+    )
+
+
+def _first_ledger_call_id(messages) -> str:
+    content = str(messages[1].get("content", "")) if len(messages) > 1 else ""
+    marker = "本轮工具账本 JSON：\n"
+    ledger_json = content.split(marker, 1)[1].strip()
+    ledger = json.loads(ledger_json)
+    return ledger[0]["call_id"]
 
 
 def test_run_agent_returns_before_knowledge_save_finishes() -> None:
@@ -22,11 +39,29 @@ def test_run_agent_returns_before_knowledge_save_finishes() -> None:
         original_call_llm = graph.call_llm
         original_search = graph.knowledge_store.search
         original_log = graph.audit_logger.log
+        original_record_tool_execution = graph.record_tool_execution
         original_get_tool = graph.tools_registry.get_tool
         original_get_all_tools = graph.tools_registry.get_all_tools_for_llm
         original_extract = graph._extract_resolution_summary
 
         async def fake_call_llm(messages, tools=None):
+            if _is_structured_final_reply_call(messages):
+                call_id = _first_ledger_call_id(messages)
+                return {
+                    "content": json.dumps({
+                        "conclusion": "检查完成。",
+                        "claims": [
+                            {
+                                "text": "本轮只读检查已返回结果",
+                                "evidence_call_ids": [call_id],
+                                "claim_type": "observed_state",
+                            }
+                        ],
+                        "executed_actions": [],
+                        "recommended_actions": [],
+                    }, ensure_ascii=False),
+                    "tool_calls": [],
+                }
             if not any(message.get("role") == "tool" for message in messages):
                 return {
                     "content": "",
@@ -69,6 +104,7 @@ def test_run_agent_returns_before_knowledge_save_finishes() -> None:
                 graph.call_llm = fake_call_llm
                 graph.knowledge_store.search = fake_search
                 graph.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+                graph.record_tool_execution = lambda *args, **kwargs: asyncio.sleep(0)
                 graph.tools_registry.get_tool = fake_get_tool
                 graph.tools_registry.get_all_tools_for_llm = lambda: [{
                     "name": "dummy_read",
@@ -95,6 +131,7 @@ def test_run_agent_returns_before_knowledge_save_finishes() -> None:
                 graph.call_llm = original_call_llm
                 graph.knowledge_store.search = original_search
                 graph.audit_logger.log = original_log
+                graph.record_tool_execution = original_record_tool_execution
                 graph.tools_registry.get_tool = original_get_tool
                 graph.tools_registry.get_all_tools_for_llm = original_get_all_tools
                 graph._extract_resolution_summary = original_extract

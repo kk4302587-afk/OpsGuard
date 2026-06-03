@@ -29,6 +29,13 @@ class ApprovalRequest:
     tool_args: dict
     risk_level: str
     description: str
+    impact: str | None = None
+    rollback_strategy: str = "none"
+    supports_rollback: bool = False
+    preview_strategy: str = "none"
+    policy: dict = field(default_factory=dict)
+    approval_level: str = "standard"
+    execution_identity: dict = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: ApprovalStatus = ApprovalStatus.PENDING
     future: asyncio.Future | None = field(default=None, repr=False)
@@ -56,6 +63,14 @@ class ApprovalManager:
         risk_level: str,
         description: str,
         future: asyncio.Future,
+        *,
+        impact: str | None = None,
+        rollback_strategy: str = "none",
+        supports_rollback: bool = False,
+        preview_strategy: str = "none",
+        policy: dict | None = None,
+        approval_level: str = "standard",
+        execution_identity: dict | None = None,
     ):
         """Register a pending approval request with its Future.
 
@@ -69,6 +84,13 @@ class ApprovalManager:
             tool_args=tool_args,
             risk_level=risk_level,
             description=description,
+            impact=impact,
+            rollback_strategy=rollback_strategy,
+            supports_rollback=supports_rollback,
+            preview_strategy=preview_strategy,
+            policy=policy or {},
+            approval_level=approval_level,
+            execution_identity=execution_identity or {},
             future=future,
         )
         self._pending[request_id] = request

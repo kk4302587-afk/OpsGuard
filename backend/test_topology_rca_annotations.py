@@ -229,6 +229,28 @@ def test_error_log_tools_create_topology_evidence_nodes() -> None:
     assert targets["log_get_recent_errors"].rca_role == "suspected_root_cause"
 
 
+def test_read_file_log_maps_upstream_dependency_for_topology_rca() -> None:
+    event = {
+        "phase": "execution",
+        "event_type": "success",
+        "detail": "read smoke log",
+        "evidence": {
+            "source": "read_file",
+            "observed": '{"path": "/tmp/nginx-502.log", "content": "nginx upstream connect failed while connecting to upstream app-api:8080, GET /orders returned 502"}',
+            "execution_state": "executed",
+        },
+        "metadata": {"tool_name": "read_file", "tool_args": {"filepath": "/tmp/nginx-502.log"}},
+    }
+
+    annotations = topology._annotations_from_event(event)
+    targets = {item.target_id: item for item in annotations}
+    assert "log_tmp_nginx_502_log" in targets
+    assert "svc_nginx" in targets
+    assert "svc_app-api" in targets
+    assert "port_8080" in targets
+    assert targets["svc_app-api"].rca_role == "suspected_root_cause"
+
+
 def test_apply_annotations_adds_highlights_and_inferred_edges() -> None:
     graph = {
         "nodes": [
@@ -278,11 +300,83 @@ def test_apply_annotations_adds_highlights_and_inferred_edges() -> None:
     assert any(edge["relation"] == "evidence_link" and edge["inferred"] for edge in graph["edges"])
 
 
+def test_rca_candidates_rank_upstream_dependency_root_cause() -> None:
+    graph = {
+        "nodes": [
+            {"id": "svc_nginx", "name": "nginx", "category": "service", "highlight": False},
+        ],
+        "edges": [],
+        "categories": [
+            {"name": "service", "itemStyle": {"color": "#00d4aa"}},
+            {"name": "port", "itemStyle": {"color": "#e5c07b"}},
+            {"name": "log", "itemStyle": {"color": "#d19a66"}},
+            {"name": "host", "itemStyle": {"color": "#8b929a"}},
+        ],
+    }
+    events = [
+        {
+            "phase": "execution",
+            "event_type": "success",
+            "detail": "nginx service active",
+            "evidence": {
+                "source": "get_service_status",
+                "observed": "nginx active (running)",
+                "execution_state": "executed",
+            },
+            "metadata": {"tool_name": "get_service_status", "tool_args": {"service": "nginx"}},
+        },
+        {
+            "phase": "execution",
+            "event_type": "success",
+            "detail": "loki logs",
+            "evidence": {
+                "source": "loki_query",
+                "observed": "nginx upstream connect failed while connecting to upstream app-api:8080, GET /orders returned 502",
+                "execution_state": "executed",
+            },
+            "metadata": {"tool_name": "loki_query", "tool_args": {"query": "{service=\"nginx\"}"}},
+        },
+        {
+            "phase": "execution",
+            "event_type": "success",
+            "detail": "prometheus",
+            "evidence": {
+                "source": "prometheus_query",
+                "observed": '{"metric":{"service":"app-api","instance":"app-api:8080"},"value":"0"}',
+                "execution_state": "executed",
+            },
+            "metadata": {"tool_name": "prometheus_query", "tool_args": {"query": "up{service=\"app-api\"}"}},
+        },
+    ]
+    annotations = []
+    for event in events:
+        annotations.extend(item.dict() for item in topology._annotations_from_event(event))
+
+    topology._apply_annotations(graph, annotations)
+    candidates = topology.build_rca_candidates(graph, annotations)
+
+    assert candidates
+    top = candidates[0]
+    assert top["candidate_id"] == "svc_app-api"
+    assert top["confidence"] in {"high", "medium"}
+    assert "svc_nginx" in top["affected_targets"]
+    assert any(
+        edge["source"] == "svc_nginx" and edge["target"] == "svc_app-api" and edge["relation"] == "depends_on"
+        for edge in graph["edges"]
+    )
+    assert any(
+        edge["source"] == "svc_app-api" and edge["target"] == "port_8080" and edge["relation"] == "listens_on"
+        for edge in graph["edges"]
+    )
+
+
 def main() -> None:
     test_topology_annotations_from_incident_evidence()
     test_topology_latest_scope_uses_only_newest_incident()
     test_error_log_tools_create_topology_evidence_nodes()
+    test_read_file_log_maps_upstream_dependency_for_topology_rca()
     test_apply_annotations_adds_highlights_and_inferred_edges()
+    test_rca_candidates_rank_upstream_dependency_root_cause()
     print("topology RCA annotations regression OK")
 
 

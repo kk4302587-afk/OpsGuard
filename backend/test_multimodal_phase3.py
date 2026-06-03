@@ -8,7 +8,9 @@ from pathlib import Path
 os.chdir(Path(__file__).parent)
 
 from app.agent import graph
+from app.agent.final_response import make_tool_ledger_entry
 from app.incidents import store as incident_store
+from app.mcp_tools.process_tools import ToolResult
 
 
 def test_multimodal_incident_report_evidence_pairs_with_real_tools() -> None:
@@ -117,6 +119,18 @@ def test_multimodal_context_is_auxiliary_knowledge_only_after_tool_execution() -
                 "user_message": "看截图",
                 "final_response": "已基于真实日志给出建议",
                 "messages": [{"role": "tool", "content": "nginx log: 502"}],
+                "current_turn_tool_ledger": [
+                    make_tool_ledger_entry(
+                        call_id="call-nginx-logs",
+                        tool_name="get_service_logs",
+                        tool_args={"service": "nginx"},
+                        risk_level="read",
+                        status="success",
+                        result=ToolResult(success=True, data="nginx log: 502"),
+                        execution_state="executed",
+                        approval_granted=False,
+                    )
+                ],
                 "multimodal_context": [
                     {
                         "input_type": "image",

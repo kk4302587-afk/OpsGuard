@@ -29,13 +29,80 @@ interface TraceEvent {
   timestamp: string
   metadata?: Record<string, unknown>
   claim?: string
-  evidence_type?: 'command' | 'log' | 'config' | 'metric' | 'topology' | 'knowledge' | 'user input'
+  evidence_type?: 'command' | 'log' | 'config' | 'metric' | 'topology' | 'knowledge' | 'user input' | 'alert' | 'dashboard_link'
   source?: string
   observed?: string
   confidence?: 'low' | 'medium' | 'high'
   execution_state?: 'executed' | 'inferred' | 'skipped' | 'failed'
   failure_reason?: string
   next_check?: string
+}
+
+const isApprovalTrace = (event: TraceEvent): boolean => (
+  event.phase === 'approval_request'
+  && event.event_type === 'pending'
+  && event.metadata?.type === 'approval_request'
+  && typeof event.metadata?.command === 'string'
+)
+
+const valueAsString = (value: unknown): string => (
+  typeof value === 'string' ? value : ''
+)
+
+const approvalCommandFromTrace = (event: TraceEvent): string => {
+  const metadataCommand = valueAsString(event.metadata?.command)
+  return metadataCommand.trim()
+}
+
+const approvalMessageFromTrace = (event: TraceEvent): Message | null => {
+  if (!isApprovalTrace(event)) return null
+  const command = approvalCommandFromTrace(event)
+  if (!command) return null
+
+  const riskLevel = valueAsString(event.metadata?.risk_level)
+  const impact = valueAsString(event.metadata?.impact)
+  const description = valueAsString(event.metadata?.description)
+  const detail = valueAsString(event.content)
+  const lines = [`[需要确认] ${command}`]
+  if (riskLevel) lines.push(`风险等级: ${riskLevel}`)
+  if (description && description !== command) lines.push(`操作说明: ${description}`)
+  if (impact) lines.push(`影响评估: ${impact}`)
+  else if (detail && detail !== command && detail !== description) lines.push(`影响评估: ${detail}`)
+
+  return {
+    id: `approval-history-${event.timestamp || command}`,
+    role: 'assistant',
+    content: lines.join('\n'),
+    timestamp: event.timestamp || new Date().toISOString(),
+  }
+}
+
+const approvalCommandFromMessage = (message: Message): string => (
+  message.content.startsWith('[需要确认] ')
+    ? message.content.split('\n')[0].replace('[需要确认] ', '').trim()
+    : ''
+)
+
+const mergeMessagesWithHistoricalApprovals = (
+  messages: Message[],
+  traceEvents: TraceEvent[],
+): Message[] => {
+  const existingApprovalCommands = new Set(
+    messages.map(approvalCommandFromMessage).filter(Boolean),
+  )
+  const approvalMessages = traceEvents
+    .map(approvalMessageFromTrace)
+    .filter((message): message is Message => {
+      if (!message) return false
+      const command = approvalCommandFromMessage(message)
+      if (!command || existingApprovalCommands.has(command)) return false
+      existingApprovalCommands.add(command)
+      return true
+    })
+
+  if (!approvalMessages.length) return messages
+  return [...messages, ...approvalMessages]
+    .sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''))
 }
 
 export interface MultimodalRecognitionResult {
@@ -92,6 +159,9 @@ interface ChatStore {
     rollback_strategy?: string
     supports_rollback?: boolean
     preview_strategy?: string
+    policy?: Record<string, unknown>
+    approval_level?: string
+    execution_identity?: Record<string, unknown>
   } | null
   clearApproval: () => void
 
@@ -107,8 +177,30 @@ interface ChatStore {
     failure_count: number
     success_rate?: number | null
     staleness_status: 'fresh' | 'warning' | 'stale'
+    last_success?: string | null
     last_failure_reason?: string | null
+    rollback_steps?: Array<Record<string, unknown>>
     original_message: string
+    preflight?: {
+      status?: 'applicable' | 'uncertain' | 'not_applicable'
+      summary?: string
+      extracted_variables?: Record<string, string>
+      missing_variables?: string[]
+      checks?: Array<Record<string, unknown>>
+      requires_clarification?: boolean
+      clarification_prompt?: string
+      preconditions_summary?: {
+        total?: number
+        label?: string
+        counts?: Record<string, number>
+      }
+      rollback_coverage?: {
+        covered_steps?: number
+        total_mutating_steps?: number
+        has_explicit_rollback?: boolean
+        label?: string
+      }
+    }
   } | null
   acceptRunbookSuggestion: () => void
   dismissRunbookSuggestion: () => void
@@ -139,6 +231,7 @@ const createDefaultProgressSteps = (): ProgressStep[] => [
 const phaseToProgressStep: Record<string, number> = {
   safety_check: 0,
   knowledge_retrieval: 1,
+  context_management: 2,
   planning: 2,
   tool_call: 3,
   execution: 3,
@@ -166,6 +259,11 @@ const applyTraceToProgressSteps = (
   if (event.event_type === 'start' || event.event_type === 'pending') {
     nextSteps[stepIdx] = { ...nextSteps[stepIdx], status: 'process', description: localizeTraceContent(event.content) }
   } else if (event.event_type === 'success') {
+    if (event.phase === 'response') {
+      for (let i = 0; i < nextSteps.length; i++) {
+        nextSteps[i] = { ...nextSteps[i], status: 'finish' }
+      }
+    }
     nextSteps[stepIdx] = { ...nextSteps[stepIdx], status: 'finish', description: localizeTraceContent(event.content) }
   } else if (event.event_type === 'failure' || event.event_type === 'blocked') {
     nextSteps[stepIdx] = { ...nextSteps[stepIdx], status: 'error', description: localizeTraceContent(event.content) }
@@ -363,7 +461,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (id === activeSessionId) return
 
     disconnectWebSocket()
-    set({ activeSessionId: id, messages: [], traceEvents: [], isThinking: false })
+    set({
+      activeSessionId: id,
+      messages: [],
+      traceEvents: [],
+      isThinking: false,
+      pendingApproval: null,
+      pendingRunbookSuggestion: null,
+    })
     connectWebSocket(id)
 
     // Load messages for this session
@@ -397,7 +502,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 ? { ...msg, progressSteps: buildProgressStepsFromTrace(traceEvents) }
                 : msg
             ))
-            return { traceEvents, messages }
+            return {
+              traceEvents,
+              messages: mergeMessagesWithHistoricalApprovals(messages, traceEvents),
+            }
           })
         }
       })
@@ -573,6 +681,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 if (data.event_type === 'start' || data.event_type === 'pending') {
                   steps[stepIdx] = { ...steps[stepIdx], status: 'process', description: localizeTraceContent(data.content) }
                 } else if (data.event_type === 'success') {
+                  if (data.phase === 'response') {
+                    for (let i = 0; i < steps.length; i++) {
+                      steps[i] = { ...steps[i], status: 'finish' }
+                    }
+                  }
                   steps[stepIdx] = { ...steps[stepIdx], status: 'finish', description: localizeTraceContent(data.content) }
                 } else if (data.event_type === 'failure' || data.event_type === 'blocked') {
                   steps[stepIdx] = { ...steps[stepIdx], status: 'error', description: localizeTraceContent(data.content) }
@@ -597,6 +710,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               rollback_strategy: data.rollback_strategy,
               supports_rollback: data.supports_rollback,
               preview_strategy: data.preview_strategy,
+              policy: isRecord(data.policy) ? data.policy : undefined,
+              approval_level: typeof data.approval_level === 'string' ? data.approval_level : undefined,
+              execution_identity: isRecord(data.execution_identity) ? data.execution_identity : undefined,
             },
             messages: [
               ...state.messages,
@@ -626,15 +742,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               failure_count: data.failure_count || 0,
               success_rate: data.success_rate,
               staleness_status: data.staleness_status || 'fresh',
+              last_success: data.last_success || null,
               last_failure_reason: data.last_failure_reason || null,
+              rollback_steps: data.rollback_steps || [],
               original_message: data.original_message || '',
+              preflight: data.preflight || undefined,
             },
             messages: [
               ...state.messages.filter((m) => m.role !== 'progress'),
               {
                 id: createClientId('runbook'),
                 role: 'assistant',
-                content: `[Runbook建议] ${data.name}\n步骤数: ${data.step_count}\n版本: v${data.version || 1}\n健康: ${data.staleness_status || 'fresh'}\n成功/失败: ${data.success_count || 0}/${data.failure_count || 0}\n相似度: ${Math.round((data.match_ratio || 0) * 100)}%${data.last_failure_reason ? '\n最近失败: ' + data.last_failure_reason : ''}\n${data.description || ''}`,
+                content: `[Runbook建议] ${data.name}\n步骤数: ${data.step_count}\n修订版本: v${data.version || 1}\nRunbook状态: ${data.staleness_status || 'fresh'}\n预检结论: ${data.preflight?.status || 'uncertain'}${data.preflight?.summary ? '\n预检说明: ' + data.preflight.summary : ''}\n历史执行: 成功 ${data.success_count || 0} / 失败 ${data.failure_count || 0}\n匹配度: ${Math.round((data.match_ratio || 0) * 100)}%${data.last_success ? '\n最后成功: ' + data.last_success : ''}${data.preflight?.preconditions_summary?.label ? '\n预检条件: ' + data.preflight.preconditions_summary.label : ''}${data.preflight?.rollback_coverage?.label ? '\n回滚覆盖: ' + data.preflight.rollback_coverage.label : ''}${data.last_failure_reason ? '\n最近失败: ' + data.last_failure_reason : ''}\n${data.description || ''}`,
                 timestamp: new Date().toISOString(),
               },
             ],

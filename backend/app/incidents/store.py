@@ -524,13 +524,41 @@ async def _infer_status(incident_id: str, *, db_path: str | None = None) -> str:
             SELECT COUNT(*)
             FROM incident_events
             WHERE incident_id = ?
-              AND event_type IN ('failure', 'blocked')
-              AND phase IN ('safety_check', 'execution', 'verification', 'response')
+              AND event_type = 'blocked'
+              AND phase IN ('safety_check', 'response', 'error')
             """,
             (incident_id,),
         )
-        failure_count = (await cursor.fetchone())[0]
-    return "failed" if failure_count else "resolved"
+        blocked_count = (await cursor.fetchone())[0]
+        if blocked_count:
+            return "failed"
+
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*)
+            FROM incident_events
+            WHERE incident_id = ?
+              AND event_type = 'success'
+              AND phase = 'response'
+            """,
+            (incident_id,),
+        )
+        response_success_count = (await cursor.fetchone())[0]
+        if response_success_count:
+            return "resolved"
+
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*)
+            FROM incident_events
+            WHERE incident_id = ?
+              AND event_type = 'failure'
+              AND phase IN ('safety_check', 'response', 'error')
+            """,
+            (incident_id,),
+        )
+        fatal_failure_count = (await cursor.fetchone())[0]
+    return "failed" if fatal_failure_count else "resolved"
 
 
 def _extract_evidence(message: dict) -> dict | None:

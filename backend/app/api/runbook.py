@@ -9,7 +9,7 @@ from datetime import datetime
 
 import aiosqlite
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.agent.runbook_governance import (
     ensure_runbook_schema,
@@ -29,6 +29,11 @@ class RunbookStep(BaseModel):
     tool_args: dict
     description: str
     risk_level: str
+    on_success: int | str | dict | None = None
+    on_failure: int | str | dict | None = None
+    max_retries: int = 0
+    requires_approval: bool | None = None
+    continue_on_failure: bool = False
 
 
 class CreateRunbookRequest(BaseModel):
@@ -37,6 +42,17 @@ class CreateRunbookRequest(BaseModel):
     description: str
     trigger_pattern: str  # What problem pattern triggers this runbook
     steps: list[RunbookStep]
+    variables: list[dict] = Field(default_factory=list)
+    preconditions: list[dict] = Field(default_factory=list)
+    applicability_conditions: list[dict] = Field(default_factory=list)
+    non_applicability_conditions: list[dict] = Field(default_factory=list)
+    postconditions: list[dict] = Field(default_factory=list)
+    failure_branches: list[dict] = Field(default_factory=list)
+    rollback_steps: list[dict] = Field(default_factory=list)
+    owner: str | None = None
+    review_status: str | None = None
+    ttl_days: int | None = None
+    source_incident_id: str | None = None
 
 
 @router.get("/")
@@ -65,6 +81,17 @@ async def create_runbook(request: CreateRunbookRequest):
             description=request.description,
             trigger_pattern=request.trigger_pattern,
             steps=[s.model_dump() for s in request.steps],
+            variables=request.variables,
+            preconditions=request.preconditions,
+            applicability_conditions=request.applicability_conditions,
+            non_applicability_conditions=request.non_applicability_conditions,
+            postconditions=request.postconditions,
+            failure_branches=request.failure_branches,
+            rollback_steps=request.rollback_steps,
+            owner=request.owner,
+            review_status=request.review_status,
+            ttl_days=request.ttl_days,
+            source_incident_id=request.source_incident_id,
         )
 
     return {"id": runbook_id, "name": request.name, "created_at": now, "updated": updated}

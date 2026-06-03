@@ -70,6 +70,8 @@ def _fake_tool(name: str, calls: list[tuple[str, dict]]):
         "get_listening_ports": "network",
         "get_disk_usage": "disk",
         "get_recent_changes": "recent_changes",
+        "prometheus_range_query": "observability",
+        "loki_range_query": "observability",
     }
     if name in read_tools:
         return ToolDefinition(
@@ -145,6 +147,8 @@ def test_service_down_webhook_creates_session_incident_and_read_only_trace() -> 
         called_names = [name for name, _ in calls]
         assert result["template"] == "service_down"
         assert called_names == [
+            "prometheus_range_query",
+            "loki_range_query",
             "get_service_status",
             "get_service_logs",
             "get_listening_ports",
@@ -221,12 +225,15 @@ def test_disk_webhook_uses_disk_template_and_records_failures_truthfully() -> No
             event for event in events
             if event["phase"] == "execution" and event["event_type"] == "failure"
         ]
+        disk_check = next(check for check in result["checks"] if check["tool_name"] == "get_disk_usage")
         assert result["template"] == "high_disk_usage"
-        assert result["checks"][0]["status"] == "failed"
-        assert "df unavailable" in result["checks"][0]["summary"]
+        assert disk_check["status"] == "failed"
+        assert "df unavailable" in disk_check["summary"]
         assert failed
-        assert failed[0]["evidence"]["execution_state"] == "failed"
-        assert "df unavailable" in failed[0]["evidence"]["failure_reason"]
+        disk_failures = [event for event in failed if event["evidence"]["source"] == "get_disk_usage"]
+        assert disk_failures
+        assert disk_failures[0]["evidence"]["execution_state"] == "failed"
+        assert "df unavailable" in disk_failures[0]["evidence"]["failure_reason"]
 
     asyncio.run(scenario())
 
@@ -267,10 +274,75 @@ def test_webhook_auto_triage_blocks_non_read_steps() -> None:
     asyncio.run(scenario())
 
 
+def test_alertmanager_payload_enriches_observability_and_dashboard_trace() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            knowledge_db = str(Path(tmpdir) / "knowledge.db")
+            audit_db = str(Path(tmpdir) / "audit.db")
+            await _init_temp_db(knowledge_db, audit_db)
+            calls: list[tuple[str, dict]] = []
+
+            original_knowledge_path = triage.get_knowledge_db_path
+            original_audit_path = triage.get_audit_db_path
+            original_incident_path = incident_store.get_knowledge_db_path
+            original_get_tool = triage.tools_registry.get_tool
+            try:
+                triage.get_knowledge_db_path = lambda: knowledge_db
+                triage.get_audit_db_path = lambda: audit_db
+                incident_store.get_knowledge_db_path = lambda: knowledge_db
+                triage.tools_registry.get_tool = lambda name: _fake_tool(name, calls)
+
+                result = await triage.run_alert_auto_triage(
+                    {
+                        "receiver": "opsguard",
+                        "alerts": [
+                            {
+                                "status": "firing",
+                                "labels": {
+                                    "alertname": "HighNginx5xxRate",
+                                    "service": "nginx",
+                                    "severity": "critical",
+                                    "instance": "vm-1:9113",
+                                },
+                                "annotations": {
+                                    "summary": "nginx 5xx rate too high",
+                                    "dashboard": "https://grafana.example/d/nginx",
+                                    "prometheus_query": 'rate(nginx_http_requests_total{status=~"5.."}[5m])',
+                                    "loki_query": '{service="nginx"} |= "502"',
+                                },
+                            }
+                        ],
+                    }
+                )
+                events = await incident_store.get_incident_events(result["incident_id"], db_path=knowledge_db)
+            finally:
+                triage.get_knowledge_db_path = original_knowledge_path
+                triage.get_audit_db_path = original_audit_path
+                incident_store.get_knowledge_db_path = original_incident_path
+                triage.tools_registry.get_tool = original_get_tool
+
+        called_names = [name for name, _ in calls]
+        assert called_names[:2] == ["prometheus_range_query", "loki_range_query"]
+        assert result["alert"]["dashboard_url"] == "https://grafana.example/d/nginx"
+        assert "Grafana" in result["report"]
+        evidence_types = [
+            event["evidence"]["evidence_type"]
+            for event in events
+            if event.get("evidence")
+        ]
+        assert "alert" in evidence_types
+        assert "dashboard_link" in evidence_types
+        assert "metric" in evidence_types
+        assert "log" in evidence_types
+
+    asyncio.run(scenario())
+
+
 def main() -> None:
     test_service_down_webhook_creates_session_incident_and_read_only_trace()
     test_disk_webhook_uses_disk_template_and_records_failures_truthfully()
     test_webhook_auto_triage_blocks_non_read_steps()
+    test_alertmanager_payload_enriches_observability_and_dashboard_trace()
     print("alert webhook auto-triage regression OK")
 
 

@@ -9,13 +9,16 @@ import re
 import uuid
 from typing import TypedDict, Annotated, Callable
 from datetime import datetime
+from pathlib import Path
 
 from loguru import logger
 from langgraph.graph import StateGraph, END
 
 from app.agent.llm import call_llm
+from app.agent.context_manager import build_context_package
 from app.agent.trace_evidence import (
     build_evidence,
+    compact_observed,
     inference_evidence,
     knowledge_evidence,
     tool_plan_evidence,
@@ -30,11 +33,10 @@ from app.agent.final_response import (
 )
 from app.agent.tool_executor import execute_tool, get_tools_for_llm
 from app.agent.tool_execution_store import (
-    format_recent_tool_evidence,
-    get_recent_tool_executions,
     record_tool_execution,
 )
 from app.agent.tools_registry import tools_registry, RiskLevel
+from app.agent.execution_policy import evaluate_tool_policy, policy_summary
 from app.safety.guardrail import SafetyGuardrail
 from app.audit.logger import audit_logger, AuditPhase, AuditEventType
 from app.incidents import store as incident_store
@@ -58,6 +60,8 @@ class AgentState(TypedDict):
     multimodal_hint: str
     multimodal_context: list[dict]
     current_turn_tool_count: int
+    current_turn_tool_ledger: list[dict]
+    structured_validation_result: dict
     iteration: int
     send_to_client: object  # Callable, not serializable but used in-memory
 
@@ -339,14 +343,7 @@ async def reasoning_node(state: AgentState) -> dict:
     risk_warning = state.get("risk_warning", "")
     knowledge_hint = state.get("knowledge_hint", "")
     recent_changes_hint = state.get("recent_changes_hint", "")
-    history_evidence_hint = ""
     history_recall_intent = _is_history_recall_intent(user_message)
-    if history_recall_intent:
-        try:
-            recent_executions = await get_recent_tool_executions(session_id, limit=12)
-            history_evidence_hint = format_recent_tool_evidence(recent_executions)
-        except Exception as e:
-            logger.warning(f"Recent tool evidence lookup failed: {e}")
 
     await send_to_client(trace_event(
         phase="planning",
@@ -356,14 +353,81 @@ async def reasoning_node(state: AgentState) -> dict:
     ))
     await audit_logger.log(session_id, AuditPhase.PLANNING, AuditEventType.START, "开始推理")
 
+    tool_call_explanation = _render_tool_call_explanation_request(user_message)
+    if tool_call_explanation:
+        await audit_logger.log(
+            session_id,
+            AuditPhase.RESPONSE,
+            AuditEventType.SUCCESS,
+            "解释工具调用，未执行工具",
+        )
+        await send_to_client(trace_event(
+            phase="response",
+            event_type="success",
+            content="已解释工具调用，未执行任何操作",
+            evidence=build_evidence(
+                claim="用户请求解释工具调用，系统仅基于工具注册表生成说明",
+                evidence_type="config",
+                source="tools_registry",
+                observed=user_message[:500],
+                confidence="high",
+                execution_state="skipped",
+            ),
+        ))
+        return {
+            "final_response": tool_call_explanation,
+            "messages": list(state.get("messages", [])) + [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": tool_call_explanation},
+            ],
+            "iteration": 0,
+            "current_turn_tool_count": 0,
+            "is_blocked": False,
+            "block_reason": "",
+        }
+
     fresh_read_plan = _fresh_read_tool_plan(user_message)
 
-    # Build messages
-    messages = list(state.get("messages", []))
     multimodal_hint = state.get("multimodal_hint", "")
     fresh_evidence_hint = _format_fresh_evidence_requirement(user_message, fresh_read_plan)
-    user_content = user_message + multimodal_hint + knowledge_hint + recent_changes_hint + history_evidence_hint + risk_warning + fresh_evidence_hint
-    messages.append({"role": "user", "content": user_content})
+    context_package = await build_context_package(
+        session_id=session_id,
+        user_message=user_message,
+        conversation_history=state.get("messages", []),
+        knowledge_hint=knowledge_hint,
+        recent_changes_hint=recent_changes_hint,
+        multimodal_hint=multimodal_hint,
+        fresh_evidence_hint=fresh_evidence_hint,
+        include_recent_tool_ledger=history_recall_intent,
+        llm_call=call_llm,
+    )
+    messages = context_package.messages
+    if risk_warning:
+        messages[-1]["content"] = messages[-1]["content"] + risk_warning
+    await send_to_client(trace_event(
+        phase="context_management",
+        event_type="success",
+        content=(
+            "上下文已按层级和预算注入："
+            f"最近消息 {len(messages) - 1} 条，"
+            f"会话摘要 {'已使用' if context_package.session_summary else '无'}，"
+            f"历史工具账本 {'已注入' if context_package.recent_tool_ledger_hint else '未注入'}"
+        ),
+        evidence=build_evidence(
+            claim="Agent prompt 已应用 Context Management 2.0 分层和预算规则",
+            evidence_type="config",
+            source="context_manager.build_context_package",
+            observed={
+                "layers": [
+                    {"name": layer.name, "state_label": layer.state_label, "chars": len(layer.content or "")}
+                    for layer in context_package.layers
+                ],
+                "message_count": len(messages),
+            },
+            confidence="high",
+            execution_state="executed",
+        ),
+    ))
 
     all_tools = await get_tools_for_llm()
     max_iterations = 10
@@ -392,28 +456,50 @@ async def reasoning_node(state: AgentState) -> dict:
         if not llm_response["tool_calls"] and not policy_compiled_tool_used:
             compiled_tool_call = _compile_deterministic_tool_call(user_message)
             if compiled_tool_call:
-                policy_compiled_tool_used = True
-                llm_response["tool_calls"] = [compiled_tool_call]
-                await send_to_client(trace_event(
-                    phase="planning",
-                    event_type="success",
-                    content=(
-                        "策略层已将高确定性运维意图编译为工具调用："
-                        f"{compiled_tool_call['name']}({json.dumps(compiled_tool_call['arguments'], ensure_ascii=False)})"
-                    ),
-                    evidence=build_evidence(
-                        claim="后端策略层已补全模型未发起的必要工具调用",
-                        evidence_type="user input",
-                        source="intent_policy_compiler",
-                        observed={
-                            "user_message": user_message,
-                            "tool_name": compiled_tool_call["name"],
-                            "tool_args": compiled_tool_call["arguments"],
-                        },
-                        confidence="high",
-                        execution_state="inferred",
-                    ),
-                ))
+                if _has_equivalent_tool_call(tool_ledger_this_turn, compiled_tool_call["name"], compiled_tool_call["arguments"]):
+                    policy_compiled_tool_used = True
+                    await send_to_client(trace_event(
+                        phase="planning",
+                        event_type="success",
+                        content=(
+                            "策略层检测到本轮已处理等价工具调用，跳过重复补全："
+                            f"{compiled_tool_call['name']}({json.dumps(compiled_tool_call['arguments'], ensure_ascii=False)})"
+                        ),
+                        evidence=build_evidence(
+                            claim="后端策略层已跳过重复的确定性工具调用",
+                            evidence_type="command",
+                            source="intent_policy_compiler",
+                            observed={
+                                "tool_name": compiled_tool_call["name"],
+                                "tool_args": compiled_tool_call["arguments"],
+                            },
+                            confidence="high",
+                            execution_state="skipped",
+                        ),
+                    ))
+                else:
+                    policy_compiled_tool_used = True
+                    llm_response["tool_calls"] = [compiled_tool_call]
+                    await send_to_client(trace_event(
+                        phase="planning",
+                        event_type="success",
+                        content=(
+                            "策略层已将高确定性运维意图编译为工具调用："
+                            f"{compiled_tool_call['name']}({json.dumps(compiled_tool_call['arguments'], ensure_ascii=False)})"
+                        ),
+                        evidence=build_evidence(
+                            claim="后端策略层已补全模型未发起的必要工具调用",
+                            evidence_type="user input",
+                            source="intent_policy_compiler",
+                            observed={
+                                "user_message": user_message,
+                                "tool_name": compiled_tool_call["name"],
+                                "tool_args": compiled_tool_call["arguments"],
+                            },
+                            confidence="high",
+                            execution_state="inferred",
+                        ),
+                    ))
 
         if llm_response["tool_calls"]:
             for tool_call in llm_response["tool_calls"]:
@@ -514,6 +600,27 @@ async def reasoning_node(state: AgentState) -> dict:
                     ))
                     continue
 
+                if _is_noop_create_directory(tool_name, tool_args):
+                    noop_message = f"目录已存在，无需创建: {tool_args.get('dirpath')}"
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [
+                        {"id": call_id, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)}}
+                    ]})
+                    messages.append({"role": "tool", "tool_call_id": call_id, "content": f"SKIPPED_NOOP: {noop_message}"})
+                    await send_to_client(trace_event(
+                        phase="tool_call",
+                        event_type="success",
+                        content=f"跳过无需执行的目录创建：{tool_args.get('dirpath')}",
+                        evidence=build_evidence(
+                            claim="目标目录已经存在，create_directory 不需要审批或执行",
+                            evidence_type="config",
+                            source="noop_write_guard",
+                            observed=tool_args,
+                            confidence="high",
+                            execution_state="skipped",
+                        ),
+                    ))
+                    continue
+
                 await send_to_client(trace_event(
                     phase="tool_call",
                     event_type="start",
@@ -571,18 +678,103 @@ async def reasoning_node(state: AgentState) -> dict:
                         ))
                         continue
 
+                    policy_decision = evaluate_tool_policy(tool_name, tool_args, tool_def)
+                    if not policy_decision.allowed:
+                        policy_text = policy_summary(policy_decision)
+                        messages.append({"role": "assistant", "content": None, "tool_calls": [
+                            {"id": call_id, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)}}
+                        ]})
+                        messages.append({"role": "tool", "tool_call_id": call_id, "content": f"BLOCKED_POLICY: {policy_text}"})
+                        ledger_entry = make_tool_ledger_entry(
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            risk_level=tool_def.risk_level.value,
+                            status="blocked",
+                            result={"success": False, "data": "", "error": policy_text},
+                            error=policy_text,
+                            execution_state="skipped",
+                            approval_granted=False,
+                        )
+                        tool_ledger_this_turn.append(ledger_entry)
+                        await record_tool_execution(
+                            session_id=session_id,
+                            incident_id=incident_id,
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            risk_level=tool_def.risk_level.value,
+                            status="blocked",
+                            result={"success": False, "data": "", "error": policy_text},
+                            error=policy_text,
+                            execution_state="skipped",
+                            approval_granted=False,
+                        )
+                        await audit_logger.log(
+                            session_id,
+                            AuditPhase.TOOL_CALL,
+                            AuditEventType.BLOCKED,
+                            f"Policy blocked tool call: {tool_name}",
+                            {"tool_name": tool_name, "tool_args": tool_args, "policy": policy_decision.to_dict()},
+                        )
+                        await send_to_client(trace_event(
+                            phase="tool_call",
+                            event_type="blocked",
+                            content=f"策略阻断: {policy_text}",
+                            evidence=build_evidence(
+                                claim=f"{display_name} 执行前被策略引擎阻断",
+                                evidence_type="command",
+                                source="execution_policy",
+                                observed=policy_decision.to_dict(),
+                                confidence="high",
+                                execution_state="skipped",
+                                failure_reason="; ".join(policy_decision.reasons),
+                            ),
+                        ))
+                        continue
+
                     # Request approval
                     from app.websocket.approval import approval_manager
                     import asyncio as _asyncio
 
                     request_id = call_id
                     impact_text = await assess_impact(tool_name, tool_args, session_id, send_to_client)
+                    policy_text = policy_summary(policy_decision)
+                    if impact_text:
+                        impact_text = f"{impact_text}\n{policy_text}"
+                    else:
+                        impact_text = policy_text
 
                     loop = _asyncio.get_running_loop()
                     approval_future = loop.create_future()
-                    approval_manager.register_pending(request_id, session_id, tool_name, tool_args, tool_def.risk_level, tool_def.description, approval_future)
-
                     supports_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
+                    try:
+                        approval_manager.register_pending(
+                            request_id,
+                            session_id,
+                            tool_name,
+                            tool_args,
+                            tool_def.risk_level,
+                            tool_def.description,
+                            approval_future,
+                            impact=impact_text,
+                            rollback_strategy=rollback_strategy,
+                            supports_rollback=supports_rollback,
+                            preview_strategy=tool_def.preview_strategy,
+                            policy=policy_decision.to_dict(),
+                            approval_level=policy_decision.approval_level,
+                            execution_identity=policy_decision.execution_identity,
+                        )
+                    except TypeError:
+                        approval_manager.register_pending(
+                            request_id,
+                            session_id,
+                            tool_name,
+                            tool_args,
+                            tool_def.risk_level,
+                            tool_def.description,
+                            approval_future,
+                        )
                     await send_to_client({
                         "type": "approval_request",
                         "request_id": request_id,
@@ -593,6 +785,9 @@ async def reasoning_node(state: AgentState) -> dict:
                         "rollback_strategy": rollback_strategy,
                         "supports_rollback": supports_rollback,
                         "preview_strategy": tool_def.preview_strategy,
+                        "policy": policy_decision.to_dict(),
+                        "approval_level": policy_decision.approval_level,
+                        "execution_identity": policy_decision.execution_identity,
                     })
                     await send_to_client(trace_event(
                         phase="approval_request",
@@ -602,7 +797,7 @@ async def reasoning_node(state: AgentState) -> dict:
                             claim=f"{display_name} 需要用户审批后才能执行",
                             evidence_type="user input",
                             source="approval_manager",
-                            observed=impact_text or tool_args,
+                            observed={"impact": impact_text or tool_args, "policy": policy_decision.to_dict()},
                             confidence="high",
                             execution_state="skipped",
                         ),
@@ -997,6 +1192,8 @@ async def reasoning_node(state: AgentState) -> dict:
         "messages": messages,
         "iteration": iteration,
         "current_turn_tool_count": current_turn_tool_count,
+        "current_turn_tool_ledger": tool_ledger_this_turn,
+        "structured_validation_result": structured_validation_result or {},
         "is_blocked": guard_blocked_final_response,
         "block_reason": "structured_final_response_guard" if guard_blocked_final_response else "",
     }
@@ -1018,12 +1215,20 @@ async def knowledge_save_node(state: AgentState) -> dict:
     messages = state.get("messages", [])
     incident_id = state.get("incident_id", "")
     multimodal_context = state.get("multimodal_context", [])
+    tool_ledger = state.get("current_turn_tool_ledger", []) or []
+    structured_validation_result = state.get("structured_validation_result", {}) or {}
     send_to_client = state["send_to_client"]
 
     # No tool was executed in the current turn → nothing actionable happened →
     # nothing to save. Historical tool messages in the same conversation must
     # not make a pure image/voice turn look like a verified resolution.
     if int(state.get("current_turn_tool_count", 0) or 0) <= 0:
+        return {}
+    if not tool_ledger:
+        logger.debug("Skip save: no current-turn tool ledger evidence")
+        return {}
+    if structured_validation_result and structured_validation_result.get("valid") is False:
+        logger.debug("Skip save: structured final response validation failed")
         return {}
 
     # === Semantic extraction (single LLM call serves both knowledge and runbook) ===
@@ -1048,6 +1253,18 @@ async def knowledge_save_node(state: AgentState) -> dict:
         if multimodal_memory:
             evidence.extend(multimodal_memory["evidence"])
             applicability_conditions.append("多模态识别结果仅作为辅助上下文，复用前必须重新执行真实 MCP 检查。")
+        evidence_refs = _build_knowledge_evidence_refs(
+            session_id=session_id,
+            incident_id=incident_id,
+            tool_ledger=tool_ledger,
+            extracted_evidence=evidence,
+        )
+        trace_event_ids = await _load_memory_trace_event_ids(incident_id)
+        validation_method = summary_data.get("validation_method") or ""
+        validation_status = "validated" if validation_method else "missing"
+        confidence = summary_data.get("confidence") or "medium"
+        if validation_status == "missing":
+            confidence = "low"
 
         await knowledge_store.save_resolution(
             problem_signature=problem,
@@ -1060,11 +1277,23 @@ async def knowledge_save_node(state: AgentState) -> dict:
                 "evidence": evidence,
                 "successful_actions": summary_data.get("successful_actions") or [],
                 "failed_attempts": summary_data.get("failed_attempts") or [],
-                "validation_method": summary_data.get("validation_method") or "",
+                "validation_method": validation_method,
                 "applicability_conditions": applicability_conditions,
                 "non_applicability_conditions": summary_data.get("non_applicability_conditions") or [],
                 "source_incident_id": incident_id,
-                "confidence": summary_data.get("confidence") or "medium",
+                "source_session_id": session_id,
+                "entities": _extract_memory_entities(summary_data, tool_ledger),
+                "incident_type": _infer_incident_type(problem, summary_data),
+                "source_modality": "real_tool_execution",
+                "evidence_refs": evidence_refs,
+                "tool_call_ids": [item.get("call_id") for item in tool_ledger if item.get("call_id")],
+                "trace_event_ids": trace_event_ids,
+                "evidence_summaries": [item.get("summary") for item in evidence_refs if item.get("summary")],
+                "has_write_action": any(bool(item.get("is_write")) for item in tool_ledger),
+                "write_approved": any(bool(item.get("is_write")) and bool(item.get("approval_granted")) for item in tool_ledger),
+                "validation_status": validation_status,
+                "structured_final_valid": bool(structured_validation_result.get("valid")) if structured_validation_result else None,
+                "confidence": confidence,
                 "source_modalities": multimodal_memory.get("source_modalities", []) if multimodal_memory else ["real_tool_execution"],
                 "multimodal_evidence": multimodal_memory.get("items", []) if multimodal_memory else [],
             },
@@ -1216,6 +1445,8 @@ async def run_agent(
         "multimodal_hint": _format_multimodal_context(multimodal_context),
         "multimodal_context": multimodal_context,
         "current_turn_tool_count": 0,
+        "current_turn_tool_ledger": [],
+        "structured_validation_result": {},
         "iteration": 0,
         "send_to_client": send_to_client,
     }
@@ -1279,32 +1510,48 @@ async def run_agent(
 def _format_knowledge_entry_for_prompt(entry: dict) -> str:
     """Format structured incident memory for LLM context."""
     lines = [
-        f"- 问题: {entry.get('problem_signature')}",
-        f"  匹配: {entry.get('match_reason') or '历史文本相似'} (score={entry.get('match_score')})",
+        f"- 历史事故: {entry.get('problem_signature')}",
+        "  边界: 以下内容只代表历史记录，不是当前系统事实；当前事实必须来自本轮工具/遥测结果。",
+        f"  匹配: {entry.get('match_reason') or '历史文本相似'} "
+        f"(match={entry.get('match_score')}, confidence={entry.get('confidence') or 'medium'})",
     ]
+    if entry.get("retrieval_sources"):
+        lines.append(f"  召回来源: {', '.join(map(str, entry.get('retrieval_sources') or []))}")
     if entry.get("symptoms"):
-        lines.append(f"  症状: {', '.join(map(str, entry.get('symptoms') or []))}")
+        lines.append(f"  历史症状: {', '.join(map(str, entry.get('symptoms') or []))}")
     if entry.get("root_cause"):
-        lines.append(f"  根因: {entry.get('root_cause')}")
+        lines.append(f"  历史根因: {entry.get('root_cause')}")
     if entry.get("evidence"):
         evidence_preview = "; ".join(map(str, (entry.get("evidence") or [])[:3]))
-        lines.append(f"  证据: {evidence_preview}")
+        lines.append(f"  历史证据摘要: {evidence_preview}")
+    if entry.get("evidence_refs"):
+        refs = []
+        for ref in (entry.get("evidence_refs") or [])[:3]:
+            if isinstance(ref, dict):
+                refs.append(f"{ref.get('type') or 'evidence'}:{ref.get('call_id') or ref.get('id') or ref.get('summary')}")
+            else:
+                refs.append(str(ref))
+        if refs:
+            lines.append(f"  历史证据引用: {'; '.join(refs)}")
     if entry.get("successful_actions"):
         actions_preview = "; ".join(map(str, (entry.get("successful_actions") or [])[:3]))
-        lines.append(f"  有效动作: {actions_preview}")
+        lines.append(f"  历史有效动作: {actions_preview}")
     if entry.get("failed_attempts"):
         failed_preview = "; ".join(map(str, (entry.get("failed_attempts") or [])[:3]))
-        lines.append(f"  无效尝试: {failed_preview}")
+        lines.append(f"  历史无效尝试: {failed_preview}")
     if entry.get("validation_method"):
-        lines.append(f"  验证方法: {entry.get('validation_method')}")
+        lines.append(f"  历史验证方法: {entry.get('validation_method')}")
     if entry.get("applicability_conditions"):
         lines.append(f"  适用条件: {', '.join(map(str, entry.get('applicability_conditions') or []))}")
     if entry.get("non_applicability_conditions"):
         lines.append(f"  不适用条件: {', '.join(map(str, entry.get('non_applicability_conditions') or []))}")
+    if entry.get("recommended_fresh_checks"):
+        lines.append(f"  本轮必须重新检查: {', '.join(map(str, entry.get('recommended_fresh_checks') or []))}")
     lines.append(
         "  复用安全性: "
         + ("可作为参考，但写操作仍需重新检查和审批" if entry.get("safe_to_reuse") else "仅供参考，不能直接复用写操作")
     )
+    lines.append("  写作要求: 最终回复如果提到历史内容，必须称为“历史记录/历史经验”；不得写成当前已确认状态。")
     return "\n".join(lines) + "\n"
 
 
@@ -1367,6 +1614,131 @@ def _build_multimodal_memory(items: list[dict] | None) -> dict:
     }
 
 
+def _build_knowledge_evidence_refs(
+    *,
+    session_id: str,
+    incident_id: str,
+    tool_ledger: list[dict],
+    extracted_evidence: list,
+) -> list[dict]:
+    """Build durable evidence references for an incident-memory entry."""
+    refs: list[dict] = []
+    for item in tool_ledger:
+        call_id = item.get("call_id")
+        if not call_id:
+            continue
+        refs.append({
+            "type": "tool_call",
+            "call_id": call_id,
+            "session_id": session_id,
+            "incident_id": incident_id,
+            "tool_name": item.get("tool_name"),
+            "status": item.get("status"),
+            "summary": compact_observed(
+                item.get("result_summary") or item.get("error") or "",
+                max_chars=240,
+            ),
+            "is_write": bool(item.get("is_write")),
+            "approval_granted": bool(item.get("approval_granted")),
+        })
+    for index, summary in enumerate(extracted_evidence[:5]):
+        refs.append({
+            "type": "evidence_summary",
+            "id": f"summary_{index + 1}",
+            "session_id": session_id,
+            "incident_id": incident_id,
+            "summary": compact_observed(summary, max_chars=240),
+        })
+    return refs[:12]
+
+
+async def _load_memory_trace_event_ids(incident_id: str) -> list[str]:
+    """Return timeline event ids that can substantiate a saved memory entry."""
+    if not incident_id:
+        return []
+    try:
+        events = await incident_store.get_incident_events(incident_id, limit=200)
+    except Exception as exc:
+        logger.warning(f"Failed to load trace event ids for knowledge memory: {exc}")
+        return []
+
+    useful_phases = {"execution", "verification", "response", "knowledge_retrieval"}
+    ids: list[str] = []
+    for event in events:
+        if event.get("phase") not in useful_phases:
+            continue
+        if event.get("event_type") not in {"success", "failure", "blocked"}:
+            continue
+        event_id = event.get("id")
+        if event_id:
+            ids.append(str(event_id))
+    return ids[:20]
+
+
+def _extract_memory_entities(summary_data: dict, tool_ledger: list[dict]) -> dict:
+    """Extract simple service/path/port/host entities from summary and tool args."""
+    entities = {"services": [], "ports": [], "paths": [], "hosts": []}
+    text_parts = [
+        summary_data.get("problem") or "",
+        summary_data.get("diagnosis") or "",
+        summary_data.get("solution") or "",
+        summary_data.get("root_cause") or "",
+        " ".join(map(str, summary_data.get("symptoms") or [])),
+    ]
+    for item in tool_ledger:
+        args = item.get("args") or item.get("tool_args") or {}
+        if not isinstance(args, dict):
+            continue
+        for key, value in args.items():
+            key_l = str(key).lower()
+            if value in (None, ""):
+                continue
+            if key_l in {"service", "service_name", "unit"}:
+                entities["services"].append(str(value))
+            elif key_l in {"port", "local_port"}:
+                entities["ports"].append(str(value))
+            elif "path" in key_l or key_l in {"filepath", "file", "directory", "dir"}:
+                entities["paths"].append(str(value))
+            elif key_l in {"host", "hostname", "target_host"}:
+                entities["hosts"].append(str(value))
+        text_parts.append(json.dumps(args, ensure_ascii=False, default=str))
+
+    text = "\n".join(text_parts)
+    for match in re.findall(r"\b(?:nginx|mysql|redis|postgresql|postgres|apache|httpd|docker|ssh|sshd)\b", text, re.IGNORECASE):
+        entities["services"].append(match.lower())
+    for match in re.findall(r"(?<![\d.])\b([1-9][0-9]{1,4})\b(?![\d.])", text):
+        port = int(match)
+        if 1 <= port <= 65535:
+            entities["ports"].append(str(port))
+    for match in re.findall(r"(?<!\S)(/[A-Za-z0-9._~:/%+\-]+)", text):
+        entities["paths"].append(match.rstrip(".,;:，。；："))
+
+    return {
+        key: list(dict.fromkeys(values))[:10]
+        for key, values in entities.items()
+        if values
+    }
+
+
+def _infer_incident_type(problem: str, summary_data: dict) -> str:
+    text = " ".join([
+        problem or "",
+        summary_data.get("root_cause") or "",
+        " ".join(map(str, summary_data.get("symptoms") or [])),
+    ]).lower()
+    if any(term in text for term in ("disk", "磁盘", "空间", "inode")):
+        return "disk"
+    if any(term in text for term in ("nginx", "502", "http", "端口", "port")):
+        return "service_connectivity"
+    if any(term in text for term in ("cpu", "load", "负载")):
+        return "cpu_load"
+    if any(term in text for term in ("memory", "内存", "oom")):
+        return "memory"
+    if any(term in text for term in ("config", "配置")):
+        return "configuration"
+    return "general"
+
+
 def _format_knowledge_entries_for_trace(entries: list[dict]) -> str:
     """Format knowledge hits for the trace panel."""
     lines = [f"找到 {len(entries)} 条相关事故记忆"]
@@ -1409,10 +1781,11 @@ def _fresh_read_tool_plan(user_message: str) -> list[dict]:
             "reason": reason or "用户请求当前系统事实，需要本轮只读证据",
         })
 
-    if _matches_any(text, (
+    resource_overview_query = _matches_any(text, (
         r"(整体|系统|健康|状态|资源|概览|巡检|负载|load|cpu|CPU|处理器|内存|memory|磁盘|disk|空间)",
         r"\b(status|health|overview|load|cpu|memory|disk)\b",
-    )):
+    ))
+    if resource_overview_query:
         add("system_overview", {}, "获取当前 CPU、内存、磁盘、负载等系统概览")
         add("health_check", {}, "获取当前系统健康检查结果")
 
@@ -1460,6 +1833,192 @@ def _format_fresh_evidence_requirement(user_message: str, plan: list[dict]) -> s
         args = json.dumps(item["tool_args"], ensure_ascii=False)
         lines.append(f"- {item['tool_name']}({args}): {item['reason']}")
     return "\n" + "\n".join(lines) + "\n"
+
+
+def _render_tool_call_explanation_request(user_message: str) -> str:
+    """Return a deterministic explanation for a pasted tool call, if requested.
+
+    Users often ask about the raw command shown in an approval card, for example
+    ``create_directory({"dirpath": "/tmp/x", "exist_ok": true})``. That is a
+    read-only explanation request, not a request to execute the write tool.
+    """
+    parsed = _extract_tool_call_to_explain(user_message)
+    if not parsed:
+        return ""
+
+    tool_name, tool_args = parsed
+    tool_def = tools_registry.get_tool(tool_name)
+    if not tool_def:
+        return (
+            f"**结论**：这是一条工具调用说明请求，本轮没有执行任何操作。\n\n"
+            f"无法识别工具 `{tool_name}`，它不在当前工具注册表中。请确认命令名称是否完整。"
+        )
+
+    display_name = tool_def.display_name or tool_name
+    risk_text = {
+        RiskLevel.READ: "只读操作，通常不需要审批",
+        RiskLevel.WRITE: "写操作，执行前必须通过审批",
+        RiskLevel.DESTRUCTIVE: "破坏性操作，执行前必须通过审批并重点确认影响",
+    }.get(tool_def.risk_level, str(tool_def.risk_level))
+    preview = _preview_strategy_label(tool_def.preview_strategy)
+    supports_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
+    rollback_text = (
+        f"支持{_rollback_strategy_label(rollback_strategy)}，但只有真正执行前成功创建回滚点才可信"
+        if supports_rollback
+        else "当前参数下没有可靠自动回滚"
+    )
+
+    lines = [
+        "**结论**：这是对审批命令的解释，本轮没有执行任何工具操作。",
+        "",
+        "**命令含义**",
+        f"- 工具：`{tool_name}`（{display_name}）",
+        f"- 作用：{tool_def.description}",
+        f"- 风险级别：{tool_def.risk_level.value}，{risk_text}",
+        f"- 预览能力：{preview}",
+        f"- 回滚能力：{rollback_text}",
+    ]
+
+    if tool_args:
+        lines.append("")
+        lines.append("**参数说明**")
+        properties = (tool_def.parameters or {}).get("properties") or {}
+        required = set((tool_def.parameters or {}).get("required") or [])
+        for key, value in tool_args.items():
+            spec = properties.get(key) or {}
+            desc = spec.get("description") or _fallback_arg_description(key)
+            required_text = "必填" if key in required else "可选"
+            default_text = f"，默认值 `{spec.get('default')}`" if "default" in spec else ""
+            lines.append(
+                f"- `{key}` = `{compact_observed(value, max_chars=160)}`："
+                f"{desc}（{required_text}{default_text}）"
+            )
+    else:
+        lines.append("")
+        lines.append("**参数说明**")
+        lines.append("- 这条工具调用没有携带参数。")
+
+    impact = _explain_tool_call_impact(tool_name, tool_args)
+    if impact:
+        lines.append("")
+        lines.append("**可能影响**")
+        lines.extend(f"- {item}" for item in impact)
+
+    lines.append("")
+    lines.append("**审批提示**")
+    if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
+        lines.append("- 只有你在系统审批弹窗中确认后，这条工具才会执行。")
+        lines.append("- 在聊天里询问含义、参数或风险不会触发执行。")
+    else:
+        lines.append("- 该工具是只读工具，通常可直接执行；本次回复仍只是解释，没有调用工具。")
+    return "\n".join(lines)
+
+
+def _extract_tool_call_to_explain(text: str) -> tuple[str, dict] | None:
+    if not text:
+        return None
+
+    if not _matches_any(text, (
+        r"(解释|说明|含义|什么意思|作用|参数|影响|风险)",
+        r"\b(explain|describe|meaning|parameter|impact|risk)\b",
+    )):
+        return None
+
+    match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", text)
+    if not match:
+        return None
+    tool_name = match.group(1)
+    if not tools_registry.get_tool(tool_name):
+        return None
+
+    open_index = text.find("(", match.start())
+    close_index = _find_matching_paren(text, open_index)
+    if close_index == -1:
+        return tool_name, {}
+
+    args_text = text[open_index + 1:close_index].strip()
+    if not args_text:
+        return tool_name, {}
+
+    try:
+        parsed_args = json.loads(args_text)
+    except json.JSONDecodeError:
+        return tool_name, {}
+    if not isinstance(parsed_args, dict):
+        return tool_name, {}
+    return tool_name, parsed_args
+
+
+def _find_matching_paren(text: str, open_index: int) -> int:
+    if open_index < 0 or open_index >= len(text) or text[open_index] != "(":
+        return -1
+    depth = 0
+    in_string = False
+    escape = False
+    quote = ""
+    for index in range(open_index, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                in_string = False
+            continue
+        if char in {"'", '"'}:
+            in_string = True
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def _fallback_arg_description(name: str) -> str:
+    return {
+        "filepath": "目标文件路径",
+        "dirpath": "目标目录路径",
+        "path": "目标路径",
+        "service": "目标服务名称",
+        "exist_ok": "目标已存在时是否视为成功",
+        "parents": "是否递归创建父目录",
+        "mode": "权限模式",
+        "content": "写入内容",
+        "append": "是否追加写入",
+        "overwrite": "是否允许覆盖已有内容",
+    }.get(name, "工具参数")
+
+
+def _explain_tool_call_impact(tool_name: str, tool_args: dict) -> list[str]:
+    if tool_name == "create_directory":
+        path = tool_args.get("dirpath") or tool_args.get("path") or "目标目录"
+        exist_ok = bool(tool_args.get("exist_ok", False))
+        return [
+            f"会尝试创建目录 `{path}`。",
+            "如果父目录不存在且 `parents` 未关闭，会一并创建缺失的父目录。",
+            (
+                "如果目录已经存在，会视为成功。"
+                if exist_ok
+                else "如果目录已经存在，工具会返回失败，不会假装创建成功。"
+            ),
+        ]
+    if tool_name == "write_file":
+        path = tool_args.get("filepath") or "目标文件"
+        return [
+            f"会修改文件 `{path}` 的内容。",
+            "追加模式只在文件末尾增加内容；非追加模式会覆盖文件原内容。",
+        ]
+    if tool_name == "delete_file":
+        path = tool_args.get("filepath") or "目标文件"
+        return [f"会删除文件 `{path}`，执行前应确认路径和回滚点。"]
+    if tool_name in {"restart_service", "start_service", "stop_service"}:
+        service = tool_args.get("service") or "目标服务"
+        return [f"会改变服务 `{service}` 的运行状态，可能造成短暂中断或连接重建。"]
+    return []
 
 
 async def _execute_forced_read_tools(
@@ -1685,11 +2244,54 @@ def _compile_deterministic_tool_call(user_message: str) -> dict | None:
     if cleanup_plan:
         return _tool_call("delete_file", cleanup_plan)
 
+    protected_delete_plan = _extract_protected_delete_policy_test_intent(text)
+    if protected_delete_plan:
+        return _tool_call("delete_file", protected_delete_plan)
+
     cron_plan = _extract_add_cron_intent(text)
     if cron_plan:
         return _tool_call("add_cron_job", cron_plan)
 
     return None
+
+
+def _has_equivalent_tool_call(tool_ledger: list[dict], tool_name: str, tool_args: dict) -> bool:
+    """Return True when this turn already handled the same effective tool call."""
+    for item in tool_ledger:
+        if item.get("tool_name") != tool_name:
+            continue
+        if item.get("status") not in {"success", "rejected", "blocked"}:
+            continue
+        if _canonical_tool_args(tool_name, item.get("tool_args") or {}) == _canonical_tool_args(tool_name, tool_args):
+            return True
+    return False
+
+
+def _canonical_tool_args(tool_name: str, tool_args: dict) -> dict:
+    if tool_name == "write_file":
+        return {
+            "filepath": str(tool_args.get("filepath") or ""),
+            "content": str(tool_args.get("content") or ""),
+            "append": bool(tool_args.get("append", False)),
+        }
+    if tool_name == "create_directory":
+        return {
+            "dirpath": str(tool_args.get("dirpath") or ""),
+            "parents": bool(tool_args.get("parents", True)),
+            "exist_ok": bool(tool_args.get("exist_ok", False)),
+            "mode": str(tool_args.get("mode") or "755"),
+        }
+    return tool_args
+
+
+def _is_noop_create_directory(tool_name: str, tool_args: dict) -> bool:
+    if tool_name != "create_directory":
+        return False
+    dirpath = tool_args.get("dirpath")
+    if not dirpath:
+        return False
+    path = Path(str(dirpath))
+    return path.exists() and path.is_dir()
 
 
 def _tool_call(name: str, arguments: dict) -> dict:
@@ -1779,6 +2381,18 @@ def _extract_bounded_tmp_cleanup_intent(text: str) -> dict | None:
     return None
 
 
+def _extract_protected_delete_policy_test_intent(text: str) -> dict | None:
+    """Compile explicit protected-file delete tests so policy blocking is stable."""
+    if not _matches_any(text, (r"(删除|移除)", r"\b(delete|remove)\b")):
+        return None
+    path_matches = re.findall(r"(/[^\s`'\"，。；;]+)", text)
+    for path in path_matches:
+        filepath = path.rstrip("。；;,，")
+        if filepath in {"/etc/passwd", "/etc/shadow", "/etc/sudoers"}:
+            return {"filepath": filepath}
+    return None
+
+
 def _extract_add_cron_intent(text: str) -> dict | None:
     if not _matches_any(text, (r"(定时任务|cron)",)):
         return None
@@ -1840,9 +2454,31 @@ def _normalize_service_name(name: str) -> str:
         return ""
     if name.endswith(".service"):
         name = name[:-8]
+    if _is_non_service_status_target(name):
+        return ""
     if name == "ssh":
         return "ssh"
     return name
+
+
+def _is_non_service_status_target(name: str) -> bool:
+    """Reject resource words that are often followed by "status" but are not services."""
+    normalized = (name or "").strip().strip("`'\"").lower()
+    if normalized.endswith(".service"):
+        normalized = normalized[:-8]
+    return normalized in {
+        "cpu",
+        "mem",
+        "memory",
+        "ram",
+        "disk",
+        "load",
+        "system",
+        "host",
+        "health",
+        "overview",
+        "status",
+    }
 
 
 def _extract_read_file_target(text: str) -> str:
@@ -1869,13 +2505,21 @@ def _rollback_strategy_label(strategy: str) -> str:
         "backup": "备份回滚",
         "manual": "手动回滚",
         "inverse_action": "反向操作",
+        "service_state": "服务状态恢复",
+        "snapshot_restore": "快照恢复",
         "none": "无可靠自动回滚",
     }.get(strategy or "none", strategy or "无可靠自动回滚")
 
 
 def _effective_rollback_capability(tool_name: str, tool_args: dict, tool_def) -> tuple[bool, str]:
     """Return rollback capability that can be truthfully claimed before approval."""
-    if not tool_def or not tool_def.supports_rollback or tool_def.rollback_strategy != "backup":
+    if not tool_def or not tool_def.supports_rollback:
+        return False, "none"
+
+    if tool_def.rollback_strategy in {"service_state", "snapshot_restore"}:
+        return True, tool_def.rollback_strategy
+
+    if tool_def.rollback_strategy != "backup":
         return False, "none"
 
     path_value = tool_args.get("filepath") or tool_args.get("path")
@@ -1970,7 +2614,16 @@ async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_t
         impact_lines.append(f"预览：{_preview_strategy_label(tool_def.preview_strategy)}")
         supports_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
         if supports_rollback:
-            impact_lines.append(f"回滚：支持{_rollback_strategy_label(rollback_strategy)}，备份创建成功后可信度较高")
+            if rollback_strategy == "backup":
+                impact_lines.append(f"回滚：支持{_rollback_strategy_label(rollback_strategy)}，备份创建成功后可信度较高")
+            elif rollback_strategy == "service_state":
+                impact_lines.append(f"回滚：支持{_rollback_strategy_label(rollback_strategy)}，执行前会记录 systemd active 状态")
+            elif rollback_strategy == "snapshot_restore":
+                impact_lines.append(f"回滚：支持{_rollback_strategy_label(rollback_strategy)}，执行前会记录相关规则或任务快照")
+            else:
+                impact_lines.append(f"回滚：支持{_rollback_strategy_label(rollback_strategy)}")
+        elif tool_name == "rollback_backup":
+            impact_lines.append("回滚：这是恢复动作本身，不再声明二次自动回滚")
         else:
             impact_lines.append("回滚：无可靠自动回滚，本次不会声称可自动恢复")
         impact_lines.append(f"验证：支持时会在执行后检查 {display_name} 的结果")

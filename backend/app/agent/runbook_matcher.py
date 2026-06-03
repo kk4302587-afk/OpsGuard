@@ -9,12 +9,14 @@ The match uses `difflib.SequenceMatcher.ratio()` against both the runbook's
 keeping the bar low and the matching transparent.
 """
 
+import re
 from difflib import SequenceMatcher
 
 import aiosqlite
 from loguru import logger
 
 from app.agent.runbook_governance import ensure_runbook_schema, serialize_runbook
+from app.agent.runbook_preflight import preflight_runbook
 from app.database import get_knowledge_db_path
 
 # Default similarity threshold. Tuned conservatively: false negatives (the
@@ -34,6 +36,24 @@ def _normalize(text: str) -> str:
     return text.strip().rstrip("。.,，！!？?~ ").lower()
 
 
+def _match_variants(text: str) -> list[str]:
+    """Return normalized variants so parameters don't drown out intent text."""
+    normalized = _normalize(text)
+    if not normalized:
+        return []
+    without_assignments = re.sub(
+        r"\b[A-Za-z_][A-Za-z0-9_]*\s*[=:：]\s*[^\s，。；;]+",
+        " ",
+        normalized,
+    )
+    without_paths = re.sub(r"/[^\s，。；;]+", " ", without_assignments)
+    compact = re.sub(r"\s+", " ", without_paths).strip()
+    variants = [normalized]
+    if compact and compact != normalized:
+        variants.append(compact)
+    return variants
+
+
 async def find_matching_runbook(
     user_message: str,
     *,
@@ -51,8 +71,8 @@ async def find_matching_runbook(
         ``dict`` with the runbook fields + ``match_ratio``, or ``None`` if
         nothing crosses the bar (or if the table doesn't exist yet).
     """
-    user_norm = _normalize(user_message)
-    if not user_norm or len(user_norm) < MIN_QUERY_LENGTH:
+    user_variants = _match_variants(user_message)
+    if not user_variants or max(len(item) for item in user_variants) < MIN_QUERY_LENGTH:
         return None
 
     try:
@@ -78,9 +98,15 @@ async def find_matching_runbook(
     for row in rows:
         name_norm = _normalize(row["name"] or "")
         trigger_norm = _normalize(row["trigger_pattern"] or "")
-        ratio_name = SequenceMatcher(None, user_norm, name_norm).ratio() if name_norm else 0.0
-        ratio_trigger = SequenceMatcher(None, user_norm, trigger_norm).ratio() if trigger_norm else 0.0
-        ratio = max(ratio_name, ratio_trigger)
+        ratio = max(
+            [
+                SequenceMatcher(None, user_norm, candidate).ratio()
+                for user_norm in user_variants
+                for candidate in (name_norm, trigger_norm)
+                if candidate
+            ]
+            or [0.0]
+        )
         if ratio > best_ratio:
             best_ratio = ratio
             best = row
@@ -90,4 +116,31 @@ async def find_matching_runbook(
 
     result = serialize_runbook(best)
     result["match_ratio"] = round(best_ratio, 3)
+    result["preflight"] = await preflight_runbook(result, user_message)
+    return result
+
+
+async def load_runbook_for_suggestion(
+    runbook_id: str,
+    user_message: str,
+    *,
+    match_ratio: float = 1.0,
+) -> dict | None:
+    """Load one Runbook by id and recompute preflight for clarified input."""
+    try:
+        async with aiosqlite.connect(get_knowledge_db_path()) as db:
+            await ensure_runbook_schema(db)
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM runbooks WHERE id = ?", (runbook_id,))
+            row = await cursor.fetchone()
+    except Exception as e:
+        logger.debug(f"Runbook load for suggestion skipped ({e})")
+        return None
+
+    if not row:
+        return None
+
+    result = serialize_runbook(row)
+    result["match_ratio"] = round(match_ratio, 3)
+    result["preflight"] = await preflight_runbook(result, user_message)
     return result

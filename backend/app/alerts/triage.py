@@ -34,6 +34,10 @@ class NormalizedAlert:
     severity: str = ""
     description: str = ""
     mountpoint: str = ""
+    dashboard_url: str = ""
+    runbook_url: str = ""
+    prometheus_query: str = ""
+    loki_query: str = ""
     labels: dict[str, Any] = field(default_factory=dict)
     annotations: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -108,6 +112,34 @@ def normalize_alert_payload(payload: dict[str, Any]) -> list[NormalizedAlert]:
                     payload.get("mountpoint"),
                     "/",
                 ),
+                dashboard_url=_first_text(
+                    merged_annotations.get("dashboard"),
+                    merged_annotations.get("dashboard_url"),
+                    merged_annotations.get("grafana_dashboard"),
+                    merged_annotations.get("grafana_url"),
+                    merged.get("dashboard"),
+                    item.get("dashboard"),
+                    payload.get("dashboard"),
+                ),
+                runbook_url=_first_text(
+                    merged_annotations.get("runbook"),
+                    merged_annotations.get("runbook_url"),
+                    merged.get("runbook"),
+                    item.get("runbook"),
+                    payload.get("runbook"),
+                ),
+                prometheus_query=_first_text(
+                    merged_annotations.get("prometheus_query"),
+                    merged_annotations.get("promql"),
+                    item.get("prometheus_query"),
+                    payload.get("prometheus_query"),
+                ),
+                loki_query=_first_text(
+                    merged_annotations.get("loki_query"),
+                    merged_annotations.get("logql"),
+                    item.get("loki_query"),
+                    payload.get("loki_query"),
+                ),
                 labels=merged,
                 annotations=merged_annotations,
                 raw=item,
@@ -162,6 +194,7 @@ async def _triage_one_alert(alert: NormalizedAlert) -> dict[str, Any]:
             metadata={"alert": _alert_to_dict(alert)},
         ),
     )
+    await _record_alert_context(session_id, incident_id, alert)
 
     template = _match_template(alert)
     checks: list[dict[str, Any]] = []
@@ -336,6 +369,10 @@ async def _execute_step(
         result=result,
         claim=f"{step.purpose}: {display_name} 返回{'成功' if success else '失败'}",
     )
+    if step.tool_name.startswith("loki_"):
+        evidence["evidence_type"] = "log"
+    elif step.tool_name.startswith("prometheus_"):
+        evidence["evidence_type"] = "metric"
     observed = evidence.get("observed") or getattr(result, "error", "")
     await _record_trace(
         session_id=session_id,
@@ -352,13 +389,14 @@ async def _execute_step(
 
 
 def _steps_for_template(template: str, alert: NormalizedAlert) -> list[TriageStep]:
+    observability_steps = _observability_steps(alert)
     if template == "high_disk_usage":
-        return [
+        return observability_steps + [
             TriageStep("get_disk_usage", {"path": alert.mountpoint or "/"}, "检查当前磁盘使用率"),
             TriageStep("get_recent_changes", {"window_hours": 24, "limit": 30}, "检查近期系统变更"),
         ]
 
-    return [
+    return observability_steps + [
         TriageStep(
             "get_service_status",
             {"service": alert.service},
@@ -374,6 +412,17 @@ def _steps_for_template(template: str, alert: NormalizedAlert) -> list[TriageSte
         TriageStep("get_listening_ports", {}, "检查监听端口"),
         TriageStep("get_recent_changes", {"window_hours": 24, "limit": 30}, "检查近期系统变更"),
     ]
+
+
+def _observability_steps(alert: NormalizedAlert) -> list[TriageStep]:
+    steps: list[TriageStep] = []
+    promql = alert.prometheus_query or _default_prometheus_query(alert)
+    logql = alert.loki_query or _default_loki_query(alert)
+    if promql:
+        steps.append(TriageStep("prometheus_range_query", {"query": promql, "range_minutes": 30, "step": "60s"}, "查询 Prometheus 指标证据"))
+    if logql:
+        steps.append(TriageStep("loki_range_query", {"query": logql, "range_minutes": 30, "limit": 50}, "查询 Loki 日志证据"))
+    return steps
 
 
 def _match_template(alert: NormalizedAlert) -> str:
@@ -461,6 +510,59 @@ async def _record_trace(session_id: str, incident_id: str, event: dict[str, Any]
     )
 
 
+async def _record_alert_context(session_id: str, incident_id: str, alert: NormalizedAlert) -> None:
+    """Persist alert labels, dashboard, and runbook links as trace context."""
+    context = {
+        "alertname": alert.alertname,
+        "status": alert.status,
+        "service": alert.service,
+        "instance": alert.instance,
+        "severity": alert.severity,
+        "dashboard_url": alert.dashboard_url,
+        "runbook_url": alert.runbook_url,
+        "prometheus_query": alert.prometheus_query or _default_prometheus_query(alert),
+        "loki_query": alert.loki_query or _default_loki_query(alert),
+    }
+    await _record_trace(
+        session_id=session_id,
+        incident_id=incident_id,
+        event=trace_event(
+            phase="alert_context",
+            event_type="success",
+            content="告警上下文已解析",
+            evidence=build_evidence(
+                claim="告警标签、链接和观测查询上下文已解析",
+                evidence_type="alert",
+                source="alert_webhook",
+                observed={key: value for key, value in context.items() if value},
+                confidence="high",
+                execution_state="executed",
+            ),
+            metadata={"alert_context": context},
+        ),
+    )
+    if alert.dashboard_url:
+        await _record_trace(
+            session_id=session_id,
+            incident_id=incident_id,
+            event=trace_event(
+                phase="dashboard_context",
+                event_type="success",
+                content=f"Grafana Dashboard: {alert.dashboard_url}",
+                evidence=build_evidence(
+                    claim="告警提供了 Grafana dashboard 链接",
+                    evidence_type="dashboard_link",
+                    source="grafana_dashboard",
+                    observed=alert.dashboard_url,
+                    confidence="medium",
+                    execution_state="inferred",
+                    next_check="Dashboard 链接只是上下文，当前事实仍需 Prometheus/Loki 或系统工具查询确认。",
+                ),
+                metadata={"dashboard_url": alert.dashboard_url},
+            ),
+        )
+
+
 def _build_report(alert: NormalizedAlert, template: str, checks: list[dict[str, Any]]) -> str:
     lines = [
         f"告警自动分析报告: {alert.alertname}",
@@ -476,6 +578,10 @@ def _build_report(alert: NormalizedAlert, template: str, checks: list[dict[str, 
         lines.append(f"- 挂载点: {alert.mountpoint or '/'}")
     if alert.description:
         lines.append(f"- 描述: {alert.description}")
+    if alert.dashboard_url:
+        lines.append(f"- Grafana: {alert.dashboard_url}")
+    if alert.runbook_url:
+        lines.append(f"- Runbook: {alert.runbook_url}")
 
     lines.extend(["", "检查结果"])
     for check in checks:
@@ -549,6 +655,10 @@ def _alert_to_dict(alert: NormalizedAlert) -> dict[str, Any]:
         "severity": alert.severity,
         "description": alert.description,
         "mountpoint": alert.mountpoint,
+        "dashboard_url": alert.dashboard_url,
+        "runbook_url": alert.runbook_url,
+        "prometheus_query": alert.prometheus_query,
+        "loki_query": alert.loki_query,
         "labels": alert.labels,
         "annotations": alert.annotations,
     }
@@ -563,6 +673,42 @@ def _first_text(*values: Any) -> str:
         if value not in (None, ""):
             return str(value)
     return ""
+
+
+def _default_prometheus_query(alert: NormalizedAlert) -> str:
+    if alert.prometheus_query:
+        return alert.prometheus_query
+    service = _safe_label_value(alert.service)
+    instance = _safe_label_value(alert.instance)
+    if "disk" in alert.alertname.lower() or "filesystem" in alert.alertname.lower():
+        mountpoint = _safe_label_value(alert.mountpoint or "/")
+        return f'node_filesystem_avail_bytes{{mountpoint="{mountpoint}"}}'
+    if service:
+        return f'up{{job="{service}"}} or up{{service="{service}"}}'
+    if instance:
+        return f'up{{instance="{instance}"}}'
+    return ""
+
+
+def _default_loki_query(alert: NormalizedAlert) -> str:
+    if alert.loki_query:
+        return alert.loki_query
+    service = _safe_label_value(alert.service)
+    instance = _safe_label_value(alert.instance)
+    alertname = _safe_log_filter(alert.alertname)
+    if service:
+        return f'{{service="{service}"}} |= "{alertname}"'
+    if instance:
+        return f'{{instance="{instance}"}} |= "{alertname}"'
+    return ""
+
+
+def _safe_label_value(value: str) -> str:
+    return str(value or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _safe_log_filter(value: str) -> str:
+    return str(value or "error").replace("\\", "\\\\").replace('"', '\\"')[:80]
 
 
 def _compact(value: Any, max_chars: int = 500) -> str:

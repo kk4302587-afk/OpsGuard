@@ -68,6 +68,33 @@ class ExecutionConfig(BaseModel):
     backup_dir: str = "/var/lib/opsguard/backups"
 
 
+class PolicyRuleConfig(BaseModel):
+    name: str = ""
+    description: str = ""
+    action: str = "allow"
+    tools: list[str] = []
+    categories: list[str] = []
+    paths: list[str] = []
+    services: list[str] = []
+    users: list[str] = []
+    hosts: list[str] = []
+    environments: list[str] = []
+    risk_levels: list[str] = []
+
+
+class PolicyConfig(BaseModel):
+    enabled: bool = True
+    environment: str = "development"
+    host: str = ""
+    allowed_write_paths: list[str] = []
+    denied_paths: list[str] = []
+    protected_services: list[str] = []
+    maintenance_windows: list[str] = []
+    max_blast_radius: int = 1
+    enforce_sudo_allowlist: bool = False
+    rules: list[PolicyRuleConfig] = []
+
+
 class KnowledgeConfig(BaseModel):
     db_path: str = "./data/knowledge.db"
     auto_save: bool = True
@@ -92,15 +119,25 @@ class MCPConfig(BaseModel):
     fallback_to_local: bool = True
 
 
+class ObservabilityConfig(BaseModel):
+    prometheus_base_url: str = ""
+    loki_base_url: str = ""
+    timeout: float = 10.0
+    default_range_minutes: int = 30
+    max_log_limit: int = 100
+
+
 class Settings(BaseModel):
     app: AppConfig = AppConfig()
     llm: LLMConfig = LLMConfig()
     safety: SafetyConfig = SafetyConfig()
     execution: ExecutionConfig = ExecutionConfig()
+    policy: PolicyConfig = PolicyConfig()
     knowledge: KnowledgeConfig = KnowledgeConfig()
     audit: AuditConfig = AuditConfig()
     websocket: WebSocketConfig = WebSocketConfig()
     mcp: MCPConfig = MCPConfig()
+    observability: ObservabilityConfig = ObservabilityConfig()
 
 
 def _resolve_env_vars(value: str) -> str:

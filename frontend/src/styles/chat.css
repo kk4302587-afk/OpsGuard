@@ -185,6 +185,43 @@
   background: var(--bg-primary);
 }
 
+.approval-summary {
+  display: grid;
+  gap: 8px;
+  margin-bottom: var(--space-2);
+}
+
+.approval-summary-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.approval-summary-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.approval-summary-value {
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.approval-detail-collapse .ant-collapse-header,
+.trace-detail-collapse .ant-collapse-header {
+  padding: 4px 0 !important;
+  color: var(--text-muted) !important;
+  font-size: 12px !important;
+}
+
+.approval-detail-collapse .ant-collapse-content-box,
+.trace-detail-collapse .ant-collapse-content-box {
+  padding: 4px 0 0 !important;
+}
+
 .msg-approval-body code {
   display: block;
   font-family: var(--font-mono);
@@ -194,6 +231,21 @@
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
+}
+
+.approval-modal-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.approval-modal-title {
+  margin-top: 2px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
 }
 
 .msg-error-card {

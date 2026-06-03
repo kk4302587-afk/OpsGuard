@@ -60,6 +60,19 @@ class TopologyAnnotation(BaseModel):
     inferred: bool = False
 
 
+class RcaCandidate(BaseModel):
+    """Ranked root-cause candidate derived from topology evidence."""
+    candidate_id: str
+    candidate_type: str
+    name: str
+    confidence: str
+    score: int
+    reasons: list[str]
+    evidence_summaries: list[str]
+    impact_path: list[str] = []
+    affected_targets: list[str] = []
+
+
 # In-memory store for dynamic updates per session
 _session_updates: dict[str, DynamicUpdate] = {}
 
@@ -232,6 +245,7 @@ async def get_topology_with_diagnosis(
 
     annotations = await build_topology_annotations(session_id, scope=scope)
     _apply_annotations(base, annotations)
+    base["rca_candidates"] = build_rca_candidates(base, annotations)
 
     return base
 
@@ -453,7 +467,18 @@ def _annotations_from_event(event: dict) -> list[TopologyAnnotation]:
             target_id = f"proc_{pid}" if pid else f"proc_{_safe_id(name)}"
             add(target_id, "process", "evidence", observed)
 
-    if source in {"get_recent_errors", "get_journal_logs", "tail_log_file", "search_logs", "get_boot_logs"}:
+    if source == "read_file" and filepath and _looks_like_log_file(filepath, observed):
+        log_target = _log_target_id(source, tool_args)
+        role = "suspected_root_cause" if failed or _looks_like_error_log(observed) else "evidence"
+        add(log_target, "log", role, observed, inferred=False)
+        for service_name in _extract_service_names(observed):
+            add(f"svc_{service_name}", "service", "evidence", observed, inferred=True)
+        for dependency in _extract_dependency_targets(observed):
+            add(f"svc_{dependency['service']}", "service", "suspected_root_cause", observed, inferred=True)
+            if dependency.get("port"):
+                add(f"port_{dependency['port']}", "port", "downstream_impact", observed, inferred=True)
+
+    if source in {"get_recent_errors", "get_journal_logs", "tail_log_file", "search_logs", "get_boot_logs", "loki_query", "loki_range_query"}:
         log_target = _log_target_id(source, tool_args)
         role = "suspected_root_cause" if failed or _looks_like_error_log(observed) else "evidence"
         add(log_target, "log", role, observed, inferred=False)
@@ -462,6 +487,19 @@ def _annotations_from_event(event: dict) -> list[TopologyAnnotation]:
             add(f"svc_{unit}", "service", "affected" if failed else "evidence", observed, inferred=True)
         for service_name in _extract_service_names(observed):
             add(f"svc_{service_name}", "service", "evidence", observed, inferred=True)
+        for dependency in _extract_dependency_targets(observed):
+            add(f"svc_{dependency['service']}", "service", "suspected_root_cause", observed, inferred=True)
+            if dependency.get("port"):
+                add(f"port_{dependency['port']}", "port", "downstream_impact", observed, inferred=True)
+
+    if source in {"prometheus_query", "prometheus_range_query"}:
+        for service_name in _extract_metric_services(observed):
+            role = "suspected_root_cause" if _looks_like_metric_down(observed, service_name) else "affected"
+            add(f"svc_{service_name}", "service", role, observed, inferred=True)
+        for instance in _extract_instances(observed):
+            add(f"host_{_safe_id(instance)}", "host", "affected", observed, inferred=True)
+        for port in _extract_ports(observed):
+            add(f"port_{port}", "port", "downstream_impact", observed, inferred=True)
 
     return annotations
 
@@ -489,6 +527,7 @@ def _apply_annotations(graph: dict, annotations: list[dict]) -> None:
         node["rca_role"] = _stronger_role(node.get("rca_role"), annotation["rca_role"])
 
     _add_annotation_edges(graph, annotations, node_by_id)
+    _add_dependency_edges_from_annotations(graph, annotations, node_by_id)
 
 
 def _add_annotation_edges(graph: dict, annotations: list[dict], node_by_id: dict[str, dict]) -> None:
@@ -517,6 +556,220 @@ def _add_annotation_edges(graph: dict, annotations: list[dict], node_by_id: dict
                 "inferred": True,
                 "annotations": [service, other],
             })
+
+
+def _add_dependency_edges_from_annotations(graph: dict, annotations: list[dict], node_by_id: dict[str, dict]) -> None:
+    """Infer service dependency edges from log/metric evidence text."""
+    existing = {
+        (edge.get("source"), edge.get("target"), edge.get("relation"))
+        for edge in graph["edges"]
+    }
+    services = {annotation["target_id"] for annotation in annotations if annotation["target_type"] == "service"}
+    for annotation in annotations:
+        text = annotation.get("evidence_summary") or ""
+        if not text:
+            continue
+        dependencies = _extract_dependency_targets(text)
+        if not dependencies:
+            continue
+        source_services = [
+            service_id
+            for service_id in services
+            if service_id != f"svc_{dependencies[0]['service']}"
+        ]
+        if not source_services:
+            for service_name in _extract_service_names(text):
+                service_id = f"svc_{service_name}"
+                if service_id != f"svc_{dependencies[0]['service']}":
+                    source_services.append(service_id)
+        for dep in dependencies:
+            dep_service_id = f"svc_{dep['service']}"
+            dep_node = node_by_id.get(dep_service_id)
+            if not dep_node:
+                dep_node = {
+                    "id": dep_service_id,
+                    "name": dep["service"],
+                    "category": "service",
+                    "value": "",
+                    "highlight": True,
+                    "rca_role": "suspected_root_cause",
+                    "annotations": [],
+                }
+                graph["nodes"].append(dep_node)
+                node_by_id[dep_service_id] = dep_node
+            if dep.get("port"):
+                port_id = f"port_{dep['port']}"
+                if port_id in node_by_id:
+                    key = (dep_service_id, port_id, "listens_on")
+                    if key not in existing:
+                        existing.add(key)
+                        graph["edges"].append({"source": dep_service_id, "target": port_id, "relation": "listens_on", "inferred": True})
+            for source_service_id in source_services:
+                if source_service_id not in node_by_id or source_service_id == dep_service_id:
+                    continue
+                key = (source_service_id, dep_service_id, "depends_on")
+                if key in existing:
+                    continue
+                existing.add(key)
+                graph["edges"].append({
+                    "source": source_service_id,
+                    "target": dep_service_id,
+                    "relation": "depends_on",
+                    "inferred": True,
+                    "annotations": [annotation],
+                })
+
+
+def build_rca_candidates(graph: dict, annotations: list[dict]) -> list[dict]:
+    """Rank likely root causes using topology roles, evidence, and dependencies."""
+    if not annotations:
+        return []
+
+    node_by_id = {node["id"]: node for node in graph.get("nodes", [])}
+    outgoing: dict[str, list[dict]] = {}
+    incoming: dict[str, list[dict]] = {}
+    for edge in graph.get("edges", []):
+        outgoing.setdefault(edge.get("source"), []).append(edge)
+        incoming.setdefault(edge.get("target"), []).append(edge)
+
+    buckets: dict[str, dict[str, Any]] = {}
+    affected = [a for a in annotations if a.get("rca_role") == "affected"]
+
+    def bucket_for(annotation: dict) -> dict[str, Any]:
+        target_id = annotation["target_id"]
+        node = node_by_id.get(target_id, {})
+        bucket = buckets.setdefault(target_id, {
+            "candidate_id": target_id,
+            "candidate_type": annotation.get("target_type") or "unknown",
+            "name": node.get("name") or _name_from_target(target_id, annotation.get("target_type") or "unknown"),
+            "score": 0,
+            "reasons": [],
+            "evidence_summaries": [],
+            "affected_targets": set(),
+        })
+        return bucket
+
+    for annotation in annotations:
+        role = annotation.get("rca_role")
+        target_type = annotation.get("target_type")
+        summary = annotation.get("evidence_summary") or ""
+        bucket = bucket_for(annotation)
+        bucket["score"] += _role_score(role)
+        bucket["score"] += _type_score(target_type)
+        if annotation.get("execution_state") == "failed":
+            bucket["score"] += 12
+            _append_unique(bucket["reasons"], "相关检查失败")
+        if _looks_like_error_log(summary):
+            bucket["score"] += 12
+            _append_unique(bucket["reasons"], "日志包含错误/失败信号")
+        if _looks_like_metric_down(summary):
+            bucket["score"] += 14
+            _append_unique(bucket["reasons"], "指标显示实例或服务不可用")
+        if "recent" in str(annotation.get("source") or "") or "change" in summary.lower() or "变更" in summary:
+            bucket["score"] += 10
+            _append_unique(bucket["reasons"], "存在近期变更证据")
+        if role == "suspected_root_cause":
+            _append_unique(bucket["reasons"], "证据直接指向疑似根因")
+        elif role == "affected":
+            _append_unique(bucket["reasons"], "该实体受当前故障影响")
+        elif role == "downstream_impact":
+            _append_unique(bucket["reasons"], "该实体位于影响路径上")
+        else:
+            _append_unique(bucket["reasons"], "存在关联证据")
+        _append_unique(bucket["evidence_summaries"], summary, limit=4)
+
+    for source, edges in outgoing.items():
+        for edge in edges:
+            if edge.get("relation") != "depends_on":
+                continue
+            target = edge.get("target")
+            if target in buckets:
+                buckets[target]["score"] += 18
+                _append_unique(buckets[target]["reasons"], "被受影响服务依赖，符合上游根因方向")
+                if source in node_by_id:
+                    buckets[target]["affected_targets"].add(source)
+
+    for annotation in affected:
+        target_id = annotation.get("target_id")
+        for edge in outgoing.get(target_id, []):
+            if edge.get("relation") != "depends_on":
+                continue
+            dep_id = edge.get("target")
+            if dep_id in buckets:
+                buckets[dep_id]["score"] += 10
+                buckets[dep_id]["affected_targets"].add(target_id)
+
+    candidates = []
+    for candidate in buckets.values():
+        candidate_id = candidate["candidate_id"]
+        impact_path = _impact_path(candidate_id, node_by_id, incoming, outgoing)
+        score = min(100, int(candidate["score"]))
+        item = {
+            "candidate_id": candidate_id,
+            "candidate_type": candidate["candidate_type"],
+            "name": candidate["name"],
+            "confidence": _confidence(score),
+            "score": score,
+            "reasons": candidate["reasons"][:5],
+            "evidence_summaries": candidate["evidence_summaries"][:4],
+            "impact_path": impact_path,
+            "affected_targets": sorted(candidate["affected_targets"]),
+        }
+        if item["score"] >= 35:
+            candidates.append(RcaCandidate(**item).dict())
+
+    candidates.sort(key=lambda item: (item["score"], len(item["evidence_summaries"])), reverse=True)
+    return candidates[:5]
+
+
+def _role_score(role: str) -> int:
+    return {
+        "suspected_root_cause": 42,
+        "affected": 26,
+        "downstream_impact": 18,
+        "evidence": 10,
+    }.get(role, 0)
+
+
+def _type_score(target_type: str) -> int:
+    return {
+        "service": 14,
+        "config": 12,
+        "process": 10,
+        "log": 8,
+        "port": 8,
+        "host": 6,
+    }.get(target_type, 4)
+
+
+def _confidence(score: int) -> str:
+    if score >= 75:
+        return "high"
+    if score >= 50:
+        return "medium"
+    return "low"
+
+
+def _impact_path(candidate_id: str, node_by_id: dict[str, dict], incoming: dict[str, list[dict]], outgoing: dict[str, list[dict]]) -> list[str]:
+    path = [node_by_id.get(candidate_id, {}).get("name") or candidate_id]
+    for edge in incoming.get(candidate_id, []):
+        if edge.get("relation") != "depends_on":
+            continue
+        source = edge.get("source")
+        if source in node_by_id:
+            return [node_by_id[source].get("name") or source, path[0]]
+    for edge in outgoing.get(candidate_id, []):
+        if edge.get("relation") in {"listens_on", "manages"}:
+            target = edge.get("target")
+            if target in node_by_id:
+                return [path[0], node_by_id[target].get("name") or target]
+    return path
+
+
+def _append_unique(items: list[str], value: str, limit: int = 6) -> None:
+    text = _compact(value, max_chars=240)
+    if text and text not in items and len(items) < limit:
+        items.append(text)
 
 
 def _row_event(row: aiosqlite.Row) -> dict:
@@ -635,17 +888,92 @@ def _log_target_id(source: str, tool_args: dict) -> str:
     return f"log_{source}"
 
 
+def _looks_like_log_file(filepath: str, observed: str) -> bool:
+    lowered_path = str(filepath or "").lower()
+    if lowered_path.endswith((".log", ".log.gz")) or "/log/" in lowered_path or "/logs/" in lowered_path:
+        return True
+    return _looks_like_error_log(observed) and bool(_extract_dependency_targets(observed))
+
+
 def _looks_like_error_log(observed: str) -> bool:
     lowered = observed.lower()
-    return any(token in lowered for token in (" error", "err ", "failed", "failure", "critical", "panic", "denied", "exception"))
+    return any(token in lowered for token in (" error", "err ", "failed", "failure", "critical", "panic", "denied", "exception", "502", "connect failed", "connection refused", "timeout", "upstream"))
+
+
+def _looks_like_metric_down(observed: str, service_name: str = "") -> bool:
+    lowered = observed.lower()
+    if '"value": "0"' in lowered or "'value': '0'" in lowered:
+        return True
+    if '"last":' in lowered and '"0"' in lowered and "up" in lowered:
+        return True
+    if "down" in lowered and (service_name.lower() in lowered or "up" in lowered):
+        return True
+    return False
 
 
 def _extract_service_names(text: str) -> list[str]:
     lowered = text.lower()
     names = []
-    for name in ("nginx", "apache", "redis", "mysql", "sshd", "docker", "containerd"):
+    for name in ("nginx", "apache", "redis", "mysql", "sshd", "docker", "containerd", "app-api"):
         if name in lowered:
             names.append(name)
     for match in re.findall(r"\b([A-Za-z0-9_.@-]+)\.service\b", text):
         names.append(_normalize_service(match))
+    for match in re.findall(r'"(?:service|job|app)"\s*:\s*"([^"]+)"', text):
+        names.append(_normalize_service(match))
+    for match in re.findall(r"'(?:service|job|app)'\s*:\s*'([^']+)'", text):
+        names.append(_normalize_service(match))
     return list(dict.fromkeys(name for name in names if name))
+
+
+def _extract_metric_services(text: str) -> list[str]:
+    """Extract service-like labels from metric result labels, not PromQL text."""
+    names: list[str] = []
+    for match in re.findall(r'"(?:service|job|app)"\s*:\s*"([^"]+)"', text):
+        names.append(_normalize_service(match).lower())
+    for match in re.findall(r"'(?:service|job|app)'\s*:\s*'([^']+)'", text):
+        names.append(_normalize_service(match).lower())
+    for instance in _extract_instances(text):
+        host = instance.split(":", 1)[0]
+        if re.search(r"[A-Za-z]", host):
+            names.append(_normalize_service(host).lower())
+    return list(dict.fromkeys(name for name in names if name and name not in {"up", "job"}))
+
+
+def _extract_dependency_targets(text: str) -> list[dict[str, str]]:
+    """Extract upstream/backend dependencies such as app-api:8080 from evidence."""
+    dependencies: list[dict[str, str]] = []
+    patterns = [
+        r"\bbackend\s+([A-Za-z0-9_.-]+)(?::(\d{2,5}))?",
+        r"\bconnecting to upstream\s+([A-Za-z0-9_.-]+)(?::(\d{2,5}))?",
+        r"\bupstream\s+([A-Za-z0-9_.-]+):(\d{2,5})",
+        r"\b([A-Za-z][A-Za-z0-9_.-]+):(\d{2,5})\b",
+    ]
+    for pattern in patterns:
+        for service, port in re.findall(pattern, text, flags=re.IGNORECASE):
+            service_name = _normalize_service(service).lower()
+            if service_name in {"http", "https", "localhost", "127", "0", "connect", "failed", "upstream"}:
+                continue
+            dependencies.append({"service": service_name, "port": str(port or "")})
+    return _dedupe_dependency_targets(dependencies)
+
+
+def _dedupe_dependency_targets(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[tuple[str, str]] = set()
+    result: list[dict[str, str]] = []
+    for item in items:
+        key = (item.get("service") or "", item.get("port") or "")
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result[:8]
+
+
+def _extract_instances(text: str) -> list[str]:
+    instances: list[str] = []
+    for match in re.findall(r'"instance"\s*:\s*"([^"]+)"', text):
+        instances.append(match)
+    for match in re.findall(r"'instance'\s*:\s*'([^']+)'", text):
+        instances.append(match)
+    return list(dict.fromkeys(instances))[:8]

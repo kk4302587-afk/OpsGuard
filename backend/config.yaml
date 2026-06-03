@@ -13,7 +13,7 @@ llm:
   # Primary model
   primary:
     provider: "openai"  # openai-compatible (works with Qwen/DeepSeek)
-    model: "qwen3.6-max-preview"
+    model: "qwen3.7-plus"
     api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     api_key: "sk-9168ce80371c4a148a8d4ea486f3caa8"
     temperature: 0.1
@@ -199,6 +199,27 @@ execution:
   auto_backup: true
   backup_dir: "/var/lib/opsguard/backups"
 
+# Execution Policy
+policy:
+  enabled: true
+  environment: "development"
+  host: ""
+  # Empty means no write-path allowlist is enforced. Add paths to restrict
+  # write/destructive file operations to approved areas only.
+  allowed_write_paths: []
+  denied_paths:
+    - "/etc/passwd"
+    - "/etc/shadow"
+    - "/etc/sudoers"
+    - "/boot"
+    - "/usr/bin"
+    - "/usr/sbin"
+  protected_services: []
+  maintenance_windows: []
+  max_blast_radius: 1
+  enforce_sudo_allowlist: false
+  rules: []
+
 # Knowledge Store
 knowledge:
   db_path: "./data/knowledge.db"
@@ -216,3 +237,11 @@ websocket:
   heartbeat_interval: 30
   # Max message size (bytes)
   max_message_size: 1048576  # 1MB
+
+# Observability integrations
+observability:
+  prometheus_base_url: "${PROMETHEUS_BASE_URL}"
+  loki_base_url: "${LOKI_BASE_URL}"
+  timeout: 10.0
+  default_range_minutes: 30
+  max_log_limit: 100

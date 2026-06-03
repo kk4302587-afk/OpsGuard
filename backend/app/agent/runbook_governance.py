@@ -21,6 +21,18 @@ RUNBOOK_COLUMNS: dict[str, str] = {
     "last_failure_reason": "TEXT",
     "staleness_status": "TEXT DEFAULT 'fresh'",
     "updated_from_session_id": "TEXT",
+    "variables": "TEXT",
+    "preconditions": "TEXT",
+    "applicability_conditions": "TEXT",
+    "non_applicability_conditions": "TEXT",
+    "postconditions": "TEXT",
+    "failure_branches": "TEXT",
+    "rollback_steps": "TEXT",
+    "owner": "TEXT",
+    "review_status": "TEXT DEFAULT 'draft'",
+    "ttl_days": "INTEGER DEFAULT 90",
+    "last_validated_at": "TEXT",
+    "source_incident_id": "TEXT",
 }
 
 
@@ -43,7 +55,19 @@ async def ensure_runbook_schema(db: aiosqlite.Connection) -> None:
             last_failure TEXT,
             last_failure_reason TEXT,
             staleness_status TEXT DEFAULT 'fresh',
-            updated_from_session_id TEXT
+            updated_from_session_id TEXT,
+            variables TEXT,
+            preconditions TEXT,
+            applicability_conditions TEXT,
+            non_applicability_conditions TEXT,
+            postconditions TEXT,
+            failure_branches TEXT,
+            rollback_steps TEXT,
+            owner TEXT,
+            review_status TEXT DEFAULT 'draft',
+            ttl_days INTEGER DEFAULT 90,
+            last_validated_at TEXT,
+            source_incident_id TEXT
         )
     """)
     cursor = await db.execute("PRAGMA table_info(runbooks)")
@@ -62,10 +86,30 @@ async def save_or_update_runbook(
     trigger_pattern: str,
     steps: list[dict],
     session_id: str | None = None,
+    variables: list[dict] | None = None,
+    preconditions: list[dict] | None = None,
+    applicability_conditions: list[dict] | None = None,
+    non_applicability_conditions: list[dict] | None = None,
+    postconditions: list[dict] | None = None,
+    failure_branches: list[dict] | None = None,
+    rollback_steps: list[dict] | None = None,
+    owner: str | None = None,
+    review_status: str | None = None,
+    ttl_days: int | None = None,
+    source_incident_id: str | None = None,
 ) -> tuple[str, bool]:
     """Insert or refresh a Runbook by name and return ``(id, updated)``."""
     await ensure_runbook_schema(db)
     steps_json = json.dumps(steps, ensure_ascii=False)
+    optional_json = {
+        "variables": json.dumps(variables or [], ensure_ascii=False),
+        "preconditions": json.dumps(preconditions or [], ensure_ascii=False),
+        "applicability_conditions": json.dumps(applicability_conditions or [], ensure_ascii=False),
+        "non_applicability_conditions": json.dumps(non_applicability_conditions or [], ensure_ascii=False),
+        "postconditions": json.dumps(postconditions or [], ensure_ascii=False),
+        "failure_branches": json.dumps(failure_branches or [], ensure_ascii=False),
+        "rollback_steps": json.dumps(rollback_steps or [], ensure_ascii=False),
+    }
     now_iso = datetime.now().isoformat()
 
     cursor = await db.execute("SELECT id FROM runbooks WHERE name = ? LIMIT 1", (name,))
@@ -80,10 +124,28 @@ async def save_or_update_runbook(
                 trigger_pattern = ?,
                 description = ?,
                 version = COALESCE(version, 1) + 1,
-                updated_from_session_id = ?
+                updated_from_session_id = ?,
+                variables = ?,
+                preconditions = ?,
+                applicability_conditions = ?,
+                non_applicability_conditions = ?,
+                postconditions = ?,
+                failure_branches = ?,
+                rollback_steps = ?,
+                owner = COALESCE(?, owner),
+                review_status = COALESCE(?, review_status),
+                ttl_days = COALESCE(?, ttl_days),
+                source_incident_id = COALESCE(?, source_incident_id)
             WHERE id = ?
             """,
-            (steps_json, now_iso, trigger_pattern, description, session_id, runbook_id),
+            (
+                steps_json, now_iso, trigger_pattern, description, session_id,
+                optional_json["variables"], optional_json["preconditions"],
+                optional_json["applicability_conditions"], optional_json["non_applicability_conditions"],
+                optional_json["postconditions"], optional_json["failure_branches"],
+                optional_json["rollback_steps"], owner, review_status, ttl_days,
+                source_incident_id, runbook_id,
+            ),
         )
         await refresh_runbook_staleness(db, runbook_id)
         await db.commit()
@@ -94,11 +156,21 @@ async def save_or_update_runbook(
         """
         INSERT INTO runbooks (
             id, name, description, trigger_pattern, steps, created_at,
-            version, updated_from_session_id
+            version, updated_from_session_id, variables, preconditions,
+            applicability_conditions, non_applicability_conditions, postconditions,
+            failure_branches, rollback_steps, owner, review_status, ttl_days,
+            source_incident_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (runbook_id, name, description, trigger_pattern, steps_json, now_iso, session_id),
+        (
+            runbook_id, name, description, trigger_pattern, steps_json, now_iso,
+            session_id, optional_json["variables"], optional_json["preconditions"],
+            optional_json["applicability_conditions"], optional_json["non_applicability_conditions"],
+            optional_json["postconditions"], optional_json["failure_branches"],
+            optional_json["rollback_steps"], owner, review_status or "draft",
+            ttl_days or 90, source_incident_id,
+        ),
     )
     await refresh_runbook_staleness(db, runbook_id)
     await db.commit()
@@ -188,6 +260,18 @@ def serialize_runbook(row: aiosqlite.Row | dict) -> dict:
         "staleness_status": status,
         "updated_from_session_id": data.get("updated_from_session_id"),
         "success_rate": success_rate,
+        "variables": _json_load(data.get("variables"), []),
+        "preconditions": _json_load(data.get("preconditions"), []),
+        "applicability_conditions": _json_load(data.get("applicability_conditions"), []),
+        "non_applicability_conditions": _json_load(data.get("non_applicability_conditions"), []),
+        "postconditions": _json_load(data.get("postconditions"), []),
+        "failure_branches": _json_load(data.get("failure_branches"), []),
+        "rollback_steps": _json_load(data.get("rollback_steps"), []),
+        "owner": data.get("owner"),
+        "review_status": data.get("review_status") or "draft",
+        "ttl_days": int(data.get("ttl_days") or 90),
+        "last_validated_at": data.get("last_validated_at"),
+        "source_incident_id": data.get("source_incident_id"),
     }
 
 
@@ -321,6 +405,17 @@ def _load_steps(value: Any) -> list[dict]:
     except Exception:
         return []
     return [step for step in loaded if isinstance(step, dict)] if isinstance(loaded, list) else []
+
+
+def _json_load(value: Any, default: Any) -> Any:
+    if value in (None, ""):
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
 
 
 def _age_days(iso_value: str) -> int | None:

@@ -10,6 +10,7 @@ import aiosqlite
 os.chdir(Path(__file__).parent)
 
 from app.agent import graph
+from app.api import knowledge as knowledge_api
 from app.knowledge import store as store_module
 from app.knowledge.store import ensure_knowledge_schema, knowledge_store
 
@@ -96,6 +97,227 @@ def test_structured_incident_memory_is_saved_and_retrieved() -> None:
     asyncio.run(scenario())
 
 
+def test_hybrid_search_returns_evidence_refs_and_fresh_checks() -> None:
+    async def scenario() -> None:
+        original_get_path = store_module.get_knowledge_db_path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "knowledge.db")
+            store_module.get_knowledge_db_path = lambda: db_path
+            try:
+                async with aiosqlite.connect(db_path) as db:
+                    await ensure_knowledge_schema(db)
+                    await db.commit()
+
+                await knowledge_store.save_resolution(
+                    problem_signature="nginx 502 upstream unavailable",
+                    diagnosis_path="checked nginx status and app-api port",
+                    solution="started app-api and nginx recovered",
+                    tools_used=["get_service_status", "check_port_listening"],
+                    incident_memory={
+                        "symptoms": ["HTTP 502", "upstream connection refused"],
+                        "root_cause": "app-api inactive",
+                        "evidence": ["app-api inactive"],
+                        "evidence_refs": [
+                            {
+                                "type": "tool_call",
+                                "call_id": "call_123",
+                                "summary": "app-api inactive",
+                            }
+                        ],
+                        "tool_call_ids": ["call_123"],
+                        "source_session_id": "session-1",
+                        "source_incident_id": "incident-1",
+                        "entities": {
+                            "services": ["nginx", "app-api"],
+                            "ports": [80, 8080],
+                            "paths": ["/etc/nginx/nginx.conf"],
+                        },
+                        "validation_method": "curl health endpoint returned 200",
+                        "applicability_conditions": ["same nginx upstream topology"],
+                        "confidence": "high",
+                    },
+                )
+
+                results = await knowledge_store.search(
+                    "502 app-api 8080 upstream",
+                    limit=3,
+                    filters={"service": "nginx"},
+                )
+            finally:
+                store_module.get_knowledge_db_path = original_get_path
+
+        assert results
+        entry = results[0]
+        assert entry["evidence_refs"][0]["call_id"] == "call_123"
+        assert entry["source_session_id"] == "session-1"
+        assert "score_breakdown" in entry
+        assert "fts5_keyword" in entry["retrieval_sources"] or "structured_semantic" in entry["retrieval_sources"]
+        assert any("app-api" in check or "8080" in check for check in entry["recommended_fresh_checks"])
+
+    asyncio.run(scenario())
+
+
+def test_missing_validation_is_low_confidence() -> None:
+    async def scenario() -> None:
+        original_get_path = store_module.get_knowledge_db_path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "knowledge.db")
+            store_module.get_knowledge_db_path = lambda: db_path
+            try:
+                async with aiosqlite.connect(db_path) as db:
+                    await ensure_knowledge_schema(db)
+                    await db.commit()
+
+                await knowledge_store.save_resolution(
+                    problem_signature="redis connection errors",
+                    diagnosis_path="checked redis logs",
+                    solution="suspected redis restart helped",
+                    tools_used=["get_service_logs"],
+                    incident_memory={
+                        "symptoms": ["connection refused"],
+                        "evidence": ["redis log had refused connections"],
+                        "validation_method": "",
+                        "confidence": "high",
+                    },
+                )
+
+                results = await knowledge_store.search("redis connection refused", limit=3)
+            finally:
+                store_module.get_knowledge_db_path = original_get_path
+
+        assert results
+        assert results[0]["validation_status"] == "missing"
+        assert results[0]["confidence"] == "low"
+        assert results[0]["safe_to_reuse"] is False
+
+    asyncio.run(scenario())
+
+
+def test_knowledge_search_api_passes_structured_filters() -> None:
+    async def scenario() -> None:
+        captured: dict = {}
+        original_search = knowledge_api.knowledge_store.search
+
+        async def fake_search(query: str, limit: int = 5, filters: dict | None = None):
+            captured["query"] = query
+            captured["limit"] = limit
+            captured["filters"] = filters
+            return [{"problem_signature": "nginx 502"}]
+
+        try:
+            knowledge_api.knowledge_store.search = fake_search
+            result = await knowledge_api.search_knowledge(
+                q="nginx 502",
+                service="nginx",
+                host="web-1",
+                path="/etc/nginx/nginx.conf",
+                port="80",
+                incident_type="service_connectivity",
+                source_modality="real_tool_execution",
+                confidence=["high", "medium"],
+                min_success_count=2,
+                max_age_days=30,
+                limit=7,
+            )
+        finally:
+            knowledge_api.knowledge_store.search = original_search
+
+        assert result["entries"][0]["problem_signature"] == "nginx 502"
+        assert captured["query"] == "nginx 502"
+        assert captured["limit"] == 7
+        assert captured["filters"] == {
+            "service": "nginx",
+            "host": "web-1",
+            "path": "/etc/nginx/nginx.conf",
+            "port": "80",
+            "incident_type": "service_connectivity",
+            "source_modality": "real_tool_execution",
+            "confidence": ["high", "medium"],
+            "min_success_count": 2,
+            "max_age_days": 30,
+        }
+
+    asyncio.run(scenario())
+
+
+def test_knowledge_search_api_omits_query_default_sentinels() -> None:
+    async def scenario() -> None:
+        captured: dict = {}
+        original_search = knowledge_api.knowledge_store.search
+
+        async def fake_search(query: str, limit: int = 5, filters: dict | None = None):
+            captured["query"] = query
+            captured["limit"] = limit
+            captured["filters"] = filters
+            return [{"problem_signature": "nginx 502"}]
+
+        try:
+            knowledge_api.knowledge_store.search = fake_search
+            result = await knowledge_api.search_knowledge(q="nginx 502")
+        finally:
+            knowledge_api.knowledge_store.search = original_search
+
+        assert result["entries"][0]["problem_signature"] == "nginx 502"
+        assert captured["filters"] is None
+
+    asyncio.run(scenario())
+
+
+def test_reviewed_and_deprecated_knowledge_lifecycle() -> None:
+    async def scenario() -> None:
+        original_get_path = store_module.get_knowledge_db_path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "knowledge.db")
+            store_module.get_knowledge_db_path = lambda: db_path
+            try:
+                async with aiosqlite.connect(db_path) as db:
+                    await ensure_knowledge_schema(db)
+                    await db.commit()
+
+                await knowledge_store.save_resolution(
+                    problem_signature="nginx stale bad memory",
+                    diagnosis_path="checked nginx",
+                    solution="old solution",
+                    tools_used=["get_service_status"],
+                    incident_memory={
+                        "symptoms": ["nginx failed"],
+                        "evidence": ["old evidence"],
+                        "validation_method": "nginx active",
+                        "applicability_conditions": ["nginx"],
+                    },
+                )
+                results = await knowledge_store.search("nginx stale bad memory", limit=3)
+                assert results
+                entry_id = results[0]["id"]
+
+                reviewed = await knowledge_api.update_knowledge_review(
+                    entry_id,
+                    knowledge_api.KnowledgeReviewUpdate(review_status="reviewed", owner="platform"),
+                )
+                assert reviewed["entry"]["review_status"] == "reviewed"
+                assert reviewed["entry"]["owner"] == "platform"
+
+                deprecated = await knowledge_api.update_knowledge_review(
+                    entry_id,
+                    knowledge_api.KnowledgeReviewUpdate(review_status="deprecated"),
+                )
+                assert deprecated["entry"]["review_status"] == "deprecated"
+                assert deprecated["entry"]["staleness_status"] == "deprecated"
+
+                assert await knowledge_store.search("nginx stale bad memory", limit=3) == []
+                included = await knowledge_store.search(
+                    "nginx stale bad memory",
+                    limit=3,
+                    filters={"include_deprecated": True},
+                )
+                assert included
+                assert included[0]["review_status"] == "deprecated"
+            finally:
+                store_module.get_knowledge_db_path = original_get_path
+
+    asyncio.run(scenario())
+
+
 def test_legacy_entries_remain_searchable_after_migration() -> None:
     async def scenario() -> None:
         original_get_path = store_module.get_knowledge_db_path
@@ -162,6 +384,8 @@ def test_agent_knowledge_trace_shows_incident_memory() -> None:
             graph.knowledge_store.search = original_search
 
         assert "wrong upstream target" in result["knowledge_hint"]
+        assert "不是当前系统事实" in result["knowledge_hint"]
+        assert "不得写成当前已确认状态" in result["knowledge_hint"]
         assert "写操作仍需重新检查和审批" in result["knowledge_hint"]
         success_events = [
             event for event in events
@@ -177,6 +401,10 @@ def test_agent_knowledge_trace_shows_incident_memory() -> None:
 def main() -> None:
     test_knowledge_schema_migrates_legacy_table()
     test_structured_incident_memory_is_saved_and_retrieved()
+    test_hybrid_search_returns_evidence_refs_and_fresh_checks()
+    test_missing_validation_is_low_confidence()
+    test_knowledge_search_api_passes_structured_filters()
+    test_reviewed_and_deprecated_knowledge_lifecycle()
     test_legacy_entries_remain_searchable_after_migration()
     test_agent_knowledge_trace_shows_incident_memory()
     print("incident memory knowledge regression OK")

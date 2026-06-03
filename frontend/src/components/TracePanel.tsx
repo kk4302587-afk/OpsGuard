@@ -1,31 +1,31 @@
 import { useMemo, useState } from 'react'
-import { Typography, Tag, Empty, Button } from 'antd'
+import { Collapse, Typography, Tag, Empty, Button } from 'antd'
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
-  LoadingOutlined,
   SafetyOutlined,
-  SearchOutlined,
   ToolOutlined,
   BulbOutlined,
   ApartmentOutlined,
   StopOutlined,
-  DatabaseOutlined,
   MessageOutlined,
   DownOutlined,
   RightOutlined,
 } from '@ant-design/icons'
 import { useChatStore } from '../stores/chatStore'
 import {
+  TOOL_DISPLAY_NAMES,
   displayTraceName,
   localizeTraceContent,
   translateTraceClaim,
   translateTraceText,
 } from '../utils/traceLocalization'
+import { parseOperationCommand, operationTarget, operationTitle } from '../utils/operationSummary'
 
 const { Text, Title } = Typography
 
 interface TraceEvidence {
+  id?: string
   phase: string
   event_type: string
   content: string
@@ -46,7 +46,21 @@ interface TraceGroup {
   title: string
   startTime: string
   events: TraceEvidence[]
-  status: 'running' | 'success' | 'failure' | 'blocked' | 'corrected' | 'rejected'
+  status: 'running' | 'success' | 'warning' | 'failure' | 'blocked' | 'corrected' | 'rejected'
+}
+
+interface TraceDisplayItem {
+  id: string
+  kind: 'planning' | 'tool' | 'approval' | 'verification' | 'response' | 'guard' | 'other'
+  phase: string
+  timestamp: string
+  title: string
+  detail: string
+  status: 'running' | 'success' | 'failure' | 'blocked' | 'rejected' | 'skipped'
+  toolName?: string
+  target?: string
+  executionCount?: number
+  events: TraceEvidence[]
 }
 
 /**
@@ -76,7 +90,7 @@ function TracePanel() {
       current.events.push(event)
     })
 
-    return groups.map((group) => {
+    return groups.map((group, groupIndex) => {
       const response = [...group.events].reverse().find((event) => event.phase === 'response')
       const rejected = group.events.some((event) => isApprovalRejectedEvent(event))
       const failureIndexes = group.events
@@ -88,15 +102,19 @@ function TracePanel() {
         failed
         && !!response
         && isCompletionResponse(response)
-        && group.events.some((event, index) => (
-          index > latestFailureIndex && isOperationalSuccessEvent(event)
-        ))
+        && (
+          response.event_type === 'success'
+          || group.events.some((event, index) => (
+            index > latestFailureIndex && isOperationalSuccessEvent(event)
+          ))
+        )
       )
       const blocked = group.events.some((event) => event.event_type === 'blocked')
       const corrected = group.events.some((event) => isNonFatalGuardEvent(event))
+      const superseded = !response && groupIndex < groups.length - 1
       return {
         ...group,
-        status: blocked ? 'blocked' : rejected ? 'rejected' : failed && !recovered ? 'failure' : response?.event_type === 'success' ? 'success' : corrected ? 'corrected' : 'running',
+        status: blocked ? 'blocked' : rejected ? 'rejected' : failed && recovered ? 'warning' : failed ? 'failure' : response?.event_type === 'success' || superseded ? 'success' : corrected ? 'corrected' : 'running',
       }
     })
   }
@@ -219,6 +237,8 @@ function TracePanel() {
       log: '日志',
       config: '配置',
       metric: '指标',
+      alert: '告警',
+      dashboard_link: '面板链接',
       topology: '拓扑',
       knowledge: '知识库',
       'user input': '用户输入',
@@ -302,31 +322,365 @@ function TracePanel() {
     )
   }
 
-  const getPhaseIcon = (event: TraceEvidence) => {
-    const iconStyle = { fontSize: 14 }
-    const { phase, event_type: eventType } = event
+  const getMetadataRecord = (event: TraceEvidence, key: string): Record<string, unknown> | null => {
+    const value = event.metadata?.[key]
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+  }
 
-    if (isNonFatalGuardEvent(event)) return <BulbOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
-    if (isApprovalRejectedEvent(event)) return <CloseCircleOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
-    if (eventType === 'blocked') return <StopOutlined style={{ ...iconStyle, color: 'var(--accent-red)' }} />
-    if (eventType === 'failure') return <CloseCircleOutlined style={{ ...iconStyle, color: 'var(--accent-red)' }} />
+  const getEvidenceRecord = (event: TraceEvidence): Record<string, unknown> | null => (
+    getMetadataRecord(event, 'evidence')
+  )
 
-    switch (phase) {
-      case 'safety_check': return <SafetyOutlined style={{ ...iconStyle, color: 'var(--accent-green)' }} />
-      case 'knowledge_retrieval': return <SearchOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
-      case 'image_recognition': return <SearchOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
-      case 'voice_recognition': return <MessageOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
-      case 'multimodal_recognition': return <SearchOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
-      case 'planning': return <BulbOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
-      case 'tool_call': return <ToolOutlined style={{ ...iconStyle, color: 'var(--accent-purple)' }} />
-      case 'execution': return <LoadingOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
-      case 'approval_request': return <SafetyOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
-      case 'approval_response': return <CheckCircleOutlined style={{ ...iconStyle, color: 'var(--accent-green)' }} />
-      case 'verification': return <CheckCircleOutlined style={{ ...iconStyle, color: 'var(--accent-green)' }} />
-      case 'response': return <MessageOutlined style={{ ...iconStyle, color: 'var(--accent-green)' }} />
-      case 'knowledge_save': return <DatabaseOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
-      default: return <CheckCircleOutlined style={iconStyle} />
+  const getEventSource = (event: TraceEvidence) => {
+    const evidence = getEvidenceRecord(event)
+    return event.source || (typeof evidence?.source === 'string' ? evidence.source : '')
+  }
+
+  const getEventObserved = (event: TraceEvidence): unknown => {
+    const evidence = getEvidenceRecord(event)
+    return event.observed ?? evidence?.observed
+  }
+
+  const isToolName = (value?: string) => Boolean(value && TOOL_DISPLAY_NAMES[value])
+
+  const extractToolInfo = (event: TraceEvidence): { toolName: string; args: Record<string, unknown>; target: string } | null => {
+    const metadataArgs = getMetadataRecord(event, 'args')
+    const metadataCommand = typeof event.metadata?.command === 'string' ? parseOperationCommand(event.metadata.command) : null
+    const observed = getEventObserved(event)
+    const observedArgs = observed && typeof observed === 'object' && !Array.isArray(observed)
+      ? observed as Record<string, unknown>
+      : null
+    const source = getEventSource(event)
+
+    let toolName = isToolName(source) ? source : ''
+    let args = metadataArgs || metadataCommand?.args || observedArgs || {}
+
+    const content = event.content || ''
+    const named = content.match(/(?:工具调用|工具执行成功|工具执行失败):\s*([A-Za-z_][A-Za-z0-9_]*)/)
+      || content.match(/(?:准备调用工具|调用工具):\s*([A-Za-z_][A-Za-z0-9_]*)/)
+    if (!toolName && named?.[1]) toolName = named[1]
+
+    const directCommand = parseOperationCommand(content)
+    if (!toolName && directCommand) {
+      toolName = directCommand.toolName
+      args = directCommand.args
     }
+
+    const argsMatch = content.match(/参数：(\{.*\})/s)
+    if (argsMatch && !Object.keys(args).length) {
+      try {
+        const parsed = JSON.parse(argsMatch[1])
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          args = parsed as Record<string, unknown>
+        }
+      } catch {
+        // Keep the compact timeline readable even if old trace args are malformed.
+      }
+    }
+
+    if (!toolName || !isToolName(toolName)) return null
+    return { toolName, args, target: operationTarget(args) }
+  }
+
+  const getToolKey = (tool: { toolName: string; target: string }) => `${tool.toolName}:${tool.target || 'unknown'}`
+
+  const findMergeableToolIndex = (
+    items: TraceDisplayItem[],
+    tool: { toolName: string; target: string },
+    preferredIndex?: number,
+  ) => {
+    if (preferredIndex !== undefined) return preferredIndex
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index]
+      if (item.kind !== 'tool' || item.toolName !== tool.toolName) continue
+      if (!tool.target || !item.target || item.target === tool.target) return index
+      break
+    }
+    return undefined
+  }
+
+  const eventStatus = (event: TraceEvidence): TraceDisplayItem['status'] => {
+    if (isApprovalRejectedEvent(event)) return 'rejected'
+    if (event.event_type === 'blocked') return 'blocked'
+    if (event.event_type === 'failure') return 'failure'
+    if (event.event_type === 'success') return 'success'
+    if (event.event_type === 'start') return 'running'
+    if (event.execution_state === 'skipped') return 'skipped'
+    return 'running'
+  }
+
+  const statusRank: Record<TraceDisplayItem['status'], number> = {
+    failure: 6,
+    blocked: 5,
+    rejected: 4,
+    success: 4,
+    skipped: 3,
+    running: 1,
+  }
+
+  const mergeStatus = (current: TraceDisplayItem['status'], next: TraceDisplayItem['status']) => (
+    statusRank[next] > statusRank[current] ? next : current
+  )
+
+  const shouldSkipStandaloneEvent = (event: TraceEvidence) => (
+    event.phase === 'input_received'
+    || event.phase === 'recent_changes'
+    || isCoarseAuditDuplicate(event)
+    || (
+      event.phase === 'planning'
+      && (event.content || '').includes('策略层检测到本轮已处理等价工具调用')
+    )
+  )
+
+  const isCoarseAuditDuplicate = (event: TraceEvidence) => (
+    typeof event.id === 'string'
+    && event.id.startsWith('audit:')
+    && (
+      (event.phase === 'safety_check' && (event.content || '').startsWith('检查输入:'))
+      || (event.phase === 'planning' && event.content === '开始推理')
+      || (event.phase === 'tool_call' && (event.content || '').startsWith('工具调用:'))
+      || (event.phase === 'tool_call' && (event.content || '').startsWith('Runbook step '))
+      || (event.phase === 'execution' && (event.content || '').startsWith('工具执行'))
+      || (event.phase === 'execution' && (event.content || '').startsWith('Runbook step '))
+      || (event.phase === 'response' && (event.content || '').startsWith('生成回复:'))
+      || (event.phase === 'response' && (event.content || '').startsWith('Runbook replay finished:'))
+    )
+  )
+
+  const isAggregatedPhase = (phase: string) => (
+    [
+      'safety_check',
+      'knowledge_retrieval',
+      'image_recognition',
+      'voice_recognition',
+      'multimodal_recognition',
+      'context_management',
+      'planning',
+      'verification',
+      'response',
+      'knowledge_save',
+      'error',
+    ].includes(phase)
+  )
+
+  const phaseKind = (phase: string): TraceDisplayItem['kind'] => {
+    if (phase === 'planning') return 'planning'
+    if (phase === 'verification') return 'verification'
+    if (phase === 'response') return 'response'
+    if (phase === 'safety_check') return 'guard'
+    return 'other'
+  }
+
+  const phaseTitle = (phase: string) => {
+    if (phase === 'safety_check') return '安全校验'
+    if (phase === 'knowledge_retrieval') return '知识检索'
+    if (phase === 'planning') return '分析并制定方案'
+    if (phase === 'verification') return '结果验证'
+    if (phase === 'response') return '生成回复'
+    if (phase === 'knowledge_save') return '知识沉淀'
+    if (phase === 'image_recognition') return '图片识别'
+    if (phase === 'voice_recognition') return '语音识别'
+    if (phase === 'multimodal_recognition') return '多模态识别'
+    if (phase === 'context_management') return '上下文管理'
+    return getPhaseLabel(phase)
+  }
+
+  const phaseDetail = (phase: string, events: TraceEvidence[]) => {
+    const latest = [...events].reverse().find((event) => event.event_type === 'success' || event.event_type === 'failure' || event.event_type === 'blocked')
+      || events[events.length - 1]
+    if (!latest) return ''
+    if (phase === 'safety_check') {
+      if (latest.event_type === 'success') return '检查通过，继续分析'
+      if (latest.event_type === 'blocked') return '请求被安全规则拦截'
+      return '正在检查用户输入'
+    }
+    if (phase === 'knowledge_retrieval') {
+      if (latest.event_type === 'success') return '已检索历史经验'
+      if (latest.event_type === 'failure') return '知识检索失败'
+      return '正在检索历史经验'
+    }
+    if (phase === 'planning') {
+      const hasImpact = events.some((event) => (event.content || '').includes('影响评估'))
+      const hasCompiledTool = events.some((event) => (event.content || '').includes('策略层已将高确定性运维意图编译为工具调用'))
+      if (hasImpact) return '已识别操作意图，并完成影响评估'
+      if (hasCompiledTool) return '已识别操作意图，并补全工具调用'
+      if (latest.event_type === 'success') return '已完成意图判断和执行规划'
+      if (latest.event_type === 'failure') return '规划失败'
+      return '正在分析问题并制定方案'
+    }
+    if (phase === 'context_management') {
+      if (latest.event_type === 'success') return '已完成上下文分层和预算注入'
+      if (latest.event_type === 'failure') return '上下文管理失败'
+      return '正在整理上下文'
+    }
+    if (phase === 'verification') {
+      if (latest.event_type === 'success') return '验证通过'
+      if (latest.event_type === 'failure') return '验证失败'
+      return '正在验证执行结果'
+    }
+    if (phase === 'response') return '已生成面向用户的结果'
+    if (phase === 'knowledge_save') return '已尝试沉淀本次经验'
+    return getCompactEventContent(latest)
+  }
+
+  const getDetailPhaseLabel = (event: TraceEvidence) => {
+    if (event.phase !== 'planning') return getPhaseLabel(event.phase)
+    const content = event.content || ''
+    const source = getEventSource(event)
+    if (content.includes('影响评估') || source === 'assess_impact') return '影响评估'
+    if (content.includes('策略层已将高确定性运维意图编译为工具调用') || source === 'intent_policy_compiler') return '策略补全'
+    if (event.claim?.includes('规划下一步') || event.claim?.includes('planning next checks')) return '意图识别'
+    if (event.event_type === 'start') return '开始规划'
+    return '规划事件'
+  }
+
+  const getDetailContent = (event: TraceEvidence) => {
+    if (event.phase === 'planning') {
+      const content = event.content || ''
+      if (content.includes('影响评估')) return content
+      if (content.includes('正在分析问题并制定方案')) return '正在分析用户意图和可执行方案'
+      if (content.includes('策略层已将高确定性运维意图编译为工具调用')) {
+        return content.replace('策略层已将高确定性运维意图编译为工具调用：', '补全工具调用：')
+      }
+      const observed = getEventObserved(event)
+      if (typeof observed === 'string' && observed) return observed
+    }
+    return getDisplayContent(event)
+  }
+
+  const shouldPreferPhaseEvent = (existing: TraceEvidence, next: TraceEvidence) => {
+    if (isCoarseAuditDuplicate(existing) && !isCoarseAuditDuplicate(next)) return true
+    const rank: Record<string, number> = { blocked: 5, failure: 4, success: 3, pending: 2, start: 1 }
+    return (rank[next.event_type] || 0) >= (rank[existing.event_type] || 0)
+  }
+
+  const buildDisplayItems = (events: TraceEvidence[]): TraceDisplayItem[] => {
+    const items: TraceDisplayItem[] = []
+    const toolIndexes = new Map<string, number>()
+    const phaseIndexes = new Map<string, number>()
+    let approvalIndex = -1
+
+    events.forEach((event, index) => {
+      if (shouldSkipStandaloneEvent(event)) return
+
+      const tool = extractToolInfo(event)
+      if (tool && ['tool_call', 'execution', 'verification'].includes(event.phase)) {
+        const key = getToolKey(tool)
+        const existingIndex = findMergeableToolIndex(items, tool, toolIndexes.get(key))
+        const executionHit = event.phase === 'execution' && (
+          event.event_type === 'success'
+          || event.event_type === 'failure'
+          || (event.content || '').includes('工具执行')
+        )
+
+        if (existingIndex !== undefined) {
+          const item = items[existingIndex]
+          item.events.push(event)
+          item.status = mergeStatus(item.status, eventStatus(event))
+          item.executionCount = (item.executionCount || 0) + (executionHit ? 1 : 0)
+          if (!item.target && tool.target) item.target = tool.target
+          if (!item.detail && tool.target) item.detail = `目标：${tool.target}`
+          if (event.phase === 'verification' && event.event_type === 'success') item.status = 'success'
+          toolIndexes.set(getToolKey({ toolName: tool.toolName, target: item.target || tool.target }), existingIndex)
+          return
+        }
+
+        const item: TraceDisplayItem = {
+          id: `${event.timestamp}-${event.phase}-${index}`,
+          kind: 'tool',
+          phase: event.phase,
+          timestamp: event.timestamp,
+          title: operationTitle(tool.toolName),
+          detail: tool.target ? `目标：${tool.target}` : getCompactEventContent(event),
+          status: eventStatus(event),
+          toolName: tool.toolName,
+          target: tool.target,
+          executionCount: executionHit ? 1 : 0,
+          events: [event],
+        }
+        toolIndexes.set(key, items.length)
+        items.push(item)
+        return
+      }
+
+      if (event.phase === 'approval_request' || event.phase === 'approval_response') {
+        const command = typeof event.metadata?.command === 'string' ? event.metadata.command : ''
+        const parsed = parseOperationCommand(command)
+        const title = parsed ? `审批：${operationTitle(parsed.toolName)}` : '审批确认'
+        const detail = parsed ? operationTarget(parsed.args) : getCompactEventContent(event)
+        if (approvalIndex >= 0) {
+          const item = items[approvalIndex]
+          item.events.push(event)
+          item.status = mergeStatus(item.status, eventStatus(event))
+          return
+        }
+        approvalIndex = items.length
+        items.push({
+          id: `${event.timestamp}-${event.phase}-${index}`,
+          kind: 'approval',
+          phase: event.phase,
+          timestamp: event.timestamp,
+          title,
+          detail,
+          status: eventStatus(event),
+          events: [event],
+        })
+        return
+      }
+
+      if (isAggregatedPhase(event.phase)) {
+        const existingIndex = phaseIndexes.get(event.phase)
+        if (existingIndex !== undefined) {
+          const item = items[existingIndex]
+          item.events.push(event)
+          item.status = mergeStatus(item.status, eventStatus(event))
+          if (shouldPreferPhaseEvent(item.events[0], event)) {
+            item.timestamp = event.timestamp
+          }
+          item.detail = phaseDetail(event.phase, item.events)
+          return
+        }
+        phaseIndexes.set(event.phase, items.length)
+        items.push({
+          id: `${event.timestamp}-${event.phase}-${index}`,
+          kind: phaseKind(event.phase),
+          phase: event.phase,
+          timestamp: event.timestamp,
+          title: phaseTitle(event.phase),
+          detail: phaseDetail(event.phase, [event]),
+          status: eventStatus(event),
+          events: [event],
+        })
+        return
+      }
+
+      items.push({
+        id: `${event.timestamp}-${event.phase}-${index}`,
+        kind: phaseKind(event.phase),
+        phase: event.phase,
+        timestamp: event.timestamp,
+        title: getPhaseLabel(event.phase),
+        detail: getCompactEventContent(event),
+        status: eventStatus(event),
+        events: [event],
+      })
+    })
+
+    return items
+  }
+
+  const getItemIcon = (item: TraceDisplayItem) => {
+    const iconStyle = { fontSize: 14 }
+    if (item.status === 'blocked') return <StopOutlined style={{ ...iconStyle, color: 'var(--accent-red)' }} />
+    if (item.status === 'failure') return <CloseCircleOutlined style={{ ...iconStyle, color: 'var(--accent-red)' }} />
+    if (item.status === 'rejected') return <CloseCircleOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
+    if (item.kind === 'tool') return <ToolOutlined style={{ ...iconStyle, color: 'var(--accent-purple)' }} />
+    if (item.kind === 'approval') return <SafetyOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
+    if (item.kind === 'planning') return <BulbOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
+    if (item.kind === 'response') return <MessageOutlined style={{ ...iconStyle, color: 'var(--accent-green)' }} />
+    if (item.kind === 'verification') return <CheckCircleOutlined style={{ ...iconStyle, color: 'var(--accent-green)' }} />
+    if (item.kind === 'guard') return <SafetyOutlined style={{ ...iconStyle, color: 'var(--accent-green)' }} />
+    return <CheckCircleOutlined style={iconStyle} />
   }
 
   const getEventColor = (eventType: string): string => {
@@ -346,6 +700,34 @@ function TracePanel() {
     return getEventColor(event.event_type)
   }
 
+  const getItemColor = (item: TraceDisplayItem): string => {
+    if (item.status === 'failure' || item.status === 'blocked') return 'red'
+    if (item.status === 'rejected' || item.status === 'skipped') return 'orange'
+    if (item.status === 'success') return 'green'
+    if (item.kind === 'tool') return 'purple'
+    if (item.kind === 'approval') return 'orange'
+    return 'blue'
+  }
+
+  const getItemLabel = (item: TraceDisplayItem) => {
+    if (item.kind === 'tool') return '工具执行'
+    if (item.kind === 'approval') return '审批'
+    if (item.kind === 'planning') return '规划'
+    if (item.kind === 'verification') return '验证'
+    if (item.kind === 'response') return '回复'
+    if (item.kind === 'guard') return '安全'
+    return getPhaseLabel(item.phase)
+  }
+
+  const getItemStatusLabel = (item: TraceDisplayItem) => {
+    if (item.status === 'failure') return '失败'
+    if (item.status === 'blocked') return '已拦截'
+    if (item.status === 'rejected') return '已拒绝'
+    if (item.status === 'skipped') return '已跳过'
+    if (item.status === 'success') return item.kind === 'tool' ? '已执行' : '已完成'
+    return '进行中'
+  }
+
   const getPhaseLabel = (phase: string) => {
     const labels: Record<string, string> = {
       input_received: '接收指令',
@@ -354,6 +736,7 @@ function TracePanel() {
       image_recognition: '图片识别',
       voice_recognition: '语音识别',
       multimodal_recognition: '多模态识别',
+      context_management: '上下文管理',
       planning: '推理规划',
       tool_call: '工具调用',
       approval_request: '审批请求',
@@ -372,9 +755,36 @@ function TracePanel() {
     return localizeTraceContent(content)
   }
 
+  const getCompactEventContent = (event: TraceEvidence) => {
+    const content = event.content || ''
+    const planned = content.match(/(?:准备调用工具：|调用工具:\s*)([\w_]+)\s*(?:\n参数：|\()?(.*)?$/s)
+    if (planned) {
+      const toolName = planned[1]
+      const rawArgs = (planned[2] || '').replace(/\)$/, '').trim()
+      let target = ''
+      try {
+        const args = rawArgs ? JSON.parse(rawArgs) as Record<string, unknown> : {}
+        target = operationTarget(args)
+      } catch {
+        target = ''
+      }
+      return target ? `${operationTitle(toolName)}：${target}` : operationTitle(toolName)
+    }
+
+    const directCommand = parseOperationCommand(content)
+    if (directCommand) {
+      const target = operationTarget(directCommand.args)
+      return target ? `${operationTitle(directCommand.toolName)}：${target}` : operationTitle(directCommand.toolName)
+    }
+
+    const localized = getDisplayContent(event).replace(/\n参数：.*$/s, '')
+    return localized.length > 120 ? `${localized.slice(0, 120)}...` : localized
+  }
+
   const getGroupStatusColor = (status: TraceGroup['status']) => {
     switch (status) {
       case 'success': return 'green'
+      case 'warning': return 'orange'
       case 'failure': return 'red'
       case 'blocked': return 'red'
       case 'corrected': return 'orange'
@@ -386,6 +796,7 @@ function TracePanel() {
   const getGroupStatusLabel = (status: TraceGroup['status']) => {
     switch (status) {
       case 'success': return '已完成'
+      case 'warning': return '有警告'
       case 'failure': return '失败'
       case 'blocked': return '已拦截'
       case 'corrected': return '已修正'
@@ -400,9 +811,47 @@ function TracePanel() {
     return text.length > 34 ? `${text.slice(0, 34)}...` : text
   }
 
-  const renderTraceEvent = (event: TraceEvidence, index: number, total: number) => (
+  const renderRawEventDetail = (event: TraceEvidence, index: number) => (
     <div
       key={`${event.timestamp}-${event.phase}-${index}`}
+      style={{
+        padding: '8px 0',
+        borderTop: index > 0 ? '1px solid var(--border-color)' : 'none',
+      }}
+    >
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4 }}>
+        <Tag color={getTraceEventColor(event)} style={{ fontSize: 10, margin: 0 }}>
+          {getDetailPhaseLabel(event)}
+        </Tag>
+        <Text style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+          {new Date(event.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+        </Text>
+      </div>
+      <Text
+        style={{
+          display: 'block',
+          fontSize: 11,
+          color: 'var(--text-secondary)',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+        }}
+      >
+        {getDetailContent(event)}
+      </Text>
+      {renderEvidence(event)}
+    </div>
+  )
+
+  const detailEventsForItem = (item: TraceDisplayItem) => {
+    const filtered = item.events.filter((event) => !isCoarseAuditDuplicate(event))
+    return filtered.length ? filtered : item.events
+  }
+
+  const renderTraceItem = (item: TraceDisplayItem, index: number, total: number) => {
+    const detailEvents = detailEventsForItem(item)
+    return (
+    <div
+      key={item.id}
       style={{
         display: 'flex',
         gap: 10,
@@ -412,46 +861,58 @@ function TracePanel() {
       }}
     >
       <div style={{ paddingTop: 2 }}>
-        {getPhaseIcon(event)}
+        {getItemIcon(item)}
       </div>
-
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-          <Tag
-            color={getTraceEventColor(event)}
-            style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}
-          >
-            {getPhaseLabel(event.phase)}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap' }}>
+          <Tag color={getItemColor(item)} style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+            {getItemLabel(item)}
           </Tag>
+          <Tag color={getItemColor(item)} style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+            {getItemStatusLabel(item)}
+          </Tag>
+          {(item.executionCount || 0) > 1 && (
+            <Tag color="orange" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+              执行 {item.executionCount} 次
+            </Tag>
+          )}
           <Text style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-            {new Date(event.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            {new Date(item.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
           </Text>
         </div>
-        <Text
-          style={{
-            fontSize: 11,
-            color: event.event_type === 'blocked' ? 'var(--accent-red)' : 'var(--text-secondary)',
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-          }}
-        >
-          {getDisplayContent(event)}
+        <Text style={{ display: 'block', fontSize: 12, color: 'var(--text-primary)', marginBottom: 2 }}>
+          {item.title}
         </Text>
-        {renderEvidence(event)}
-        {event.phase === 'tool_call' && (event.content.includes('调用工具') || event.content.includes('准备调用工具')) && (
+        {item.detail && (
+          <Text style={{ display: 'block', fontSize: 11, color: 'var(--text-secondary)', wordBreak: 'break-word' }}>
+            {item.detail}
+          </Text>
+        )}
+        <Collapse
+          ghost
+          size="small"
+          className="trace-detail-collapse"
+          items={[{
+            key: 'trace-detail',
+            label: `详细事件（${detailEvents.length}）`,
+            children: detailEvents.map(renderRawEventDetail),
+          }]}
+        />
+        {item.kind === 'tool' && item.toolName && (
           <Button
             size="small"
             type="link"
             icon={<BulbOutlined />}
-            style={{ padding: 0, marginTop: 4, fontSize: 11, height: 'auto' }}
-            onClick={() => sendMessage(`请解释这个操作的含义和作用：${getDisplayContent(event)}`)}
+            style={{ padding: 0, marginTop: 2, fontSize: 11, height: 'auto' }}
+            onClick={() => sendMessage(`请解释这个操作的含义和作用：${item.title}${item.target ? `，目标：${item.target}` : ''}`)}
           >
             解释
           </Button>
         )}
       </div>
     </div>
-  )
+    )
+  }
 
   return (
     <div style={{ padding: 16, height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -471,6 +932,7 @@ function TracePanel() {
         <div style={{ flex: 1, overflow: 'auto' }}>
           {traceGroups.map((group, groupIndex) => {
             const expanded = isGroupExpanded(group)
+            const displayItems = buildDisplayItems(group.events)
             return (
             <div
               key={group.id}
@@ -513,7 +975,7 @@ function TracePanel() {
                   <Text style={{ fontSize: 10, color: 'var(--text-muted)' }}>
                     {new Date(group.startTime).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                     {' · '}
-                    {group.events.length} 个事件
+                    {displayItems.length} 个步骤
                   </Text>
                 </div>
                 <Tag color={getGroupStatusColor(group.status)} style={{ fontSize: 10, margin: 0 }}>
@@ -527,7 +989,7 @@ function TracePanel() {
                     paddingLeft: 2,
                   }}
                 >
-                  {group.events.map((event, index) => renderTraceEvent(event, index, group.events.length))}
+                  {displayItems.map((item, index) => renderTraceItem(item, index, displayItems.length))}
                 </div>
               )}
             </div>

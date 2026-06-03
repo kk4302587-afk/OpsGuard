@@ -105,6 +105,10 @@ _DISPLAY_NAMES: dict[str, str] = {
     "list_backups": "备份列表",
     "rollback_backup": "恢复备份",
     "get_recent_changes": "最近变更",
+    "prometheus_query": "Prometheus 即时查询",
+    "prometheus_range_query": "Prometheus 区间查询",
+    "loki_query": "Loki 即时日志查询",
+    "loki_range_query": "Loki 区间日志查询",
 }
 
 
@@ -653,18 +657,18 @@ class ToolsRegistry:
 
         from app.mcp_tools import backup
 
-        self._register("list_backups", "List OpsGuard backup and rollback points", {
+        self._register("list_backups", "列出 OpsGuard 备份和回滚点", {
             "type": "object",
             "properties": {
-                "filepath": {"type": "string", "description": "Optional original file path filter", "default": ""},
-                "limit": {"type": "integer", "description": "Maximum records to return", "default": 20},
+                "filepath": {"type": "string", "description": "可选的原始文件路径过滤条件", "default": ""},
+                "limit": {"type": "integer", "description": "返回记录数量上限", "default": 20},
             },
         }, backup.list_backups, RiskLevel.READ, "backup")
 
-        self._register("rollback_backup", "Restore a file or directory by backup id. Requires approval.", {
+        self._register("rollback_backup", "按备份 ID 恢复文件或目录（需要审批）", {
             "type": "object",
             "properties": {
-                "backup_id": {"type": "string", "description": "Backup record id"},
+                "backup_id": {"type": "string", "description": "备份记录 ID"},
             },
             "required": ["backup_id"],
         }, backup.rollback_backup, RiskLevel.DESTRUCTIVE, "backup")
@@ -678,6 +682,51 @@ class ToolsRegistry:
                 "limit": {"type": "integer", "description": "Maximum change records to return", "default": 30},
             },
         }, recent_changes.get_recent_changes, RiskLevel.READ, "recent_changes")
+
+        from app.mcp_tools import observability_tools
+
+        self._register("prometheus_query", "查询 Prometheus 即时指标。只读，用于获取当前指标证据。", {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "PromQL query"},
+                "time_": {"type": "string", "description": "Optional evaluation timestamp", "default": ""},
+            },
+            "required": ["query"],
+        }, observability_tools.prometheus_query, RiskLevel.READ, "observability")
+
+        self._register("prometheus_range_query", "查询 Prometheus 区间指标。只读，用于查看最近一段时间趋势。", {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "PromQL query"},
+                "start": {"type": "string", "description": "Range start timestamp", "default": ""},
+                "end": {"type": "string", "description": "Range end timestamp", "default": ""},
+                "step": {"type": "string", "description": "Query step such as 60s", "default": "60s"},
+                "range_minutes": {"type": "integer", "description": "Lookback window when start/end are omitted", "default": 30},
+            },
+            "required": ["query"],
+        }, observability_tools.prometheus_range_query, RiskLevel.READ, "observability")
+
+        self._register("loki_query", "查询 Loki 即时日志。只读，用于获取日志证据摘要。", {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "LogQL query"},
+                "limit": {"type": "integer", "description": "Maximum log entries", "default": 50},
+                "time_": {"type": "string", "description": "Optional query timestamp", "default": ""},
+            },
+            "required": ["query"],
+        }, observability_tools.loki_query, RiskLevel.READ, "observability")
+
+        self._register("loki_range_query", "查询 Loki 区间日志。只读，用于检索最近日志证据。", {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "LogQL query"},
+                "start": {"type": "string", "description": "Range start timestamp in nanoseconds", "default": ""},
+                "end": {"type": "string", "description": "Range end timestamp in nanoseconds", "default": ""},
+                "limit": {"type": "integer", "description": "Maximum log entries", "default": 50},
+                "range_minutes": {"type": "integer", "description": "Lookback window when start/end are omitted", "default": 30},
+            },
+            "required": ["query"],
+        }, observability_tools.loki_range_query, RiskLevel.READ, "observability")
 
         logger.info(f"Tools registry loaded: {len(self._tools)} tools")
 
@@ -720,6 +769,12 @@ class ToolsRegistry:
         """Return best-known rollback support for a tool."""
         if name in {"create_file", "write_file", "delete_file", "delete_directory", "move_file", "change_permissions", "change_owner"}:
             return True, "backup"
+        if name in {"restart_service", "start_service", "stop_service"}:
+            return True, "service_state"
+        if name in {"allow_port", "block_port", "add_cron_job", "remove_cron_job"}:
+            return True, "snapshot_restore"
+        if name in {"install_package", "remove_package"}:
+            return False, "manual"
         if name == "rollback_backup":
             return False, "manual"
         return False, "none"

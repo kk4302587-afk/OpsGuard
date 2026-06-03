@@ -8,6 +8,7 @@ from pathlib import Path
 os.chdir(Path(__file__).parent)
 
 from app.agent.graph import assess_impact
+from app.api.backups import rollback_backup as rollback_backup_api
 from app.agent.tools_registry import RiskLevel, tools_registry
 from app.mcp_tools import backup, file_tools
 
@@ -54,7 +55,7 @@ def test_impact_text_is_truthful_about_rollback() -> None:
 
         service_text = await assess_impact("restart_service", {"service": "nginx"}, "s", capture)
         assert service_text is not None
-        assert "回滚：无可靠自动回滚" in service_text
+        assert "回滚：支持服务状态恢复" in service_text
         assert "预览：仅影响评估" in service_text
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -111,11 +112,30 @@ def test_create_file_tool_creates_real_file_without_overwriting_by_default() -> 
         assert target.read_text(encoding="utf-8") == "changed"
 
 
+def test_backup_api_does_not_bypass_rollback_approval() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _isolate_backup_manager(tmpdir)
+            target = Path(tmpdir) / "config.conf"
+            target.write_text("before", encoding="utf-8")
+            record = backup.backup_manager.backup_file(str(target), operation="write_file")
+            assert record and record["id"]
+
+            target.write_text("after", encoding="utf-8")
+            response = await rollback_backup_api(record["id"])
+            assert response["requires_approval"] is True
+            assert response["tool_name"] == "rollback_backup"
+            assert target.read_text(encoding="utf-8") == "after"
+
+    asyncio.run(scenario())
+
+
 def main() -> None:
     test_backup_list_and_rollback_restore_real_file()
     test_rollback_tool_is_destructive_and_approval_gated()
     test_impact_text_is_truthful_about_rollback()
     test_create_file_tool_creates_real_file_without_overwriting_by_default()
+    test_backup_api_does_not_bypass_rollback_approval()
     print("rollback visibility regression OK")
 
 

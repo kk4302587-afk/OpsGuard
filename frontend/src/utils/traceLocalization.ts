@@ -67,6 +67,10 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   list_backups: '备份列表',
   rollback_backup: '恢复备份',
   get_recent_changes: '最近变更',
+  prometheus_query: 'Prometheus 即时查询',
+  prometheus_range_query: 'Prometheus 区间查询',
+  loki_query: 'Loki 即时日志查询',
+  loki_range_query: 'Loki 区间日志查询',
 }
 
 export const SOURCE_DISPLAY_NAMES: Record<string, string> = {
@@ -82,11 +86,15 @@ export const SOURCE_DISPLAY_NAMES: Record<string, string> = {
   write_completion_guard: '写操作真实性保护',
   read_tool_truthfulness_guard: '只读检查真实性保护',
   structured_final_response_guard: '结构化最终回复校验',
+  'context_manager.build_context_package': '上下文管理',
   approval_manager: '审批管理器',
   'BackupManager.backup_file': '备份管理器',
   runbook_executor: 'Runbook 执行器',
   assess_impact: '影响评估',
   alert_webhook: '告警自动分析',
+  grafana_dashboard: 'Grafana 面板',
+  prometheus: 'Prometheus',
+  loki: 'Loki',
   aliyun_dashscope: '阿里云百炼',
   multimodal_input: '多模态输入',
 }

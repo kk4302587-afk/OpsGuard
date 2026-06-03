@@ -159,7 +159,7 @@ def test_agent_run_creates_incident_without_appending_reference() -> None:
 
                 response = await graph.run_agent(
                     session_id="agent-incident",
-                    user_message="Check nginx status",
+                    user_message="Hello",
                     conversation_history=[],
                     send_to_client=capture_event,
                 )
@@ -183,6 +183,72 @@ def test_agent_run_creates_incident_without_appending_reference() -> None:
         assert any(event["phase"] == "knowledge_retrieval" for event in incident_events)
         assert any(event["phase"] == "response" for event in incident_events)
         assert events
+
+    asyncio.run(scenario())
+
+
+def test_incident_with_intermediate_tool_failure_and_final_response_is_resolved() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "knowledge.db")
+            incident_id = await incident_store.create_incident(
+                session_id="session-partial-failure",
+                problem_statement="Check system resources",
+                source="test",
+                db_path=db_path,
+            )
+            await incident_store.record_incident_from_message(
+                incident_id=incident_id,
+                session_id="session-partial-failure",
+                db_path=db_path,
+                message={
+                    "type": "trace",
+                    "phase": "execution",
+                    "event_type": "failure",
+                    "content": "get_service_status CPU failed",
+                    "claim": "get_service_status failed against CPU",
+                    "evidence_type": "command",
+                    "source": "get_service_status",
+                    "observed": "Unit CPU.service could not be found",
+                    "confidence": "high",
+                    "execution_state": "failed",
+                    "failure_reason": "Unit CPU.service could not be found",
+                },
+            )
+            await incident_store.record_incident_from_message(
+                incident_id=incident_id,
+                session_id="session-partial-failure",
+                db_path=db_path,
+                message={
+                    "type": "trace",
+                    "phase": "response",
+                    "event_type": "success",
+                    "content": "回复已生成",
+                    "claim": "已基于可用证据生成最终回复",
+                    "evidence_type": "command",
+                    "source": "structured_final_response_guard",
+                    "observed": "系统资源状态已说明，失败检查作为警告保留",
+                    "confidence": "high",
+                    "execution_state": "executed",
+                },
+            )
+            await incident_store.finalize_incident(
+                incident_id=incident_id,
+                final_summary="System resource answer completed with one warning",
+                db_path=db_path,
+            )
+            incidents = await incident_store.get_incidents(
+                session_id="session-partial-failure",
+                db_path=db_path,
+            )
+            summary = await incident_store.get_incident_summary(
+                incident_id,
+                db_path=db_path,
+            )
+
+        assert incidents[0]["status"] == "resolved"
+        assert summary is not None
+        assert summary["failure_count"] == 1
 
     asyncio.run(scenario())
 
@@ -252,6 +318,7 @@ def test_runbook_execution_creates_incident_from_real_step_events() -> None:
 def main() -> None:
     test_incident_store_records_real_trace_evidence()
     test_agent_run_creates_incident_without_appending_reference()
+    test_incident_with_intermediate_tool_failure_and_final_response_is_resolved()
     test_runbook_execution_creates_incident_from_real_step_events()
     print("incident timeline regression OK")
 

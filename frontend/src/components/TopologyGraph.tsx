@@ -55,6 +55,19 @@ interface TopologyData {
   edges: TopologyEdge[]
   categories: { name: string; itemStyle: { color: string } }[]
   annotations?: TopologyAnnotation[]
+  rca_candidates?: RcaCandidate[]
+}
+
+interface RcaCandidate {
+  candidate_id: string
+  candidate_type: string
+  name: string
+  confidence: 'high' | 'medium' | 'low'
+  score: number
+  reasons: string[]
+  evidence_summaries: string[]
+  impact_path: string[]
+  affected_targets: string[]
 }
 
 const categoryLabels: Record<string, string> = {
@@ -78,6 +91,18 @@ const roleColors: Record<RcaRole, string> = {
   suspected_root_cause: '#d19a66',
   downstream_impact: '#e5c07b',
   evidence: '#00d4aa',
+}
+
+const confidenceLabels: Record<RcaCandidate['confidence'], string> = {
+  high: '高',
+  medium: '中',
+  low: '低',
+}
+
+const confidenceColors: Record<RcaCandidate['confidence'], string> = {
+  high: 'red',
+  medium: 'orange',
+  low: 'blue',
 }
 
 const backgroundNodeColor = '#5c6370'
@@ -255,6 +280,8 @@ function TopologyGraph() {
     }, { affected: 0, suspected_root_cause: 0, downstream_impact: 0, evidence: 0 }) ||
     { affected: 0, suspected_root_cause: 0, downstream_impact: 0, evidence: 0 }
   ), [data])
+
+  const rcaCandidates = data?.rca_candidates || []
 
   const visibleCategoryCounts = useMemo(() => (
     displayedNodes.reduce<Record<string, number>>((acc, node) => {
@@ -524,6 +551,11 @@ function TopologyGraph() {
               根因线索 {data.annotations?.length || 0}
             </Tag>
           )}
+          {viewMode !== 'system' && activeSessionId && (
+            <Tag color={rcaCandidates.length > 0 ? 'red' : 'default'}>
+              RCA候选 {rcaCandidates.length}
+            </Tag>
+          )}
           {viewMode === 'latest' && <Tag color="blue">本轮请求</Tag>}
           {viewMode === 'session' && <Tag color="purple">整个会话</Tag>}
           {hasMappedEvidence ? (
@@ -637,6 +669,50 @@ function TopologyGraph() {
                     ? '当前范围没有可映射到拓扑实体的诊断证据，暂时只显示系统拓扑底图。系统指标会保留在报告和证据链中；日志、服务、端口、配置和进程证据会在这里形成故障关联。'
                     : '当前展示系统拓扑，图中颜色表示节点类型；选择“本轮请求”或“整个会话”后，会叠加诊断证据形成故障关联图谱。'}
                 </Text>
+              </div>
+            )}
+
+            {rcaCandidates.length > 0 && (
+              <div>
+                <Text strong style={{ display: 'block', color: 'var(--text-primary)', marginBottom: 8 }}>
+                  RCA 候选
+                </Text>
+                <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  {rcaCandidates.slice(0, 3).map((candidate, index) => (
+                    <div
+                      key={candidate.candidate_id}
+                      style={{
+                        padding: '8px 10px',
+                        border: '1px solid var(--border-color)',
+                        borderRadius: 6,
+                        background: 'rgba(255, 255, 255, 0.03)',
+                      }}
+                    >
+                      <Space wrap size={4} style={{ marginBottom: 6 }}>
+                        <Tag color={index === 0 ? 'red' : 'orange'} style={{ margin: 0 }}>
+                          #{index + 1}
+                        </Tag>
+                        <Tag color={confidenceColors[candidate.confidence]} style={{ margin: 0 }}>
+                          置信度 {confidenceLabels[candidate.confidence]}
+                        </Tag>
+                        <Tag style={{ margin: 0 }}>分数 {candidate.score}</Tag>
+                      </Space>
+                      <Text style={{ display: 'block', color: 'var(--text-primary)', fontWeight: 600, wordBreak: 'break-word' }}>
+                        {candidate.name}
+                      </Text>
+                      {candidate.impact_path?.length > 0 && (
+                        <Text style={{ display: 'block', marginTop: 4, fontSize: 12, color: 'var(--text-secondary)', wordBreak: 'break-word' }}>
+                          路径：{candidate.impact_path.join(' → ')}
+                        </Text>
+                      )}
+                      {candidate.reasons?.slice(0, 3).map((reason) => (
+                        <Text key={reason} style={{ display: 'block', marginTop: 4, fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                          - {reason}
+                        </Text>
+                      ))}
+                    </div>
+                  ))}
+                </Space>
               </div>
             )}
 

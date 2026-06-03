@@ -46,7 +46,7 @@ def _get_state(session_id: str) -> dict:
     """Return the session's mutable state dict, creating it if absent."""
     st = _session_state.get(session_id)
     if st is None:
-        st = {"active_task": None, "pending_suggestion": None}
+        st = {"active_task": None, "pending_suggestion": None, "pending_runbook_clarification": None}
         _session_state[session_id] = st
     return st
 
@@ -133,6 +133,7 @@ def _set_active_task(session_id: str, task: asyncio.Task) -> None:
             if (
                 manager.get(session_id) is None
                 and not current_state.get("pending_suggestion")
+                and not current_state.get("pending_runbook_clarification")
             ):
                 _session_state.pop(session_id, None)
         if done_task.cancelled():
@@ -157,22 +158,7 @@ async def _send_runtime_snapshot(websocket: WebSocket, session_id: str, state: d
 
     suggestion = state.get("pending_suggestion")
     if suggestion:
-        await websocket.send_json({
-            "type": "runbook_suggestion",
-            "runbook_id": suggestion["runbook_id"],
-            "name": suggestion["name"],
-            "description": suggestion.get("description") or "",
-            "step_count": suggestion.get("step_count", 0),
-            "match_ratio": suggestion.get("match_ratio", 0.0),
-            "version": suggestion.get("version", 1),
-            "success_count": suggestion.get("success_count", 0),
-            "failure_count": suggestion.get("failure_count", 0),
-            "success_rate": suggestion.get("success_rate"),
-            "staleness_status": suggestion.get("staleness_status", "fresh"),
-            "last_failure_reason": suggestion.get("last_failure_reason"),
-            "original_message": suggestion.get("original_message") or "",
-            "timestamp": datetime.now().isoformat(),
-        })
+        await websocket.send_json(_runbook_suggestion_payload(suggestion))
 
     from app.websocket.approval import approval_manager
     for request in approval_manager.get_pending(session_id):
@@ -182,6 +168,13 @@ async def _send_runtime_snapshot(websocket: WebSocket, session_id: str, state: d
             "command": f"{request.tool_name}({json.dumps(request.tool_args, ensure_ascii=False)})",
             "risk_level": request.risk_level,
             "description": request.description,
+            "impact": request.impact,
+            "rollback_strategy": request.rollback_strategy,
+            "supports_rollback": request.supports_rollback,
+            "preview_strategy": request.preview_strategy,
+            "policy": request.policy,
+            "approval_level": request.approval_level,
+            "execution_identity": request.execution_identity,
             "timestamp": datetime.now().isoformat(),
         })
 
@@ -221,6 +214,24 @@ async def handle_user_message(session_id: str, message: dict):
 
     await _persist_user_message(session_id, content)
 
+    state = _get_state(session_id)
+    clarification = state.pop("pending_runbook_clarification", None)
+    if clarification:
+        combined = f"{clarification.get('original_message') or ''}\n{content}".strip()
+        try:
+            from app.agent.runbook_matcher import load_runbook_for_suggestion
+            match = await load_runbook_for_suggestion(
+                clarification["runbook_id"],
+                combined,
+                match_ratio=clarification.get("match_ratio", 0.0),
+            )
+        except Exception as e:
+            logger.warning(f"Runbook clarification failed (non-fatal): {e}")
+            match = None
+        if match:
+            await _cache_and_send_runbook_suggestion(session_id, match, combined)
+            return
+
     # === Step 2: Runbook fuzzy match (C side) ===
     try:
         from app.agent.runbook_matcher import find_matching_runbook
@@ -230,38 +241,35 @@ async def handle_user_message(session_id: str, message: dict):
         match = None
 
     if match:
-        # Cache the suggestion so the upcoming runbook_decision can find it.
-        state = _get_state(session_id)
-        state["pending_suggestion"] = {
-            "runbook_id": match["id"],
-            "name": match["name"],
-            "description": match.get("description") or "",
-            "step_count": match.get("step_count", 0),
-            "match_ratio": match.get("match_ratio", 0.0),
-            "version": match.get("version", 1),
-            "success_count": match.get("success_count", 0),
-            "failure_count": match.get("failure_count", 0),
-            "success_rate": match.get("success_rate"),
-            "staleness_status": match.get("staleness_status", "fresh"),
-            "last_failure_reason": match.get("last_failure_reason"),
-            "original_message": content,
-        }
-        await _send_to_session(session_id, {
-            "type": "runbook_suggestion",
-            "runbook_id": match["id"],
-            "name": match["name"],
-            "description": match.get("description") or "",
-            "step_count": match.get("step_count", 0),
-            "match_ratio": match.get("match_ratio", 0.0),
-            "version": match.get("version", 1),
-            "success_count": match.get("success_count", 0),
-            "failure_count": match.get("failure_count", 0),
-            "success_rate": match.get("success_rate"),
-            "staleness_status": match.get("staleness_status", "fresh"),
-            "last_failure_reason": match.get("last_failure_reason"),
-            "original_message": content,
-            "timestamp": datetime.now().isoformat(),
-        })
+        missing = (match.get("preflight") or {}).get("missing_variables") or []
+        if missing:
+            state = _get_state(session_id)
+            state["pending_runbook_clarification"] = {
+                "runbook_id": match["id"],
+                "name": match["name"],
+                "match_ratio": match.get("match_ratio", 0.0),
+                "original_message": content,
+                "missing_variables": missing,
+            }
+            match.setdefault("preflight", {})["requires_clarification"] = True
+            match["preflight"]["clarification_prompt"] = _format_missing_variable_question(match, missing)
+            await _cache_and_send_runbook_suggestion(session_id, match, content)
+            from app.agent.trace_evidence import build_evidence, trace_event
+            await _send_to_session(session_id, trace_event(
+                phase="response",
+                event_type="success",
+                content=match["preflight"]["clarification_prompt"],
+                evidence=build_evidence(
+                    claim="Runbook 匹配后缺少必要参数，已提供 Runbook 或普通 Agent 的选择",
+                    evidence_type="user input",
+                    source="runbook_matcher",
+                    observed={"runbook": match.get("name"), "missing_variables": missing},
+                    confidence="high",
+                    execution_state="inferred",
+                ),
+            ))
+            return
+        await _cache_and_send_runbook_suggestion(session_id, match, content)
         logger.info(
             f"Runbook suggestion for session {session_id}: "
             f"{match['name']!r} ratio={match['match_ratio']}"
@@ -286,13 +294,20 @@ async def handle_runbook_decision(session_id: str, message: dict):
         return
 
     if decision == "execute":
+        preflight = suggestion.get("preflight") or {}
+        if preflight.get("status") == "not_applicable":
+            await _send_to_session(session_id, _runbook_suggestion_payload(suggestion))
+            await _run_agent_for_message(session_id, suggestion.get("original_message") or "")
+            return
         await _replay_runbook(
             session_id,
             runbook_id=suggestion["runbook_id"],
             origin="suggestion",
+            original_message=suggestion.get("original_message") or "",
         )
     else:
         # Dismiss → fall back to the regular Agent flow with the original message.
+        state.pop("pending_runbook_clarification", None)
         original = suggestion.get("original_message") or message.get("original_message") or ""
         if not original:
             await _send_to_session(session_id, {
@@ -314,6 +329,66 @@ async def handle_run_runbook(session_id: str, message: dict):
         runbook_id=runbook_id,
         origin="direct",
     )
+
+
+def _runbook_suggestion_payload(suggestion: dict) -> dict:
+    return {
+        "type": "runbook_suggestion",
+        "runbook_id": suggestion["runbook_id"],
+        "name": suggestion["name"],
+        "description": suggestion.get("description") or "",
+        "step_count": suggestion.get("step_count", 0),
+        "match_ratio": suggestion.get("match_ratio", 0.0),
+        "version": suggestion.get("version", 1),
+        "success_count": suggestion.get("success_count", 0),
+        "failure_count": suggestion.get("failure_count", 0),
+        "success_rate": suggestion.get("success_rate"),
+        "staleness_status": suggestion.get("staleness_status", "fresh"),
+        "last_success": suggestion.get("last_success"),
+        "last_failure_reason": suggestion.get("last_failure_reason"),
+        "rollback_steps": suggestion.get("rollback_steps") or [],
+        "original_message": suggestion.get("original_message") or "",
+        "preflight": suggestion.get("preflight") or {},
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+async def _cache_and_send_runbook_suggestion(session_id: str, match: dict, original_message: str) -> None:
+    state = _get_state(session_id)
+    state["pending_suggestion"] = {
+        "runbook_id": match["id"],
+        "name": match["name"],
+        "description": match.get("description") or "",
+        "step_count": match.get("step_count", 0),
+        "match_ratio": match.get("match_ratio", 0.0),
+        "version": match.get("version", 1),
+        "success_count": match.get("success_count", 0),
+        "failure_count": match.get("failure_count", 0),
+        "success_rate": match.get("success_rate"),
+        "staleness_status": match.get("staleness_status", "fresh"),
+        "last_success": match.get("last_success"),
+        "last_failure_reason": match.get("last_failure_reason"),
+        "rollback_steps": match.get("rollback_steps") or [],
+        "original_message": original_message,
+        "preflight": match.get("preflight") or {},
+    }
+    await _send_to_session(session_id, _runbook_suggestion_payload(state["pending_suggestion"]))
+
+
+def _format_missing_variable_question(match: dict, missing: list[str]) -> str:
+    labels = {
+        "service": "服务名",
+        "service_name": "服务名",
+        "path": "路径",
+        "filepath": "文件路径",
+        "dirpath": "目录路径",
+        "port": "端口",
+        "protocol": "协议",
+        "package": "软件包名",
+        "package_name": "软件包名",
+    }
+    readable = "、".join(labels.get(str(item), str(item)) for item in missing)
+    return f"匹配到 Runbook「{match.get('name') or '未命名'}」，但还缺少必要参数：{readable}。请补充这些信息后我再做预检。"
 
 
 # === Helpers shared by the message / decision / direct paths ===
@@ -446,6 +521,7 @@ async def _replay_runbook(
     *,
     runbook_id: str,
     origin: str,
+    original_message: str = "",
 ) -> None:
     """Run a Runbook (B side) end-to-end and stream progress.
 
@@ -455,11 +531,12 @@ async def _replay_runbook(
     send_to_client = _make_sender(session_id)
 
     try:
-        from app.agent.runbook_executor import execute_runbook
+        from app.agent.runbook_executor import RunbookAgentFallback, execute_runbook
         response = await execute_runbook(
             session_id=session_id,
             runbook_id=runbook_id,
             send_to_client=send_to_client,
+            user_message=original_message,
         )
 
         assistant_msg_id = await _save_assistant_response(session_id, response)
@@ -470,6 +547,18 @@ async def _replay_runbook(
             "timestamp": datetime.now().isoformat(),
         })
         logger.info(f"Runbook {runbook_id} replay finished ({origin})")
+
+    except RunbookAgentFallback as fallback:
+        response = fallback.summary
+        assistant_msg_id = await _save_assistant_response(session_id, response)
+        await _send_to_session(session_id, {
+            "type": "response",
+            "content": response,
+            "message_id": assistant_msg_id,
+            "timestamp": datetime.now().isoformat(),
+        })
+        if original_message:
+            await _run_agent_for_message(session_id, original_message)
 
     except Exception as e:
         logger.error(f"Runbook replay failed in session {session_id}: {e}")

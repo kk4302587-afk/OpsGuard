@@ -25,6 +25,9 @@ from loguru import logger
 from app.agent.tool_executor import execute_tool
 from app.agent.tools_registry import tools_registry, RiskLevel
 from app.agent.runbook_governance import ensure_runbook_schema, record_runbook_result
+from app.agent.runbook_preflight import preflight_runbook
+from app.agent.runbook_governance import serialize_runbook
+from app.agent.execution_policy import evaluate_tool_policy, policy_summary
 from app.agent.trace_evidence import (
     build_evidence,
     trace_event,
@@ -44,6 +47,14 @@ _RISK_LABELS = {
     RiskLevel.WRITE: "写操作",
     RiskLevel.DESTRUCTIVE: "破坏性操作",
 }
+
+
+class RunbookAgentFallback(Exception):
+    """Signal that Runbook execution should hand control back to the Agent."""
+
+    def __init__(self, summary: str):
+        super().__init__(summary)
+        self.summary = summary
 
 
 def _technical_call(tool_name: str, tool_args: dict) -> str:
@@ -274,6 +285,18 @@ def _summarize_result(tool_name: str, result_repr) -> str:
     return _preview_text(data)
 
 
+def _runbook_step_success(tool_name: str, result_repr) -> bool:
+    """Return whether a tool result should let the Runbook continue normally."""
+    if not isinstance(result_repr, dict):
+        return True
+    if not result_repr.get("success", True):
+        return False
+    data = result_repr.get("data")
+    if isinstance(data, dict) and data.get("valid") is False:
+        return False
+    return True
+
+
 def _format_plan(runbook_name: str, plan_steps: list[dict]) -> str:
     """Format a complete Runbook plan for the trace panel."""
     read_count = sum(1 for step in plan_steps if step["risk_level"] == RiskLevel.READ)
@@ -297,6 +320,103 @@ def _format_plan(runbook_name: str, plan_steps: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _failure_action(step: dict) -> str:
+    value = step.get("on_failure", "abort")
+    if isinstance(value, dict):
+        return str(value.get("action") or "abort")
+    return str(value or "abort")
+
+
+def _branch_steps(runbook: dict, branch_name: str) -> list[dict]:
+    """Return named failure-branch steps from Runbook 2.0 metadata."""
+    branches = runbook.get("failure_branches") or []
+    if not isinstance(branches, list):
+        return []
+    for branch in branches:
+        if not isinstance(branch, dict):
+            continue
+        name = branch.get("name") or branch.get("id") or branch.get("branch")
+        if str(name) != str(branch_name):
+            continue
+        steps = branch.get("steps") or branch.get("runbook_steps") or []
+        return [step for step in steps if isinstance(step, dict)] if isinstance(steps, list) else []
+    return []
+
+
+def _failure_branch_name(step: dict) -> str:
+    value = step.get("on_failure")
+    if isinstance(value, dict):
+        return str(value.get("branch") or value.get("failure_branch") or "")
+    if isinstance(value, str) and value.startswith("branch:"):
+        return value.split(":", 1)[1].strip()
+    return ""
+
+
+def _next_step_number(step: dict, *, success: bool, default: int | None) -> int | None:
+    key = "on_success" if success else "on_failure"
+    value = step.get(key)
+    if isinstance(value, dict):
+        target = value.get("next_step") or value.get("step") or value.get("target")
+        action = value.get("action")
+        if action in {"abort", "fallback_agent"}:
+            return None
+    else:
+        target = value
+    if target in (None, "", "next"):
+        return default
+    if target in {"abort", "stop", "fallback_agent"}:
+        return None
+    try:
+        parsed = int(target)
+        return parsed if parsed > 0 else default
+    except Exception:
+        return default
+
+
+def _plan_steps_from_raw_steps(steps: list[dict]) -> list[dict]:
+    """Build executable plan metadata from stored Runbook steps."""
+    plan_steps: list[dict] = []
+    for idx, step in enumerate(steps, start=1):
+        tool_name = step.get("tool_name") or ""
+        tool_args = step.get("tool_args") or {}
+        if not isinstance(tool_args, dict):
+            tool_args = {}
+        tool_def = tools_registry.get_tool(tool_name)
+        if tool_def:
+            step_info = _describe_step(tool_name, tool_args, tool_def)
+            risk_level = tool_def.risk_level
+        else:
+            step_info = {
+                "action": f"无法识别工具 {tool_name or '(empty)'}",
+                "target": "未知",
+                "risk_label": "未知工具",
+                "display_name": tool_name or "(empty)",
+                "args_text": _format_tool_args(tool_args),
+                "technical": _technical_call(tool_name, tool_args),
+            }
+            risk_level = RiskLevel.READ
+        step_info.update({
+            "index": idx,
+            "total": len(steps),
+            "tool_name": tool_name,
+            "tool_args": tool_args,
+            "risk_level": risk_level,
+            "tool_def": tool_def,
+            "raw_step": step,
+        })
+        plan_steps.append(step_info)
+    return plan_steps
+
+
+def _append_branch_plan(plan_steps: list[dict], current_index: int, branch_steps: list[dict]) -> list[dict]:
+    """Replace remaining plan with a named failure branch."""
+    updated = plan_steps[:current_index] + _plan_steps_from_raw_steps(branch_steps)
+    for offset, step in enumerate(updated, start=1):
+        step["index"] = offset
+        step["total"] = len(updated)
+    return updated
+
+
 def _format_step_trace(step_info: dict, result_summary: str | None = None) -> str:
     """Format one Runbook step trace with human text first."""
     lines = [
@@ -309,7 +429,6 @@ def _format_step_trace(step_info: dict, result_summary: str | None = None) -> st
     if result_summary:
         lines.append(f"结果摘要: {result_summary}")
     return "\n".join(lines)
-
 
 def _format_final_summary(
     runbook_name: str,
@@ -379,6 +498,7 @@ async def execute_runbook(
     send_to_client: Callable,
     *,
     approval_timeout: float = 300.0,
+    user_message: str = "",
 ) -> str:
     """Replay a Runbook by id, returning a final summary string.
 
@@ -402,6 +522,32 @@ async def execute_runbook(
 
     if not row:
         return f"Runbook {runbook_id} 不存在"
+
+    runbook = serialize_runbook(row)
+    preflight = await preflight_runbook(runbook, user_message)
+    if preflight.get("missing_variables"):
+        missing = "、".join(str(item) for item in preflight.get("missing_variables") or [])
+        return (
+            f"Runbook「{runbook.get('name') or runbook_id}」还缺少必要参数，未执行。\n\n"
+            f"缺少参数：{missing}\n\n"
+            "请补充这些参数后再执行，例如说明服务名、路径、端口或软件包名。"
+        )
+    if preflight["status"] == "not_applicable":
+        reason = preflight.get("summary") or "预检失败"
+        try:
+            async with aiosqlite.connect(get_knowledge_db_path()) as db:
+                await record_runbook_result(
+                    db,
+                    runbook_id=runbook_id,
+                    succeeded=False,
+                    failure_reason=reason,
+                )
+        except Exception as e:
+            logger.warning(f"Runbook preflight bookkeeping failed: {e}")
+        return (
+            f"Runbook「{runbook.get('name') or runbook_id}」当前不适用，未执行。\n\n"
+            f"原因：{reason}\n\n建议：改用普通 Agent 调查当前问题。"
+        )
 
     runbook_name = row["name"] or "(unnamed)"
     incident_id = None
@@ -432,23 +578,7 @@ async def execute_runbook(
                 logger.warning(f"Incident event recording failed for {incident_id}: {e}")
             await original_send_to_client(data)
 
-    try:
-        steps = json.loads(row["steps"]) if row["steps"] else []
-    except Exception as e:
-        response = f"Runbook 步骤解析失败: {e}"
-        if incident_id:
-            await incident_store.finalize_incident(
-                incident_id=incident_id,
-                final_summary=response,
-                status="failed",
-                db_path=incident_db_path,
-            )
-            response = await incident_store.append_incident_reference(
-                response,
-                incident_id,
-                db_path=incident_db_path,
-            )
-        return response
+    steps = preflight.get("rendered_steps") or runbook.get("steps") or []
 
     if not steps:
         response = f"Runbook 「{runbook_name}」没有可执行的步骤"
@@ -466,34 +596,7 @@ async def execute_runbook(
             )
         return response
 
-    plan_steps: list[dict] = []
-    for idx, step in enumerate(steps, start=1):
-        tool_name = step.get("tool_name") or ""
-        tool_args = step.get("tool_args") or {}
-        if not isinstance(tool_args, dict):
-            tool_args = {}
-        tool_def = tools_registry.get_tool(tool_name)
-        if tool_def:
-            step_info = _describe_step(tool_name, tool_args, tool_def)
-            risk_level = tool_def.risk_level
-        else:
-            step_info = {
-                "action": f"无法识别工具 {tool_name or '(empty)'}",
-                "target": "未知",
-                "risk_label": "未知工具",
-                "display_name": tool_name or "(empty)",
-                "technical": _technical_call(tool_name, tool_args),
-            }
-            risk_level = RiskLevel.READ
-        step_info.update({
-            "index": idx,
-            "total": len(steps),
-            "tool_name": tool_name,
-            "tool_args": tool_args,
-            "risk_level": risk_level,
-            "tool_def": tool_def,
-        })
-        plan_steps.append(step_info)
+    plan_steps = _plan_steps_from_raw_steps(steps)
 
     # === Announce ===
     await send_to_client(trace_event(
@@ -518,13 +621,20 @@ async def execute_runbook(
     executed: list[dict] = []
     failed_step: int | None = None
     abort_reason: str | None = None
+    next_step_number: int | None = 1
+    step_by_number = {step["index"]: step for step in plan_steps}
+    retry_counts: dict[int, int] = {}
 
     # === Step loop ===
-    for step_info in plan_steps:
+    while next_step_number is not None and next_step_number <= len(plan_steps):
+        step_info = step_by_number.get(next_step_number)
+        if not step_info:
+            break
         idx = step_info["index"]
         tool_name = step_info["tool_name"]
         tool_args = step_info["tool_args"]
         tool_def = step_info["tool_def"]
+        original_step = step_info.get("raw_step") or {}
         step_header = f"[步骤 {idx}/{len(steps)}] {step_info['action']}"
 
         if not tool_def:
@@ -556,6 +666,7 @@ async def execute_runbook(
                 "success": False,
                 "summary": abort_reason,
             })
+            next_step_number = None
             break
 
         await send_to_client(trace_event(
@@ -600,17 +711,79 @@ async def execute_runbook(
             ))
             failed_step = idx
             abort_reason = f"规则引擎拦截: {cmd_check.detail}"
+            next_step_number = None
             break
+
+        policy_decision = None
+        if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
+            policy_decision = evaluate_tool_policy(tool_name, tool_args, tool_def)
+            if not policy_decision.allowed:
+                policy_text = policy_summary(policy_decision)
+                await send_to_client(trace_event(
+                    phase="tool_call",
+                    event_type="blocked",
+                    content=f"{step_header} 被策略引擎阻断: {policy_text}",
+                    evidence=build_evidence(
+                        claim=f"Runbook 步骤 {idx} 执行前被策略引擎阻断",
+                        evidence_type="command",
+                        source="execution_policy",
+                        observed=policy_decision.to_dict(),
+                        confidence="high",
+                        execution_state="skipped",
+                        failure_reason="; ".join(policy_decision.reasons),
+                    ),
+                ))
+                await audit_logger.log(
+                    session_id,
+                    AuditPhase.TOOL_CALL,
+                    AuditEventType.BLOCKED,
+                    f"Runbook policy blocked step {idx}: {tool_name}",
+                    {"args": tool_args, "policy": policy_decision.to_dict()},
+                )
+                failed_step = idx
+                abort_reason = f"策略阻断: {policy_text}"
+                executed.append({
+                    "step": idx,
+                    "tool": tool_name,
+                    "display_name": step_info["display_name"],
+                    "args_text": step_info["args_text"],
+                    "action": step_info["action"],
+                    "risk": step_info["risk_label"],
+                    "risk_level": step_info["risk_level"],
+                    "success": False,
+                    "summary": abort_reason,
+                })
+                next_step_number = None
+                break
 
         # === Approval for write/destructive (always, on every replay) ===
         if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
             request_id = f"rb_{runbook_id[:8]}_{idx}_{uuid.uuid4().hex[:6]}"
             loop = asyncio.get_running_loop()
             approval_future: asyncio.Future = loop.create_future()
-            approval_manager.register_pending(
-                request_id, session_id, tool_name, tool_args,
-                tool_def.risk_level, tool_def.description, approval_future,
+            from app.agent.graph import _effective_rollback_capability
+            supports_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
+            impact_text = (
+                f"Runbook「{runbook_name}」步骤 {idx}/{len(steps)}: {step_info['action']}\n"
+                f"{policy_summary(policy_decision)}"
             )
+            try:
+                approval_manager.register_pending(
+                    request_id, session_id, tool_name, tool_args,
+                    tool_def.risk_level, tool_def.description, approval_future,
+                    impact=impact_text,
+                    rollback_strategy=rollback_strategy,
+                    supports_rollback=supports_rollback,
+                    preview_strategy=tool_def.preview_strategy,
+                    policy=policy_decision.to_dict() if policy_decision else {},
+                    approval_level=policy_decision.approval_level if policy_decision else "standard",
+                    execution_identity=policy_decision.execution_identity if policy_decision else {},
+                )
+            except TypeError:
+                approval_manager.register_pending(
+                    request_id, session_id, tool_name, tool_args,
+                    tool_def.risk_level, tool_def.description, approval_future,
+                )
 
             await send_to_client({
                 "type": "approval_request",
@@ -618,7 +791,13 @@ async def execute_runbook(
                 "command": f"{tool_name}({json.dumps(tool_args, ensure_ascii=False)})",
                 "risk_level": tool_def.risk_level,
                 "description": tool_def.description,
-                "impact": f"Runbook「{runbook_name}」步骤 {idx}/{len(steps)}: {step_info['action']}",
+                "impact": impact_text,
+                "rollback_strategy": rollback_strategy,
+                "supports_rollback": supports_rollback,
+                "preview_strategy": tool_def.preview_strategy,
+                "policy": policy_decision.to_dict() if policy_decision else {},
+                "approval_level": policy_decision.approval_level if policy_decision else "standard",
+                "execution_identity": policy_decision.execution_identity if policy_decision else {},
             })
             await send_to_client(trace_event(
                 phase="approval_request",
@@ -669,6 +848,7 @@ async def execute_runbook(
                     "success": False,
                     "summary": abort_reason,
                 })
+                next_step_number = None
                 break
 
             await send_to_client(trace_event(
@@ -688,10 +868,8 @@ async def execute_runbook(
             # Backup (best-effort; ignore failures, the file may not be a path)
             try:
                 from app.mcp_tools.backup import backup_manager
-                from app.agent.graph import _effective_rollback_capability
                 target_path = tool_args.get("filepath") or tool_args.get("path") or tool_args.get("service")
-                can_backup_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
-                if can_backup_rollback and rollback_strategy == "backup" and target_path and isinstance(target_path, str):
+                if supports_rollback and rollback_strategy == "backup" and target_path and isinstance(target_path, str):
                     backup_record = backup_manager.backup_file(target_path, operation=f"runbook:{tool_name}")
                     if backup_record:
                         await send_to_client(trace_event(
@@ -721,9 +899,7 @@ async def execute_runbook(
             result = await execute_tool(tool_name, tool_args, tool_def)
             result_repr = result.__dict__ if hasattr(result, "__dict__") else result
             result_str = json.dumps(result_repr, ensure_ascii=False, default=str)
-            success = (
-                result_repr.get("success", True) if isinstance(result_repr, dict) else True
-            )
+            success = _runbook_step_success(tool_name, result_repr)
             result_summary = _summarize_result(tool_name, result_repr)
             verification_error: str | None = None
             executed.append({
@@ -837,6 +1013,51 @@ async def execute_runbook(
                 ))
                 failed_step = idx
                 abort_reason = f"步骤返回失败: {err_msg}"
+                action = _failure_action(original_step)
+                max_retries = int(original_step.get("max_retries") or 0)
+                retry_count = retry_counts.get(idx, 0)
+                if retry_count < max_retries:
+                    retry_counts[idx] = retry_count + 1
+                    failed_step = None
+                    abort_reason = None
+                    continue
+                if action == "continue" or bool(original_step.get("continue_on_failure", False)):
+                    failed_step = None
+                    abort_reason = None
+                    next_step_number = _next_step_number(original_step, success=False, default=idx + 1)
+                    continue
+                if action == "fallback_agent":
+                    next_step_number = None
+                    break
+                branch_name = _failure_branch_name(original_step)
+                branch_steps = _branch_steps(runbook, branch_name) if branch_name else []
+                if branch_steps:
+                    plan_steps = _append_branch_plan(plan_steps, idx, branch_steps)
+                    step_by_number = {step["index"]: step for step in plan_steps}
+                    failed_step = None
+                    abort_reason = None
+                    next_step_number = idx + 1
+                    await send_to_client(trace_event(
+                        phase="planning",
+                        event_type="start",
+                        content=f"步骤 {idx} 失败，切换到失败分支「{branch_name}」，追加 {len(branch_steps)} 个步骤。",
+                        evidence=build_evidence(
+                            claim=f"Runbook 已切换到失败分支 {branch_name}",
+                            evidence_type="user input",
+                            source="Runbook执行器",
+                            observed=f"branch={branch_name}, steps={len(branch_steps)}",
+                            confidence="medium",
+                            execution_state="inferred",
+                        ),
+                    ))
+                    continue
+                alt = _next_step_number(original_step, success=False, default=None)
+                if alt is not None:
+                    failed_step = None
+                    abort_reason = None
+                    next_step_number = alt
+                    continue
+                next_step_number = None
                 break
 
         except Exception as e:
@@ -873,7 +1094,54 @@ async def execute_runbook(
                 "success": False,
                 "summary": abort_reason,
             })
+            action = _failure_action(original_step)
+            max_retries = int(original_step.get("max_retries") or 0)
+            retry_count = retry_counts.get(idx, 0)
+            if retry_count < max_retries:
+                retry_counts[idx] = retry_count + 1
+                failed_step = None
+                abort_reason = None
+                continue
+            if action == "continue" or bool(original_step.get("continue_on_failure", False)):
+                failed_step = None
+                abort_reason = None
+                next_step_number = _next_step_number(original_step, success=False, default=idx + 1)
+                continue
+            if action == "fallback_agent":
+                next_step_number = None
+                break
+            branch_name = _failure_branch_name(original_step)
+            branch_steps = _branch_steps(runbook, branch_name) if branch_name else []
+            if branch_steps:
+                plan_steps = _append_branch_plan(plan_steps, idx, branch_steps)
+                step_by_number = {step["index"]: step for step in plan_steps}
+                failed_step = None
+                abort_reason = None
+                next_step_number = idx + 1
+                await send_to_client(trace_event(
+                    phase="planning",
+                    event_type="start",
+                    content=f"步骤 {idx} 异常，切换到失败分支「{branch_name}」，追加 {len(branch_steps)} 个步骤。",
+                    evidence=build_evidence(
+                        claim=f"Runbook 已切换到失败分支 {branch_name}",
+                        evidence_type="user input",
+                        source="Runbook执行器",
+                        observed=f"branch={branch_name}, steps={len(branch_steps)}",
+                        confidence="medium",
+                        execution_state="inferred",
+                    ),
+                ))
+                continue
+            alt = _next_step_number(original_step, success=False, default=None)
+            if alt is not None:
+                failed_step = None
+                abort_reason = None
+                next_step_number = alt
+                continue
+            next_step_number = None
             break
+
+        next_step_number = _next_step_number(original_step, success=True, default=idx + 1)
 
     # === Bookkeeping: update success/failure governance metadata ===
     try:
@@ -938,4 +1206,8 @@ async def execute_runbook(
             incident_id,
             db_path=incident_db_path,
         )
+    if failed_step is not None:
+        failed_raw_step = (step_by_number.get(failed_step) or {}).get("raw_step") or {}
+        if _failure_action(failed_raw_step) == "fallback_agent":
+            raise RunbookAgentFallback(summary + "\n\n已按 Runbook 分支设置转交普通 Agent 继续调查。")
     return summary

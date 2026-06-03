@@ -22,6 +22,7 @@ _CATEGORY_EVIDENCE_TYPES = {
     "firewall": "command",
     "cron": "command",
     "recent_changes": "command",
+    "observability": "metric",
 }
 
 
@@ -109,6 +110,10 @@ def tool_result_evidence(
     data = result_repr.get("data") if isinstance(result_repr, dict) else result_repr
     category = getattr(tool_def, "category", "")
     evidence_type = _CATEGORY_EVIDENCE_TYPES.get(category, "command")
+    if tool_name.startswith("loki_"):
+        evidence_type = "log"
+    elif tool_name.startswith("prometheus_"):
+        evidence_type = "metric"
 
     target = _target_from_args(tool_args)
     display_name = _display_tool_name(tool_name, tool_def)

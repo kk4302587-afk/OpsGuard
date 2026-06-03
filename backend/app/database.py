@@ -65,11 +65,13 @@ async def init_db():
             ON messages(session_id)
         """)
         from app.agent.runbook_governance import ensure_runbook_schema
+        from app.agent.context_manager import ensure_context_schema
         from app.agent.tool_execution_store import ensure_tool_execution_schema
         from app.incidents.store import ensure_incident_schema
         from app.api.health_report import ensure_health_report_schema
 
         await ensure_runbook_schema(db)
+        await ensure_context_schema(db)
         await ensure_tool_execution_schema(db)
         await ensure_incident_schema(db)
         await ensure_health_report_schema(db)
