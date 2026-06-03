@@ -200,6 +200,18 @@ def _fts_text(entry: dict, field: str) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def _json_loads(value, default):
+    if value in (None, ""):
+        return default
+    if isinstance(value, (list, dict)):
+        return value
+    try:
+        parsed = json.loads(value)
+        return parsed if parsed is not None else default
+    except Exception:
+        return default
+
+
 async def _upsert_fts_row(db: aiosqlite.Connection, row_id: int, entry: dict) -> None:
     """Keep the FTS5 index in sync without relying on SQLite triggers."""
     await db.execute(f"DELETE FROM {_FTS_TABLE} WHERE rowid = ?", (row_id,))
@@ -222,6 +234,45 @@ async def _upsert_fts_row(db: aiosqlite.Connection, row_id: int, entry: dict) ->
             _fts_text(entry, "incident_type"),
         ),
     )
+
+
+async def _rebuild_fts_index(db: aiosqlite.Connection) -> None:
+    """Recreate the FTS table content from durable knowledge rows."""
+    await db.execute(f"DROP TABLE IF EXISTS {_FTS_TABLE}")
+    await db.execute(
+        f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS {_FTS_TABLE}
+        USING fts5(
+            problem_signature,
+            diagnosis_path,
+            solution,
+            symptoms,
+            root_cause,
+            evidence,
+            entities,
+            incident_type
+        )
+        """
+    )
+    db.row_factory = aiosqlite.Row
+    cursor = await db.execute("SELECT * FROM knowledge_entries")
+    rows = await cursor.fetchall()
+    for row in rows:
+        item = dict(row)
+        await _upsert_fts_row(
+            db,
+            int(item["id"]),
+            {
+                "problem_signature": item.get("problem_signature"),
+                "diagnosis_path": item.get("diagnosis_path"),
+                "solution": item.get("solution"),
+                "symptoms": _json_loads(item.get("symptoms"), []),
+                "root_cause": item.get("root_cause") or "",
+                "evidence": _json_loads(item.get("evidence"), []),
+                "entities": _json_loads(item.get("entities"), {}),
+                "incident_type": item.get("incident_type") or "",
+            },
+        )
 
 
 async def _rebuild_fts_if_empty(db: aiosqlite.Connection) -> None:
@@ -650,10 +701,11 @@ class KnowledgeStore:
         solution: str,
         tools_used: list[str],
         incident_memory: dict | None = None,
-    ):
+    ) -> int:
         """Save a successful problem resolution to the knowledge base."""
         try:
-            async with aiosqlite.connect(get_knowledge_db_path()) as db:
+            async with aiosqlite.connect(get_knowledge_db_path(), timeout=30) as db:
+                await db.execute("PRAGMA busy_timeout = 30000")
                 await ensure_knowledge_schema(db)
                 # Check if similar problem exists
                 cursor = await db.execute(
@@ -837,18 +889,32 @@ class KnowledgeStore:
                     "entities": memory.get("entities") or {},
                     "incident_type": memory.get("incident_type") or "",
                 }
-                await _upsert_fts_row(db, row_id, fts_entry)
                 await db.commit()
+                try:
+                    await _upsert_fts_row(db, row_id, fts_entry)
+                    await db.commit()
+                except Exception as fts_error:
+                    logger.warning(f"Knowledge FTS sync failed, rebuilding index: {fts_error}")
+                    try:
+                        await _rebuild_fts_index(db)
+                        await db.commit()
+                    except Exception as rebuild_error:
+                        logger.warning(f"Knowledge FTS rebuild skipped: {rebuild_error}")
                 logger.info(f"Knowledge saved: {problem_signature}")
+                return row_id
         except Exception as e:
             logger.error(f"Failed to save knowledge: {e}")
+            raise
 
     async def search(self, query: str, limit: int = 5, filters: dict | None = None) -> list[dict]:
         """Search knowledge base for relevant past resolutions."""
         try:
             async with aiosqlite.connect(get_knowledge_db_path()) as db:
                 await ensure_knowledge_schema(db)
-                await _rebuild_fts_if_empty(db)
+                try:
+                    await _rebuild_fts_if_empty(db)
+                except Exception as exc:
+                    logger.warning(f"FTS warmup skipped: {exc}")
                 db.row_factory = aiosqlite.Row
 
                 if not _compact_text(query):

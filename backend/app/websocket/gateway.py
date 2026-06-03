@@ -172,6 +172,7 @@ async def _send_runtime_snapshot(websocket: WebSocket, session_id: str, state: d
             "rollback_strategy": request.rollback_strategy,
             "supports_rollback": request.supports_rollback,
             "preview_strategy": request.preview_strategy,
+            "preview": request.preview,
             "policy": request.policy,
             "approval_level": request.approval_level,
             "execution_identity": request.execution_identity,
@@ -190,7 +191,11 @@ async def handle_user_message(session_id: str, message: dict):
     Step 3: otherwise, run the regular Agent pipeline.
     """
     content = message.get("content", "").strip()
-    multimodal_context = _coerce_multimodal_context(message.get("multimodal_context"))
+    attachment_refs = _coerce_attachment_refs(message.get("attachments"))
+    multimodal_context = await _hydrate_multimodal_context(
+        _coerce_multimodal_context(message.get("multimodal_context")),
+        attachment_refs,
+    )
     if not content:
         if not multimodal_context:
             return
@@ -212,7 +217,9 @@ async def handle_user_message(session_id: str, message: dict):
         ),
     ))
 
-    await _persist_user_message(session_id, content)
+    user_msg_id = await _persist_user_message(session_id, content)
+    if attachment_refs:
+        await _attach_to_message(session_id, user_msg_id, attachment_refs)
 
     state = _get_state(session_id)
     clarification = state.pop("pending_runbook_clarification", None)
@@ -233,12 +240,15 @@ async def handle_user_message(session_id: str, message: dict):
             return
 
     # === Step 2: Runbook fuzzy match (C side) ===
-    try:
-        from app.agent.runbook_matcher import find_matching_runbook
-        match = await find_matching_runbook(content)
-    except Exception as e:
-        logger.warning(f"Runbook match failed (non-fatal): {e}")
+    if multimodal_context:
         match = None
+    else:
+        try:
+            from app.agent.runbook_matcher import find_matching_runbook
+            match = await find_matching_runbook(content)
+        except Exception as e:
+            logger.warning(f"Runbook match failed (non-fatal): {e}")
+            match = None
 
     if match:
         missing = (match.get("preflight") or {}).get("missing_variables") or []
@@ -419,6 +429,24 @@ async def _persist_user_message(session_id: str, content: str) -> str:
     return user_msg_id
 
 
+async def _attach_to_message(session_id: str, message_id: str, attachments: list[dict]) -> None:
+    import aiosqlite
+    from app.database import get_knowledge_db_path
+
+    ids = [item["id"] for item in attachments if item.get("id")]
+    if not ids:
+        return
+    placeholders = ",".join("?" for _ in ids)
+    async with aiosqlite.connect(get_knowledge_db_path()) as db:
+        await db.execute(
+            f"""UPDATE message_attachments
+            SET session_id = ?, message_id = ?
+            WHERE id IN ({placeholders})""",
+            (session_id, message_id, *ids),
+        )
+        await db.commit()
+
+
 async def _send_to_session(session_id: str, data: dict) -> bool:
     data.setdefault("timestamp", datetime.now().isoformat())
     return await manager.send_to_session(session_id, data)
@@ -444,6 +472,92 @@ def _coerce_multimodal_context(value) -> list[dict]:
             continue
         items.append(item)
     return items
+
+
+async def _hydrate_multimodal_context(context: list[dict], attachments: list[dict]) -> list[dict]:
+    """Fill multimodal context from stored attachment recognition when needed."""
+    hydrated = list(context or [])
+    existing_ids = {
+        str(
+            item.get("attachment_id")
+            or (item.get("attachment") or {}).get("id")
+            or ""
+        )
+        for item in hydrated
+        if isinstance(item, dict)
+    }
+    missing_ids = [
+        item["id"]
+        for item in attachments
+        if item.get("id") and item["id"] not in existing_ids
+    ]
+    if not missing_ids:
+        return hydrated
+
+    stored = await _load_attachment_recognition(missing_ids)
+    return _coerce_multimodal_context([*hydrated, *stored])
+
+
+async def _load_attachment_recognition(attachment_ids: list[str]) -> list[dict]:
+    import aiosqlite
+    from app import database
+
+    ids = [item for item in attachment_ids[:5] if item]
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    async with aiosqlite.connect(database.get_knowledge_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            f"""SELECT id, input_type, filename, recognition_json
+            FROM message_attachments
+            WHERE id IN ({placeholders})""",
+            ids,
+        )
+        rows = await cursor.fetchall()
+
+    items: list[dict] = []
+    for row in rows:
+        try:
+            parsed = json.loads(row["recognition_json"] or "{}")
+        except Exception:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        input_type = parsed.get("input_type") or row["input_type"]
+        if input_type not in {"image", "audio"}:
+            continue
+        parsed["input_type"] = input_type
+        parsed["attachment_id"] = row["id"]
+        parsed.setdefault("attachment", {
+            "id": row["id"],
+            "type": row["input_type"],
+            "filename": row["filename"],
+            "url": f"/api/multimodal/attachments/{row['id']}",
+        })
+        items.append(parsed)
+    return items
+
+
+def _coerce_attachment_refs(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    refs: list[dict] = []
+    for item in value[:5]:
+        if not isinstance(item, dict):
+            continue
+        attachment_id = item.get("id")
+        input_type = item.get("type") or item.get("input_type")
+        if not isinstance(attachment_id, str) or not attachment_id:
+            continue
+        if input_type not in {"image", "audio"}:
+            continue
+        refs.append({
+            "id": attachment_id,
+            "type": input_type,
+            "filename": item.get("filename") if isinstance(item.get("filename"), str) else "",
+        })
+    return refs
 
 
 async def _save_assistant_response(session_id: str, response: str) -> str:

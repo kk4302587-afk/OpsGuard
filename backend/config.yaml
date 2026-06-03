@@ -13,7 +13,7 @@ llm:
   # Primary model
   primary:
     provider: "openai"  # openai-compatible (works with Qwen/DeepSeek)
-    model: "qwen3.7-plus"
+    model: "kimi-k2.6"
     api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     api_key: "sk-9168ce80371c4a148a8d4ea486f3caa8"
     temperature: 0.1

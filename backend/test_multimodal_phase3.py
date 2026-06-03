@@ -170,9 +170,85 @@ def test_multimodal_context_is_auxiliary_knowledge_only_after_tool_execution() -
     asyncio.run(scenario())
 
 
+def test_knowledge_save_reports_failure_when_store_write_fails() -> None:
+    async def scenario() -> None:
+        traces: list[dict] = []
+
+        async def fake_extract_resolution_summary(messages, final_response):
+            return {
+                "problem": "诊断 nginx 风险",
+                "diagnosis": "检查文件和服务状态",
+                "solution": "给出风险建议",
+                "symptoms": ["截图中有 rm 和 restart"],
+                "root_cause": "",
+                "evidence": ["真实工具返回状态"],
+                "successful_actions": [],
+                "failed_attempts": [],
+                "validation_method": "工具检查完成",
+                "applicability_conditions": ["同类命令风险评估"],
+                "non_applicability_conditions": [],
+                "confidence": "medium",
+            }
+
+        class FailingKnowledgeStore:
+            async def save_resolution(self, **kwargs):
+                raise RuntimeError("db write failed")
+
+        async def fake_send_to_client(message: dict):
+            traces.append(message)
+
+        original_extract = graph._extract_resolution_summary
+        original_store = graph.knowledge_store
+        graph._extract_resolution_summary = fake_extract_resolution_summary
+        graph.knowledge_store = FailingKnowledgeStore()
+        try:
+            await graph.knowledge_save_node({
+                "session_id": "s-fail",
+                "incident_id": "incident-fail",
+                "user_message": "看截图",
+                "final_response": "已基于真实工具给出建议",
+                "messages": [{"role": "tool", "content": "nginx active"}],
+                "current_turn_tool_ledger": [
+                    make_tool_ledger_entry(
+                        call_id="call-nginx-status",
+                        tool_name="get_service_status",
+                        tool_args={"service": "nginx"},
+                        risk_level="read",
+                        status="success",
+                        result=ToolResult(success=True, data="nginx active"),
+                        execution_state="executed",
+                        approval_granted=False,
+                    )
+                ],
+                "multimodal_context": [],
+                "current_turn_tool_count": 1,
+                "structured_validation_result": {"valid": True},
+                "send_to_client": fake_send_to_client,
+            })
+        finally:
+            graph._extract_resolution_summary = original_extract
+            graph.knowledge_store = original_store
+
+        assert any(
+            item.get("phase") == "knowledge_save"
+            and item.get("event_type") == "failure"
+            and "db write failed" in item.get("content", "")
+            for item in traces
+        )
+        assert not any(
+            item.get("phase") == "knowledge_save"
+            and item.get("event_type") == "success"
+            and "经验已保存" in item.get("content", "")
+            for item in traces
+        )
+
+    asyncio.run(scenario())
+
+
 def main() -> None:
     test_multimodal_incident_report_evidence_pairs_with_real_tools()
     test_multimodal_context_is_auxiliary_knowledge_only_after_tool_execution()
+    test_knowledge_save_reports_failure_when_store_write_fails()
     print("multimodal phase3 regression OK")
 
 

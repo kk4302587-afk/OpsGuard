@@ -44,10 +44,11 @@
 .md-content code {
   font-family: var(--font-mono);
   font-size: 13px;
-  background: var(--bg-primary);
-  padding: 1px 5px;
-  border-radius: 3px;
-  border: 1px solid var(--border-color);
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  border: none;
+  color: var(--text-primary);
 }
 
 .md-code-block {

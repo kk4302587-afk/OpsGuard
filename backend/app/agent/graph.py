@@ -37,6 +37,7 @@ from app.agent.tool_execution_store import (
 )
 from app.agent.tools_registry import tools_registry, RiskLevel
 from app.agent.execution_policy import evaluate_tool_policy, policy_summary
+from app.agent.operation_preview import build_operation_preview
 from app.safety.guardrail import SafetyGuardrail
 from app.audit.logger import audit_logger, AuditPhase, AuditEventType
 from app.incidents import store as incident_store
@@ -744,6 +745,7 @@ async def reasoning_node(state: AgentState) -> dict:
                         impact_text = f"{impact_text}\n{policy_text}"
                     else:
                         impact_text = policy_text
+                    preview = build_operation_preview(tool_name, tool_args, tool_def)
 
                     loop = _asyncio.get_running_loop()
                     approval_future = loop.create_future()
@@ -761,6 +763,7 @@ async def reasoning_node(state: AgentState) -> dict:
                             rollback_strategy=rollback_strategy,
                             supports_rollback=supports_rollback,
                             preview_strategy=tool_def.preview_strategy,
+                            preview=preview,
                             policy=policy_decision.to_dict(),
                             approval_level=policy_decision.approval_level,
                             execution_identity=policy_decision.execution_identity,
@@ -785,6 +788,7 @@ async def reasoning_node(state: AgentState) -> dict:
                         "rollback_strategy": rollback_strategy,
                         "supports_rollback": supports_rollback,
                         "preview_strategy": tool_def.preview_strategy,
+                        "preview": preview,
                         "policy": policy_decision.to_dict(),
                         "approval_level": policy_decision.approval_level,
                         "execution_identity": policy_decision.execution_identity,
@@ -797,7 +801,11 @@ async def reasoning_node(state: AgentState) -> dict:
                             claim=f"{display_name} 需要用户审批后才能执行",
                             evidence_type="user input",
                             source="approval_manager",
-                            observed={"impact": impact_text or tool_args, "policy": policy_decision.to_dict()},
+                            observed={
+                                "impact": impact_text or tool_args,
+                                "policy": policy_decision.to_dict(),
+                                "preview": preview,
+                            },
                             confidence="high",
                             execution_state="skipped",
                         ),
@@ -921,6 +929,8 @@ async def reasoning_node(state: AgentState) -> dict:
                         execution_state="executed" if result_success else "failed",
                         approval_granted=approval_granted,
                     )
+                    if tool_name == "read_document":
+                        ledger_entry["raw_result"] = result.__dict__ if hasattr(result, "__dict__") else result
                     tool_ledger_this_turn.append(ledger_entry)
                     await record_tool_execution(
                         session_id=session_id,
@@ -1073,11 +1083,13 @@ async def reasoning_node(state: AgentState) -> dict:
             break
 
     draft_final_response = llm_response.get("content", "") or "分析完成，请查看推理链路了解详情。"
-    final_response = draft_final_response
+    verbatim_document_response = _render_verbatim_document_response(user_message, tool_ledger_this_turn)
+    final_response = verbatim_document_response or draft_final_response
     structured_validation_result: dict | None = None
     should_structure_final_response = (
         not guard_blocked_final_response
         and not approval_rejected_final_response
+        and not verbatim_document_response
         and (
             bool(tool_ledger_this_turn)
             or _requires_fresh_tool_evidence(user_message)
@@ -1266,7 +1278,7 @@ async def knowledge_save_node(state: AgentState) -> dict:
         if validation_status == "missing":
             confidence = "low"
 
-        await knowledge_store.save_resolution(
+        knowledge_id = await knowledge_store.save_resolution(
             problem_signature=problem,
             diagnosis_path=diagnosis,
             solution=solution,
@@ -1298,9 +1310,20 @@ async def knowledge_save_node(state: AgentState) -> dict:
                 "multimodal_evidence": multimodal_memory.get("items", []) if multimodal_memory else [],
             },
         )
-        await send_to_client({"type": "trace", "phase": "knowledge_save", "event_type": "success", "content": f"经验已保存: {problem[:30]}"})
+        await send_to_client({
+            "type": "trace",
+            "phase": "knowledge_save",
+            "event_type": "success",
+            "content": f"经验已保存 #{knowledge_id}: {problem[:30]}",
+        })
     except Exception as e:
         logger.warning(f"Knowledge save failed: {e}")
+        await send_to_client({
+            "type": "trace",
+            "phase": "knowledge_save",
+            "event_type": "failure",
+            "content": f"经验保存失败: {e}",
+        })
 
     # === Runbook generation (uses the same semantic `problem` as its name) ===
     tool_call_sequence = []
@@ -1814,7 +1837,10 @@ def _fresh_read_tool_plan(user_message: str) -> list[dict]:
 
     filepath = _extract_read_file_target(text)
     if filepath:
-        add("read_file", {"filepath": filepath}, f"读取 {filepath} 的当前内容")
+        if _is_verbatim_document_request(text):
+            add("read_document", {"filepath": filepath}, f"原文读取 {filepath} 的当前内容")
+        else:
+            add("read_file", {"filepath": filepath}, f"读取 {filepath} 的当前内容")
 
     return plan
 
@@ -2097,6 +2123,8 @@ async def _execute_forced_read_tools(
                 execution_state="executed" if result_success else "failed",
                 approval_granted=False,
             )
+            if tool_name == "read_document":
+                ledger_entry["raw_result"] = result.__dict__ if hasattr(result, "__dict__") else result
             tool_ledger.append(ledger_entry)
             await record_tool_execution(
                 session_id=session_id,
@@ -2251,6 +2279,14 @@ def _compile_deterministic_tool_call(user_message: str) -> dict | None:
     cron_plan = _extract_add_cron_intent(text)
     if cron_plan:
         return _tool_call("add_cron_job", cron_plan)
+
+    block_port_plan = _extract_block_port_intent(text)
+    if block_port_plan:
+        return _tool_call("block_port", block_port_plan)
+
+    allow_port_plan = _extract_allow_port_intent(text)
+    if allow_port_plan:
+        return _tool_call("allow_port", allow_port_plan)
 
     return None
 
@@ -2421,6 +2457,39 @@ def _extract_add_cron_intent(text: str) -> dict | None:
     return {"schedule": schedule, "command": command}
 
 
+def _extract_block_port_intent(text: str) -> dict | None:
+    if not _matches_any(text, (
+        r"(关闭|封禁|阻断|禁止|拦截|禁用).{0,30}(端口|port)",
+        r"(端口|port).{0,30}(关闭|封禁|阻断|禁止|拦截|禁用)",
+        r"\b(block|deny|close|disable)\b.{0,30}\b(port)\b",
+        r"\b(port)\b.{0,30}\b(block|deny|close|disable)\b",
+    )):
+        return None
+    return _extract_firewall_port_args(text)
+
+
+def _extract_allow_port_intent(text: str) -> dict | None:
+    if not _matches_any(text, (
+        r"(开放|放行|允许|启用).{0,30}(端口|port)",
+        r"(端口|port).{0,30}(开放|放行|允许|启用)",
+        r"\b(allow|open|enable)\b.{0,30}\b(port)\b",
+        r"\b(port)\b.{0,30}\b(allow|open|enable)\b",
+    )):
+        return None
+    return _extract_firewall_port_args(text)
+
+
+def _extract_firewall_port_args(text: str) -> dict | None:
+    match = re.search(r"\b([1-9][0-9]{0,4})(?:\s*/\s*(tcp|udp))?\b", text, re.IGNORECASE)
+    if not match:
+        return None
+    port = int(match.group(1))
+    if not 1 <= port <= 65535:
+        return None
+    protocol = (match.group(2) or "tcp").lower()
+    return {"port": port, "protocol": protocol}
+
+
 def _extract_service_status_target(text: str) -> str:
     """Best-effort service name extraction for status/log requests."""
     explicit_unit = re.search(r"\b([A-Za-z0-9_.@-]+\.service)\b", text, re.IGNORECASE)
@@ -2482,10 +2551,103 @@ def _is_non_service_status_target(name: str) -> bool:
 
 
 def _extract_read_file_target(text: str) -> str:
-    if not _matches_any(text, (r"(读取|查看|显示|文件内容|read|cat|show|view)",)):
+    if not _matches_any(text, (r"(读取|查看|显示|输出|展示|打印|文件内容|文档内容|read|cat|show|view|print)",)):
         return ""
     match = re.search(r"(/[^\s`'\"，。；;]+)", text)
-    return match.group(1) if match else ""
+    return _normalize_extracted_file_path(match.group(1)) if match else ""
+
+
+def _normalize_extracted_file_path(path: str) -> str:
+    """Trim intent words that users often attach directly after a path."""
+    path = (path or "").rstrip("。；;,，")
+    if not path:
+        return ""
+
+    suffix_words = (
+        "的文档内容",
+        "文档内容",
+        "的文件内容",
+        "文件内容",
+        "的内容",
+        "内容",
+        "原文",
+        "全文",
+    )
+    common_extensions = (
+        "txt",
+        "md",
+        "log",
+        "json",
+        "yaml",
+        "yml",
+        "conf",
+        "cfg",
+        "ini",
+        "csv",
+        "xml",
+        "html",
+        "py",
+        "sh",
+        "service",
+    )
+    extension_pattern = "|".join(re.escape(ext) for ext in common_extensions)
+    for word in suffix_words:
+        if not path.endswith(word):
+            continue
+        candidate = path[: -len(word)]
+        if re.search(rf"\.({extension_pattern})$", candidate, re.IGNORECASE):
+            return candidate
+    return path
+
+
+def _is_verbatim_document_request(text: str) -> bool:
+    """Return True when the user asks to display file content verbatim."""
+    return _matches_any(text or "", (
+        r"(原文|原样|全文|完整.*内容|直接.*输出|输出.*内容|展示.*内容|打印.*内容|不要总结|不要概括)",
+        r"\b(cat|verbatim|raw|full content|print file|show file)\b",
+    ))
+
+
+def _render_verbatim_document_response(user_message: str, tool_ledger: list[dict]) -> str:
+    """Render read_document output directly for explicit document-display requests."""
+    if not _is_verbatim_document_request(user_message):
+        return ""
+
+    for item in reversed(tool_ledger):
+        if item.get("tool_name") != "read_document" or item.get("status") != "success":
+            continue
+        data = _extract_tool_result_data(item)
+        if not isinstance(data, dict) or data.get("render_mode") != "verbatim":
+            continue
+        path = str(data.get("path") or item.get("tool_args", {}).get("filepath") or "")
+        content = str(data.get("content") or "")
+        truncated = bool(data.get("truncated"))
+        size = data.get("size")
+        max_bytes = data.get("max_bytes")
+        lines = [
+            f"**文档内容**：{path}",
+            "",
+            "```text",
+            content.rstrip("\n"),
+            "```",
+        ]
+        if truncated:
+            lines.extend([
+                "",
+                f"> 已按读取上限截断：文件大小 {size} bytes，本次最多读取 {max_bytes} bytes。",
+            ])
+        return "\n".join(lines).strip()
+
+    return ""
+
+
+def _extract_tool_result_data(ledger_item: dict) -> object:
+    result = ledger_item.get("raw_result") or ledger_item.get("result")
+    if isinstance(result, dict):
+        if isinstance(result.get("data"), (dict, list, str)):
+            return result.get("data")
+        return result
+    return {}
 
 
 def _preview_strategy_label(strategy: str) -> str:

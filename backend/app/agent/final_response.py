@@ -217,12 +217,7 @@ def render_structured_reply(data: dict[str, Any], tool_ledger: list[dict[str, An
         ledger_by_call_id = {str(item.get("call_id")): item for item in tool_ledger if item.get("call_id")}
         for claim in claims[:6]:
             evidence_ids = [str(item) for item in claim.get("evidence_call_ids", [])]
-            evidence_labels = []
-            for call_id in evidence_ids:
-                ledger_item = ledger_by_call_id.get(call_id)
-                if not ledger_item:
-                    continue
-                evidence_labels.append(f"`{call_id}`/{ledger_item.get('tool_name')}")
+            evidence_labels = _evidence_labels(evidence_ids, ledger_by_call_id)
             suffix = f"（证据：{', '.join(evidence_labels)}）" if evidence_labels else ""
             lines.append(f"- {compact_observed(claim.get('text'), max_chars=220)}{suffix}")
     else:
@@ -233,7 +228,7 @@ def render_structured_reply(data: dict[str, Any], tool_ledger: list[dict[str, An
             for item in read_evidence[:5]:
                 summary = item.get("error") or item.get("result_summary") or item.get("status")
                 lines.append(
-                    f"- `{item.get('call_id')}`/{item.get('tool_name')}："
+                    f"- {_tool_display_name(item.get('tool_name'))}："
                     f"{compact_observed(summary, max_chars=220)}"
                 )
 
@@ -242,8 +237,9 @@ def render_structured_reply(data: dict[str, Any], tool_ledger: list[dict[str, An
         lines.append("**已执行操作**")
         for item in successful_writes:
             summary = item.get("result_summary") or "工具返回成功"
+            title = _default_action_title(str(item.get("tool_name") or ""), item.get("tool_args") or {})
             lines.append(
-                f"- `{item.get('call_id')}`/{item.get('tool_name')} 已执行成功"
+                f"- {title}：已执行成功"
                 f"（审批：已通过）。{compact_observed(summary, max_chars=220)}"
             )
 
@@ -253,8 +249,9 @@ def render_structured_reply(data: dict[str, Any], tool_ledger: list[dict[str, An
         for item in incomplete_writes:
             reason = item.get("error") or item.get("result_summary") or item.get("status")
             approval = "已通过" if item.get("approval_granted") else "未通过/未审批"
+            title = _default_action_title(str(item.get("tool_name") or ""), item.get("tool_args") or {})
             lines.append(
-                f"- `{item.get('call_id')}`/{item.get('tool_name')} 未完成"
+                f"- {title}：未完成"
                 f"（状态：{item.get('status')}，审批：{approval}）。"
                 f"{compact_observed(reason, max_chars=220)}"
             )
@@ -262,12 +259,18 @@ def render_structured_reply(data: dict[str, Any], tool_ledger: list[dict[str, An
     if recommended_actions:
         lines.append("")
         lines.append("**建议操作**")
-        for action in recommended_actions[:6]:
-            approval = "需要审批" if action.get("requires_approval") else "无需审批"
-            args = compact_observed(action.get("args") or {}, max_chars=160)
-            lines.append(
-                f"- `{action.get('tool_name')}` {args}：尚未执行，{approval}。"
-            )
+        lines.append("以下操作尚未执行；我不会自动修改系统配置，只有在你确认后才会进入审批和执行流程。")
+        for index, action in enumerate(recommended_actions[:6], start=1):
+            item = _humanize_recommended_action(action)
+            lines.append(f"{index}. {item['title']}")
+            lines.append(f"   - 目的：{item['purpose']}")
+            if item["impact"]:
+                lines.append(f"   - 影响：{item['impact']}")
+            if item["precondition"]:
+                lines.append(f"   - 前提：{item['precondition']}")
+            lines.append(f"   - 类型：{item['action_type']}，{item['approval']}。")
+            if item["next_step"]:
+                lines.append(f"   - 下一步：{item['next_step']}")
 
     return "\n".join(lines).strip()
 
@@ -364,12 +367,16 @@ def _structured_reply_messages(
                 "3. recommended_actions 里的 executed 必须为 false；写操作建议 requires_approval 必须为 true。\n"
                 "4. 如果没有证据，不要写成事实 claim；可以放在 recommended_actions 或 conclusion 中说明尚未执行。\n"
                 "5. 不要伪造 call_id，不要引用历史对话中没有出现在本轮账本里的工具。\n"
+                "6. recommended_actions 必须面向用户决策，而不是面向 Agent 调度；title/purpose/impact/precondition 用中文自然语言，"
+                "不要把工具名、JSON 参数、内部 call_id 写进这些用户可读字段。\n"
                 "严格输出以下 JSON 形状：\n"
                 "{"
                 "\"conclusion\":\"...\","
                 "\"claims\":[{\"text\":\"...\",\"evidence_call_ids\":[\"call_x\"],\"claim_type\":\"observed_state|tool_result|failure|approval_state\"}],"
                 "\"executed_actions\":[{\"tool_name\":\"...\",\"args\":{},\"call_id\":\"call_x\"}],"
-                "\"recommended_actions\":[{\"tool_name\":\"...\",\"args\":{},\"executed\":false,\"requires_approval\":true}]"
+                "\"recommended_actions\":[{\"title\":\"...\",\"purpose\":\"...\",\"impact\":\"...\",\"precondition\":\"...\","
+                "\"action_type\":\"只读检查|配置变更|访问控制变更|服务操作|观察项\","
+                "\"next_step\":\"...\",\"tool_name\":\"...\",\"args\":{},\"executed\":false,\"requires_approval\":true}]"
                 "}"
             ),
         },
@@ -416,6 +423,153 @@ def _action_evidence_ids(action: dict[str, Any]) -> list[str]:
     if isinstance(call_id, str) and call_id:
         return [call_id]
     return []
+
+
+def _evidence_labels(
+    evidence_ids: list[str],
+    ledger_by_call_id: dict[str, dict[str, Any]],
+) -> list[str]:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for call_id in evidence_ids:
+        ledger_item = ledger_by_call_id.get(call_id)
+        if not ledger_item:
+            continue
+        label = _tool_display_name(ledger_item.get("tool_name"))
+        if label in seen:
+            continue
+        seen.add(label)
+        labels.append(label)
+    return labels
+
+
+def _tool_display_name(tool_name: Any) -> str:
+    labels = {
+        "check_port": "端口检查",
+        "get_listening_ports": "监听端口列表",
+        "get_service_status": "服务状态检查",
+        "get_firewall_status": "防火墙状态检查",
+        "read_config_file": "配置读取",
+        "read_file": "文件读取",
+        "list_files": "目录检查",
+        "list_directory": "目录检查",
+        "start_service": "启动服务",
+        "stop_service": "停止服务",
+        "restart_service": "重启服务",
+        "modify_file": "配置文件变更",
+        "write_file": "文件写入",
+        "update_firewall_rules": "防火墙规则变更",
+        "block_ip": "封禁来源地址",
+        "allow_port": "开放端口",
+        "deny_port": "关闭端口",
+    }
+    name = str(tool_name or "")
+    return labels.get(name, name or "工具检查")
+
+
+def _humanize_recommended_action(action: dict[str, Any]) -> dict[str, str]:
+    tool_name = str(action.get("tool_name") or "")
+    args = action.get("args") if isinstance(action.get("args"), dict) else {}
+    fallback = _default_action_description(tool_name, args)
+    requires_approval = bool(action.get("requires_approval"))
+    action_type = _clean_user_text(action.get("action_type")) or fallback["action_type"]
+
+    return {
+        "title": _clean_user_text(action.get("title")) or fallback["title"],
+        "purpose": _clean_user_text(action.get("purpose")) or fallback["purpose"],
+        "impact": _clean_user_text(action.get("impact")) or fallback["impact"],
+        "precondition": _clean_user_text(action.get("precondition")) or fallback["precondition"],
+        "action_type": action_type,
+        "approval": "需要审批" if requires_approval else "无需审批",
+        "next_step": _clean_user_text(action.get("next_step")) or fallback["next_step"],
+    }
+
+
+def _clean_user_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    if "{" in text or "}" in text:
+        return ""
+    internal_markers = ("call_", "fresh_", "_file", "_service", "_rules", "tool_name", "args")
+    if any(marker in text for marker in internal_markers):
+        return ""
+    return compact_observed(text, max_chars=180)
+
+
+def _default_action_title(tool_name: str, args: dict[str, Any]) -> str:
+    return _default_action_description(tool_name, args)["title"]
+
+
+def _default_action_description(tool_name: str, args: dict[str, Any]) -> dict[str, str]:
+    target = _action_target(args)
+    service = str(args.get("service") or target or "").strip()
+    filepath = str(args.get("filepath") or args.get("path") or target or "").strip()
+
+    if tool_name in {"list_files", "list_directory"}:
+        return {
+            "title": f"检查目录内容{f'：{filepath}' if filepath else ''}",
+            "purpose": "确认相关配置文件或证据文件是否存在，避免直接修改未知配置。",
+            "impact": "只读取目录列表，不改变系统状态。",
+            "precondition": "",
+            "action_type": "只读检查",
+            "next_step": "先完成只读检查，再决定是否需要进一步读取具体文件。",
+        }
+    if tool_name in {"read_config_file", "read_file"}:
+        return {
+            "title": f"读取并核对配置{f'：{filepath}' if filepath else ''}",
+            "purpose": "确认当前真实生效配置，尤其是主配置是否被子配置覆盖。",
+            "impact": "只读取文件内容，不改变系统状态。",
+            "precondition": "",
+            "action_type": "只读检查",
+            "next_step": "根据读取结果判断是否需要提交配置变更审批。",
+        }
+    if tool_name in {"modify_file", "write_file"}:
+        return {
+            "title": f"调整配置文件{f'：{filepath}' if filepath else ''}",
+            "purpose": "按诊断结论收紧不安全配置，降低暴露面或误配置风险。",
+            "impact": "会修改系统配置；配置错误可能导致服务异常或登录方式变化。",
+            "precondition": "先确认当前配置、备份方案和可用的回滚路径。",
+            "action_type": "配置变更",
+            "next_step": "你确认后进入审批，审批通过后再执行变更。",
+        }
+    if tool_name in {"update_firewall_rules", "block_ip", "allow_port", "deny_port"}:
+        return {
+            "title": "调整防火墙访问规则",
+            "purpose": "限制不必要的访问来源或端口暴露，降低被扫描和暴力破解的风险。",
+            "impact": "非允许来源可能无法访问对应服务；请先确认管理员出口 IP、堡垒机或业务来源地址。",
+            "precondition": "确认白名单来源和紧急回滚方式，避免误阻断正常运维入口。",
+            "action_type": "访问控制变更",
+            "next_step": "你确认访问范围后进入审批，审批通过后再更新防火墙规则。",
+        }
+    if tool_name in {"start_service", "stop_service", "restart_service"}:
+        verb = {"start_service": "启动", "stop_service": "停止", "restart_service": "重启"}.get(tool_name, "调整")
+        return {
+            "title": f"{verb}服务{f'：{service}' if service else ''}",
+            "purpose": "让服务状态与处置目标一致。",
+            "impact": "可能影响正在连接的用户或依赖该服务的业务。",
+            "precondition": "确认维护窗口、影响范围和回滚方式。",
+            "action_type": "服务操作",
+            "next_step": "你确认后进入审批，审批通过后再执行服务操作。",
+        }
+    return {
+        "title": _tool_display_name(tool_name),
+        "purpose": "继续补充证据或推进处置方案。",
+        "impact": "执行前需要确认操作范围和影响。",
+        "precondition": "",
+        "action_type": "建议操作",
+        "next_step": "你确认后再由 OpsGuard 继续执行。",
+    }
+
+
+def _action_target(args: dict[str, Any]) -> str:
+    for key in ("target", "filepath", "path", "service", "ip", "source_ip", "port"):
+        value = args.get(key)
+        if value is not None and value != "":
+            return str(value)
+    return ""
 
 
 def _is_write(item: dict[str, Any]) -> bool:

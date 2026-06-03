@@ -68,6 +68,7 @@ _DISPLAY_NAMES: dict[str, str] = {
     # File
     "list_directory": "列出目录",
     "read_file": "读取文件",
+    "read_document": "输出文档原文",
     "find_files": "查找文件/目录",
     "create_file": "创建文件",
     "create_directory": "创建目录",
@@ -405,6 +406,15 @@ class ToolsRegistry:
             },
             "required": ["filepath"],
         }, file_tools.read_file, RiskLevel.READ, "file")
+
+        self._register("read_document", "读取文本文件并用于原文输出；适用于用户明确要求输出文档内容、原样展示或 cat 文件", {
+            "type": "object",
+            "properties": {
+                "filepath": {"type": "string", "description": "文档路径"},
+                "max_bytes": {"type": "integer", "description": "最多读取字节数，最大 1MiB", "default": 65536},
+            },
+            "required": ["filepath"],
+        }, file_tools.read_document, RiskLevel.READ, "file")
 
         self._register("find_files", "按名称模式查找文件或目录；例如 *.log、nginx*、sample.txt", {
             "type": "object",
@@ -761,6 +771,16 @@ class ToolsRegistry:
         """Return best-known preview support for a tool."""
         if name in {"diff_config", "check_config_syntax"}:
             return True, "diff" if name == "diff_config" else "check_mode"
+        if name in {"write_file", "create_file"}:
+            return True, "diff"
+        if name == "delete_file":
+            return True, "before_after"
+        if name == "rollback_backup":
+            return True, "restore_preview"
+        if name in {"install_package", "remove_package", "allow_port", "block_port"}:
+            return True, "command_dry_run"
+        if name in {"add_cron_job", "remove_cron_job"}:
+            return True, "diff"
         if category in {"file", "service", "process", "package", "firewall", "cron", "user", "backup"}:
             return False, "impact_only"
         return False, "none"

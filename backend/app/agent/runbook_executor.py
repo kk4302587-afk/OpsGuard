@@ -28,6 +28,7 @@ from app.agent.runbook_governance import ensure_runbook_schema, record_runbook_r
 from app.agent.runbook_preflight import preflight_runbook
 from app.agent.runbook_governance import serialize_runbook
 from app.agent.execution_policy import evaluate_tool_policy, policy_summary
+from app.agent.operation_preview import build_operation_preview
 from app.agent.trace_evidence import (
     build_evidence,
     trace_event,
@@ -763,6 +764,7 @@ async def execute_runbook(
             approval_future: asyncio.Future = loop.create_future()
             from app.agent.graph import _effective_rollback_capability
             supports_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
+            preview = build_operation_preview(tool_name, tool_args, tool_def)
             impact_text = (
                 f"Runbook「{runbook_name}」步骤 {idx}/{len(steps)}: {step_info['action']}\n"
                 f"{policy_summary(policy_decision)}"
@@ -775,6 +777,7 @@ async def execute_runbook(
                     rollback_strategy=rollback_strategy,
                     supports_rollback=supports_rollback,
                     preview_strategy=tool_def.preview_strategy,
+                    preview=preview,
                     policy=policy_decision.to_dict() if policy_decision else {},
                     approval_level=policy_decision.approval_level if policy_decision else "standard",
                     execution_identity=policy_decision.execution_identity if policy_decision else {},
@@ -795,6 +798,7 @@ async def execute_runbook(
                 "rollback_strategy": rollback_strategy,
                 "supports_rollback": supports_rollback,
                 "preview_strategy": tool_def.preview_strategy,
+                "preview": preview,
                 "policy": policy_decision.to_dict() if policy_decision else {},
                 "approval_level": policy_decision.approval_level if policy_decision else "standard",
                 "execution_identity": policy_decision.execution_identity if policy_decision else {},
@@ -807,7 +811,11 @@ async def execute_runbook(
                     claim=f"Runbook 步骤 {idx} 需要用户审批后才能执行",
                     evidence_type="user input",
                     source="审批管理器",
-                    observed=f"目标: {step_info['target']}；风险: {step_info['risk_label']}",
+                    observed={
+                        "target": step_info["target"],
+                        "risk": step_info["risk_label"],
+                        "preview": preview,
+                    },
                     confidence="high",
                     execution_state="skipped",
                 ),

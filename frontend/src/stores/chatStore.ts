@@ -8,6 +8,14 @@ interface Message {
   timestamp: string
   toolCalls?: ToolCall[]
   progressSteps?: ProgressStep[]
+  attachments?: MessageAttachment[]
+}
+
+export interface MessageAttachment {
+  id: string
+  type: 'image' | 'audio'
+  filename: string
+  previewUrl?: string
 }
 
 interface ToolCall {
@@ -36,6 +44,18 @@ interface TraceEvent {
   execution_state?: 'executed' | 'inferred' | 'skipped' | 'failed'
   failure_reason?: string
   next_check?: string
+}
+
+export interface OperationPreview {
+  status?: string
+  preview_type?: string
+  target?: string
+  before_summary?: string
+  after_summary?: string
+  diff?: string
+  warnings?: string[]
+  limitations?: string[]
+  metadata?: Record<string, unknown>
 }
 
 const isApprovalTrace = (event: TraceEvent): boolean => (
@@ -119,7 +139,14 @@ export interface MultimodalRecognitionResult {
   confidence?: 'low' | 'medium' | 'high'
   provider?: string
   model?: string
+  attachment_id?: string
   file?: Record<string, unknown>
+  attachment?: MessageAttachment & {
+    url?: string
+    content_type?: string
+    size?: number
+    sha256?: string
+  }
   requires_write_confirmation?: boolean
   needs_user_confirmation?: boolean
 }
@@ -144,7 +171,11 @@ interface ChatStore {
   inputValue: string
   isThinking: boolean
   setInputValue: (value: string) => void
-  sendMessage: (content: string, multimodalContext?: MultimodalRecognitionResult[]) => void
+  sendMessage: (
+    content: string,
+    multimodalContext?: MultimodalRecognitionResult[],
+    attachments?: MessageAttachment[],
+  ) => void
 
   // Trace
   traceEvents: TraceEvent[]
@@ -158,8 +189,9 @@ interface ChatStore {
     impact?: string
     rollback_strategy?: string
     supports_rollback?: boolean
-    preview_strategy?: string
-    policy?: Record<string, unknown>
+	    preview_strategy?: string
+	    preview?: OperationPreview
+	    policy?: Record<string, unknown>
     approval_level?: string
     execution_identity?: Record<string, unknown>
   } | null
@@ -527,7 +559,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setInputValue: (value: string) => set({ inputValue: value }),
 
-  sendMessage: (content: string, multimodalContext: MultimodalRecognitionResult[] = []) => {
+  sendMessage: (
+    content: string,
+    multimodalContext: MultimodalRecognitionResult[] = [],
+    attachments: MessageAttachment[] = [],
+  ) => {
     const { ws, activeSessionId, createSession } = get()
 
     // Auto-create session if none exists
@@ -543,11 +579,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               role: 'user',
               content,
               timestamp: new Date().toISOString(),
+              attachments,
             }
             set((state) => ({
               ...appendUserTurn(state, userMessage),
             }))
-            newWs.send(JSON.stringify({ type: 'message', content, multimodal_context: multimodalContext }))
+            newWs.send(JSON.stringify({ type: 'message', content, multimodal_context: multimodalContext, attachments }))
           }
         }, 500)
       })
@@ -559,13 +596,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       role: 'user',
       content,
       timestamp: new Date().toISOString(),
+      attachments,
     }
 
     set((state) => ({
       ...appendUserTurn(state, userMessage),
     }))
 
-    ws.send(JSON.stringify({ type: 'message', content, multimodal_context: multimodalContext }))
+    ws.send(JSON.stringify({ type: 'message', content, multimodal_context: multimodalContext, attachments }))
   },
 
   connectWebSocket: (sessionId: string) => {
@@ -709,8 +747,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               impact: data.impact || undefined,
               rollback_strategy: data.rollback_strategy,
               supports_rollback: data.supports_rollback,
-              preview_strategy: data.preview_strategy,
-              policy: isRecord(data.policy) ? data.policy : undefined,
+	              preview_strategy: data.preview_strategy,
+	              preview: isRecord(data.preview) ? data.preview : undefined,
+	              policy: isRecord(data.policy) ? data.policy : undefined,
               approval_level: typeof data.approval_level === 'string' ? data.approval_level : undefined,
               execution_identity: isRecord(data.execution_identity) ? data.execution_identity : undefined,
             },

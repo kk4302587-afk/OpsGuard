@@ -14,6 +14,7 @@ from app.api import (
     ops_report_pdf,
     runbook,
     security_demo,
+    security_posture,
     sessions,
     system,
     tools,
@@ -30,6 +31,7 @@ router.include_router(health_report.router, prefix="/health-report", tags=["heal
 router.include_router(health_report_pdf.router, prefix="/health-report", tags=["health-report"])
 router.include_router(topology.router, prefix="/topology", tags=["topology"])
 router.include_router(security_demo.router, prefix="/security", tags=["security-demo"])
+router.include_router(security_posture.router, prefix="/security-posture", tags=["security-posture"])
 router.include_router(tools.router, prefix="/tools", tags=["tools"])
 router.include_router(runbook.router, prefix="/runbooks", tags=["runbooks"])
 router.include_router(backups.router, prefix="/backups", tags=["backups"])

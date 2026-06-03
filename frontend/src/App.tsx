@@ -4,6 +4,7 @@ import {
   MessageOutlined,
   ApartmentOutlined,
   SafetyOutlined,
+  RadarChartOutlined,
   MedicineBoxOutlined,
   DatabaseOutlined,
   ApiOutlined,
@@ -17,6 +18,7 @@ import StatusBar from './components/StatusBar'
 import ApprovalModal from './components/ApprovalModal'
 import TopologyGraph from './components/TopologyGraph'
 import SecurityDemo from './components/SecurityDemo'
+import SecurityPosture from './components/SecurityPosture'
 import HealthReport from './components/HealthReport'
 import KnowledgePanel from './components/KnowledgePanel'
 import ToolsPanel from './components/ToolsPanel'
@@ -25,7 +27,7 @@ import OpsReport from './components/OpsReport'
 import { useChatStore } from './stores/chatStore'
 import './styles/layout.css'
 
-type PageKey = 'chat' | 'topology' | 'security' | 'health' | 'knowledge' | 'tools' | 'runbook' | 'report'
+type PageKey = 'chat' | 'topology' | 'securityPosture' | 'security' | 'health' | 'knowledge' | 'tools' | 'runbook' | 'report'
 
 const navItems = [
   { key: 'chat', icon: <MessageOutlined />, label: '对话' },
@@ -34,7 +36,8 @@ const navItems = [
   { key: 'report', icon: <FileTextOutlined />, label: '运维报告' },
   { key: 'topology', icon: <ApartmentOutlined />, label: '拓扑图谱' },
   { key: 'health', icon: <MedicineBoxOutlined />, label: '健康巡检' },
-  { key: 'security', icon: <SafetyOutlined />, label: '安全演示' },
+  { key: 'securityPosture', icon: <RadarChartOutlined />, label: '安全态势' },
+  { key: 'security', icon: <SafetyOutlined />, label: '安全靶场' },
   { key: 'knowledge', icon: <DatabaseOutlined />, label: '知识库' },
 ]
 
@@ -72,6 +75,8 @@ function App() {
         )
       case 'topology':
         return <TopologyGraph />
+      case 'securityPosture':
+        return <SecurityPosture />
       case 'security':
         return <SecurityDemo />
       case 'health':

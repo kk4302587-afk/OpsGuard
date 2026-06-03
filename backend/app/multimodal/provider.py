@@ -12,6 +12,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 
@@ -109,7 +111,7 @@ class AliyunMultimodalProvider:
             _dashscope_base_from_settings(),
         ).rstrip("/")
         self.vision_model = os.environ.get("OPSGUARD_VISION_MODEL", "qwen-vl-ocr")
-        self.asr_model = os.environ.get("OPSGUARD_ASR_MODEL", "qwen-asr")
+        self.asr_model = os.environ.get("OPSGUARD_ASR_MODEL", "qwen3-asr-flash")
 
     async def analyze_image(self, blob: UploadedBlob) -> dict[str, Any]:
         validate_image(blob)
@@ -145,9 +147,29 @@ class AliyunMultimodalProvider:
             .get("content", "")
         )
         result = _parse_json_content(content)
-        result.setdefault("input_type", "image")
-        result.setdefault("image_category", "unknown")
-        result.setdefault("summary", _compact(content, 300) or "图片识别完成")
+        _normalize_ocr_text_fields(result)
+        if not result.get("input_type"):
+            result["input_type"] = "image"
+        if not result.get("image_category"):
+            result["image_category"] = "unknown"
+        if not result.get("summary"):
+            result["summary"] = _compact(content, 300) or "图片识别完成"
+        if not result.get("extracted_text"):
+            cloud_ocr_text = await self._recognize_image_text(blob)
+            if cloud_ocr_text:
+                result["extracted_text"] = cloud_ocr_text
+                result["summary"] = f"图片中识别到文本：{_compact(cloud_ocr_text, 200)}"
+                result["fallbacks"] = _merge_list(result.get("fallbacks"), ["cloud_ocr_retry"])
+        if not result.get("extracted_text"):
+            ocr_text = _local_ocr_image(blob)
+            if ocr_text:
+                result["extracted_text"] = ocr_text
+                result["summary"] = f"图片中识别到文本：{_compact(ocr_text, 200)}"
+                result["warnings"] = _merge_list(
+                    result.get("warnings"),
+                    ["视觉模型未返回有效文本，已使用本地 OCR 兜底。"],
+                )
+                result["fallbacks"] = _merge_list(result.get("fallbacks"), ["local_tesseract_ocr"])
         result.setdefault("extracted_text", "")
         result.setdefault("entities", {})
         result.setdefault("diagnosis_hints", [])
@@ -164,25 +186,45 @@ class AliyunMultimodalProvider:
         if not self.api_key:
             raise MultimodalError("未配置阿里云百炼 API Key，无法进行语音识别")
 
-        files = {
-            "file": (blob.filename or "audio.webm", blob.data, blob.content_type),
+        audio_url = f"data:{blob.content_type};base64,{base64.b64encode(blob.data).decode('ascii')}"
+        payload = {
+            "model": self.asr_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": audio_url,
+                                "format": _audio_format(blob),
+                            },
+                        }
+                    ],
+                }
+            ],
+            "stream": False,
+            "asr_options": {
+                "language": "zh",
+                "enable_itn": False,
+            },
         }
-        data = {"model": self.asr_model, "language": "zh"}
-        headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 response = await client.post(
-                    f"{self.base_url}/audio/transcriptions",
-                    headers=headers,
-                    data=data,
-                    files=files,
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
                 )
                 response.raise_for_status()
                 payload = response.json()
         except Exception as exc:
-            raise MultimodalError(f"语音识别失败，请检查麦克风权限或改用文字输入。详情: {exc}") from exc
+            raise MultimodalError(f"语音识别服务暂不可用，请改用文字输入或稍后重试。详情: {exc}") from exc
 
-        transcript = str(payload.get("text") or payload.get("transcript") or "").strip()
+        transcript = _extract_asr_text(payload)
         if not transcript:
             raise MultimodalError("语音识别未返回有效文本")
         normalized = normalize_transcript(transcript)
@@ -193,6 +235,38 @@ class AliyunMultimodalProvider:
             "file": _file_summary(blob),
         })
         return normalized
+
+    async def _recognize_image_text(self, blob: UploadedBlob) -> str:
+        image_url = f"data:{blob.content_type};base64,{base64.b64encode(blob.data).decode('ascii')}"
+        payload = {
+            "model": self.vision_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "请逐字识别图片中的文字，只输出识别到的文本。"},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                }
+            ],
+            "temperature": 0,
+        }
+        try:
+            data = await self._post_json(
+                "/chat/completions",
+                payload,
+                "图片 OCR 识别服务暂不可用，请改用文字描述或稍后重试。",
+            )
+        except MultimodalError:
+            return ""
+        content = (
+            data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+        )
+        parsed = _parse_json_content(content)
+        _normalize_ocr_text_fields(parsed)
+        return _compact(parsed.get("extracted_text") or content, 2000)
 
     async def _post_json(self, path: str, payload: dict[str, Any], user_error: str) -> dict[str, Any]:
         headers = {
@@ -342,6 +416,85 @@ def _parse_json_content(content: str) -> dict[str, Any]:
     return {"summary": _compact(text, 300), "extracted_text": text}
 
 
+def _normalize_ocr_text_fields(result: dict[str, Any]) -> None:
+    """Map common OCR response keys from cloud models into extracted_text."""
+    if result.get("extracted_text"):
+        return
+    for key in ("text", "ocr_text", "recognized_text", "content", "transcription"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            result["extracted_text"] = value.strip()
+            return
+    lines = result.get("lines")
+    if isinstance(lines, list):
+        joined = "\n".join(str(item).strip() for item in lines if str(item).strip())
+        if joined:
+            result["extracted_text"] = joined
+
+
+def _local_ocr_image(blob: UploadedBlob) -> str:
+    """Best-effort OCR fallback for clear screenshots when the VLM returns empty text."""
+    suffix = ".png"
+    if blob.content_type in {"image/jpeg", "image/jpg"}:
+        suffix = ".jpg"
+    elif blob.content_type == "image/webp":
+        suffix = ".webp"
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+            tmp.write(blob.data)
+            tmp.flush()
+            result = subprocess.run(
+                ["tesseract", tmp.name, "stdout", "-l", "eng", "--psm", "6"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        if result.returncode != 0:
+            return ""
+        return _compact(result.stdout, 2000)
+    except Exception:
+        return ""
+
+
+def _extract_asr_text(payload: dict[str, Any]) -> str:
+    direct = payload.get("text") or payload.get("transcript")
+    if direct:
+        return str(direct).strip()
+
+    message = (
+        payload.get("choices", [{}])[0]
+        .get("message", {})
+    )
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text") or item.get("transcript")
+            if text:
+                parts.append(str(text))
+        return " ".join(parts).strip()
+    return ""
+
+
+def _audio_format(blob: UploadedBlob) -> str:
+    content_type = (blob.content_type or "").lower()
+    filename = (blob.filename or "").lower()
+    if "webm" in content_type or filename.endswith(".webm"):
+        return "webm"
+    if "mpeg" in content_type or "mp3" in content_type or filename.endswith(".mp3"):
+        return "mp3"
+    if "mp4" in content_type or filename.endswith(".mp4"):
+        return "mp4"
+    if "m4a" in content_type or filename.endswith(".m4a"):
+        return "m4a"
+    return "wav"
+
+
 def _normalize_image_result(result: dict[str, Any]) -> dict[str, Any]:
     entities = result.get("entities")
     result["entities"] = entities if isinstance(entities, dict) else {}
@@ -378,7 +531,7 @@ def extract_ops_entities(text: str) -> dict[str, list[Any]]:
     services = _unique([_strip_service_suffix(item) for item in services + service_units])
     paths = _unique(re.findall(r"(?<![\w.-])/(?:[\w.@:+-]+/)*[\w.@:+-]+", text))
     ports = sorted({int(port) for port in re.findall(r"(?:(?:端口|port)\s*[:：]?\s*|\b:)(\d{1,5})\b", text, re.I) if 0 < int(port) <= 65535})
-    commands = _unique(re.findall(r"\b(systemctl\s+\S+(?:\s+\S+)?|journalctl\s+[^\n\r;]+|nginx\s+-t|ss\s+-\S+|netstat\s+-\S+|df\s+-\S+|ps\s+[^\n\r;]+)", text, re.I))
+    commands = _unique(re.findall(r"\b(rm\s+-\S+(?:\s+\S+)?|systemctl\s+\S+(?:\s+\S+)?|journalctl\s+[^\n\r;]+|nginx\s+-t|ss\s+-\S+|netstat\s+-\S+|df\s+-\S+|ps\s+[^\n\r;]+)", text, re.I))
     error_keywords = _unique([
         item.group(0)
         for item in re.finditer(
@@ -564,7 +717,7 @@ def _unique(values: list[Any]) -> list[Any]:
 
 
 def _contains_write_intent(text: str) -> bool:
-    return bool(re.search(r"(重启|启动|停止|关闭|删除|清理|修改|写入|保存|应用|创建|新建|安装|卸载|开放|禁用|启用)", text))
+    return bool(re.search(r"(重启|启动|停止|关闭|删除|清理|修改|写入|保存|应用|创建|新建|安装|卸载|开放|禁用|启用|\brm\s+-|\bsystemctl\s+(?:restart|start|stop|disable|enable)\b)", text, re.I))
 
 
 def _dashscope_key_from_settings() -> str:

@@ -120,6 +120,26 @@ def read_file(filepath: str, max_bytes: int = 65536) -> ToolResult:
         return ToolResult(success=False, data="", error=str(e))
 
 
+def read_document(filepath: str, max_bytes: int = 65536) -> ToolResult:
+    """Read a text document for verbatim display. READ-ONLY.
+
+    This is separate from read_file so the Agent can distinguish diagnostic
+    reads from user requests such as "output this document" or "cat this file".
+
+    Args:
+        filepath: Document path to read
+        max_bytes: Maximum bytes to read, capped at 1 MiB
+    """
+    result = read_file(filepath=filepath, max_bytes=max_bytes)
+    if not result.success or not isinstance(result.data, dict):
+        return result
+
+    data = dict(result.data)
+    data["render_mode"] = "verbatim"
+    data["content_type"] = "text/plain"
+    return ToolResult(success=True, data=data, error=result.error)
+
+
 def find_files(path: str, pattern: str, file_type: str = "any", limit: int = 100) -> ToolResult:
     """Find files or directories by name pattern. READ-ONLY.
 

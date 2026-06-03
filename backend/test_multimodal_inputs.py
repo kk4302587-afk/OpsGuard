@@ -6,6 +6,7 @@ from pathlib import Path
 os.chdir(Path(__file__).parent)
 
 from app.multimodal.provider import (
+    AliyunMultimodalProvider,
     UploadedBlob,
     build_multimodal_prompt_context,
     enhance_ops_semantics,
@@ -15,7 +16,12 @@ from app.multimodal.provider import (
     validate_audio,
     validate_image,
 )
-from app.websocket.gateway import _coerce_multimodal_context
+from app.websocket.gateway import _coerce_multimodal_context, _hydrate_multimodal_context
+
+
+class _MiniMonkeyPatch:
+    def setattr(self, target, name, value, **kwargs) -> None:
+        setattr(target, name, value)
 
 
 def test_voice_normalization_marks_ops_terms_and_write_intent() -> None:
@@ -109,6 +115,138 @@ def test_gateway_accepts_only_structured_multimodal_context() -> None:
     assert result[1]["type"] == "audio"
 
 
+def test_gateway_hydrates_multimodal_context_from_attachment_id(tmp_path=None, monkeypatch=None) -> None:
+    import aiosqlite
+    import asyncio
+    import json
+    import tempfile
+
+    if tmp_path is None:
+        tmp_path = Path(tempfile.mkdtemp(prefix="opsguard-mm-test-"))
+    if monkeypatch is None:
+        monkeypatch = _MiniMonkeyPatch()
+    db_path = Path(tmp_path) / "knowledge.db"
+
+    async def scenario() -> None:
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                """CREATE TABLE message_attachments (
+                id TEXT PRIMARY KEY,
+                input_type TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                recognition_json TEXT
+                )"""
+            )
+            await db.execute(
+                """INSERT INTO message_attachments
+                (id, input_type, filename, recognition_json)
+                VALUES (?, ?, ?, ?)""",
+                (
+                    "att-image-1",
+                    "image",
+                    "nginx.png",
+                    json.dumps({
+                        "input_type": "image",
+                        "summary": "截图显示 nginx failed",
+                        "confidence": "medium",
+                    }, ensure_ascii=False),
+                ),
+            )
+            await db.commit()
+
+        from app import database
+
+        monkeypatch.setattr(database, "get_knowledge_db_path", lambda: str(db_path))
+        hydrated = await _hydrate_multimodal_context(
+            [],
+            [{"id": "att-image-1", "type": "image"}],
+        )
+
+        assert len(hydrated) == 1
+        assert hydrated[0]["input_type"] == "image"
+        assert hydrated[0]["attachment_id"] == "att-image-1"
+        assert "nginx failed" in hydrated[0]["summary"]
+
+    asyncio.run(scenario())
+
+
+def test_image_analysis_falls_back_to_local_ocr_when_vlm_text_is_empty(monkeypatch) -> None:
+    import asyncio
+
+    image_path = Path("data/attachments/591edd4c-0206-4d4d-80fd-50038593b3fb.png")
+    if not image_path.exists():
+        return
+
+    async def fake_post_json(*args, **kwargs):
+        return {"choices": [{"message": {"content": '{"summary":"","extracted_text":"","confidence":"medium"}'}}]}
+
+    async def fake_cloud_ocr(blob):
+        return ""
+
+    provider = AliyunMultimodalProvider()
+    provider.api_key = "test-key"
+    original_post_json = provider._post_json
+    original_cloud_ocr = provider._recognize_image_text
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+    monkeypatch.setattr(provider, "_recognize_image_text", fake_cloud_ocr)
+
+    try:
+        result = asyncio.run(provider.analyze_image(UploadedBlob("danger.png", "image/png", image_path.read_bytes())))
+    finally:
+        provider._post_json = original_post_json
+        provider._recognize_image_text = original_cloud_ocr
+
+    assert "rm -rf /tmp/test" in result["extracted_text"]
+    assert "systemctl restart nginx" in result["extracted_text"]
+    assert "local_tesseract_ocr" in result["fallbacks"]
+    assert "nginx" in result["entities"]["services"]
+    assert "systemctl restart nginx" in result["entities"]["commands"]
+
+
+def test_image_analysis_accepts_cloud_ocr_text_field(monkeypatch) -> None:
+    import asyncio
+
+    async def fake_post_json(*args, **kwargs):
+        return {"choices": [{"message": {"content": '{"text":"rm -rf /tmp/test\\nsystemctl restart nginx"}'}}]}
+
+    provider = AliyunMultimodalProvider()
+    provider.api_key = "test-key"
+    original_post_json = provider._post_json
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    try:
+        result = asyncio.run(provider.analyze_image(UploadedBlob("danger.png", "image/png", b"fake-image")))
+    finally:
+        provider._post_json = original_post_json
+
+    assert result["extracted_text"] == "rm -rf /tmp/test\nsystemctl restart nginx"
+    assert "fallbacks" not in result
+    assert "nginx" in result["entities"]["services"]
+    assert "systemctl restart nginx" in result["entities"]["commands"]
+
+
+def test_image_analysis_retries_cloud_ocr_before_local_fallback(monkeypatch) -> None:
+    import asyncio
+
+    calls = []
+
+    async def fake_post_json(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 2:
+            return {"choices": [{"message": {"content": "rm -rf /tmp/test\nsystemctl restart nginx"}}]}
+        return {"choices": [{"message": {"content": '{"summary":"","extracted_text":"","confidence":"medium"}'}}]}
+
+    provider = AliyunMultimodalProvider()
+    provider.api_key = "test-key"
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    result = asyncio.run(provider.analyze_image(UploadedBlob("danger.png", "image/png", b"fake-image")))
+
+    assert len(calls) == 2
+    assert calls[1][1]["messages"][0]["content"][0]["text"].startswith("请逐字识别")
+    assert result["fallbacks"] == ["cloud_ocr_retry"]
+
+
 def test_upload_validation_rejects_unsupported_types() -> None:
     validate_image(UploadedBlob("a.png", "image/png", b"123"))
     validate_audio(UploadedBlob("a.webm", "audio/webm", b"123"))
@@ -121,6 +259,52 @@ def test_upload_validation_rejects_unsupported_types() -> None:
         raise AssertionError("unsupported image type was accepted")
 
 
+def test_audio_transcription_uses_dashscope_chat_completions(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {"message": {"content": "帮我检查 nginx 服务"}}
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+            return FakeResponse()
+
+    import app.multimodal.provider as provider_module
+
+    monkeypatch.setattr(provider_module.httpx, "AsyncClient", FakeClient)
+    provider = AliyunMultimodalProvider()
+    provider.api_key = "test-key"
+    provider.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    import asyncio
+
+    result = asyncio.run(provider.transcribe_audio(UploadedBlob("voice.webm", "audio/webm", b"abc")))
+
+    assert result["normalized_transcript"] == "帮我检查 nginx 服务"
+    assert calls
+    assert calls[0][0].endswith("/chat/completions")
+    assert not calls[0][0].endswith("/audio/transcriptions")
+    assert calls[0][1]["json"]["messages"][0]["content"][0]["type"] == "input_audio"
+
+
 def main() -> None:
     test_voice_normalization_marks_ops_terms_and_write_intent()
     test_multimodal_prompt_warns_agent_to_verify_with_real_tools()
@@ -128,7 +312,12 @@ def main() -> None:
     test_low_confidence_result_requires_user_confirmation()
     test_multimodal_trace_events_are_inferred_not_executed()
     test_gateway_accepts_only_structured_multimodal_context()
+    test_gateway_hydrates_multimodal_context_from_attachment_id()
+    test_image_analysis_falls_back_to_local_ocr_when_vlm_text_is_empty(_MiniMonkeyPatch())
+    test_image_analysis_accepts_cloud_ocr_text_field(_MiniMonkeyPatch())
+    test_image_analysis_retries_cloud_ocr_before_local_fallback(_MiniMonkeyPatch())
     test_upload_validation_rejects_unsupported_types()
+    test_audio_transcription_uses_dashscope_chat_completions(_MiniMonkeyPatch())
     print("multimodal input regression OK")
 
 

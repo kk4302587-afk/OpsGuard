@@ -149,10 +149,59 @@ def test_backend_rendering_marks_recommendations_as_not_executed() -> None:
         _read_ledger(),
     )
 
-    assert "`call_read_1`/get_service_status" in markdown
-    assert "`start_service`" in markdown
+    assert "服务状态检查" in markdown
+    assert "启动服务：nginx" in markdown
     assert "尚未执行" in markdown
     assert "需要审批" in markdown
+    assert "`start_service`" not in markdown
+    assert '{"service": "nginx"}' not in markdown
+
+
+def test_backend_rendering_recommendations_are_user_facing() -> None:
+    markdown = render_structured_reply(
+        {
+            "conclusion": "22 端口暴露范围需要收紧。",
+            "claims": [
+                {
+                    "text": "22 端口由 sshd 监听。",
+                    "evidence_call_ids": ["call_read_1"],
+                    "claim_type": "observed_state",
+                }
+            ],
+            "executed_actions": [],
+            "recommended_actions": [
+                {
+                    "tool_name": "update_firewall_rules",
+                    "args": {"action": "restrict_ssh_access", "source_ip": "specific_internal_ip"},
+                    "executed": False,
+                    "requires_approval": True,
+                },
+                {
+                    "title": "检查 SSH 子配置",
+                    "purpose": "确认主配置引用的子配置是否覆盖登录策略。",
+                    "impact": "只读取配置，不改变系统状态。",
+                    "precondition": "",
+                    "action_type": "只读检查",
+                    "next_step": "读取后再决定是否需要提交变更审批。",
+                    "tool_name": "read_config_file",
+                    "args": {"filepath": "/etc/ssh/sshd_config.d/*.conf"},
+                    "executed": False,
+                    "requires_approval": False,
+                },
+            ],
+        },
+        _read_ledger(),
+    )
+
+    assert "调整防火墙访问规则" in markdown
+    assert "检查 SSH 子配置" in markdown
+    assert "目的：" in markdown
+    assert "影响：" in markdown
+    assert "类型：访问控制变更，需要审批" in markdown
+    assert "类型：只读检查，无需审批" in markdown
+    assert "update_firewall_rules" not in markdown
+    assert "specific_internal_ip" not in markdown
+    assert '{"action": "restrict_ssh_access"' not in markdown
 
 
 def test_backend_rendering_executed_write_from_ledger_only() -> None:
@@ -168,7 +217,7 @@ def test_backend_rendering_executed_write_from_ledger_only() -> None:
         _write_ledger(call_id="call_write_1"),
     )
 
-    assert "`call_write_1`/start_service 已执行成功" in markdown
+    assert "启动服务：nginx：已执行成功" in markdown
     assert "审批：已通过" in markdown
 
 
@@ -198,9 +247,9 @@ def test_real_llm_structured_reply_passes_ledger_validation() -> None:
         )
 
         assert result["valid"] is True, result
-        assert "`call_read_1`/get_service_status" in result["markdown"]
+        assert "服务状态检查" in result["markdown"]
         assert "尚未执行" in result["markdown"]
         assert "已执行成功" not in result["markdown"]
-        assert "start_service" in result["markdown"]
+        assert "start_service" not in result["markdown"]
 
     asyncio.run(scenario())

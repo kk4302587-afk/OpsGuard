@@ -14,7 +14,7 @@ import {
   DeleteOutlined,
   FileImageOutlined,
 } from '@ant-design/icons'
-import { MultimodalRecognitionResult, useChatStore } from '../stores/chatStore'
+import { MessageAttachment, MultimodalRecognitionResult, useChatStore } from '../stores/chatStore'
 import DiagnosisProgress from './DiagnosisProgress'
 import MarkdownRenderer from './MarkdownRenderer'
 import { displayTraceName } from '../utils/traceLocalization'
@@ -71,12 +71,24 @@ function ChatPanel() {
   const [confirmedVoiceIds, setConfirmedVoiceIds] = useState<string[]>([])
   const [confirmedLowConfidenceIds, setConfirmedLowConfidenceIds] = useState<string[]>([])
   const [showVoiceConfirm, setShowVoiceConfirm] = useState(false)
+  const hasRecognizedAttachment = attachments.some((item) => item.status === 'recognized')
+  const hasBlockingAttachment = attachments.some((item) => item.status === 'uploading' || item.status === 'failed')
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, isThinking])
 
   const handleSend = () => {
+    const uploading = attachments.find((item) => item.status === 'uploading')
+    if (uploading) {
+      antdMessage.warning('附件仍在识别中，请稍候再发送')
+      return
+    }
+    const failed = attachments.find((item) => item.status === 'failed')
+    if (failed) {
+      antdMessage.warning('存在识别失败的附件，请删除后重试或改用文字描述')
+      return
+    }
     const recognized = attachments
       .filter((item) => item.status === 'recognized' && item.recognition)
       .map((item) => item.recognition as MultimodalRecognitionResult)
@@ -102,7 +114,15 @@ function ChatPanel() {
     }
     const content = inputValue.trim() || (recognized.length ? '请分析我上传的多模态运维信息' : '')
     if (content && !isThinking) {
-      sendMessage(content, recognized)
+      const messageAttachments = attachments
+        .filter((item) => item.status === 'recognized' && item.previewUrl)
+        .map((item) => ({
+          id: item.id,
+          type: item.type,
+          filename: item.filename,
+          previewUrl: item.previewUrl,
+        } satisfies MessageAttachment))
+      sendMessage(content, recognized, messageAttachments)
       setInputValue('')
       setAttachments([])
       setConfirmedVoiceIds([])
@@ -126,7 +146,7 @@ function ChatPanel() {
   const removeAttachment = (id: string) => {
     setAttachments((items) => {
       const target = items.find((item) => item.id === id)
-      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl)
+      if (target?.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(target.previewUrl)
       return items.filter((item) => item.id !== id)
     })
     setConfirmedVoiceIds((ids) => ids.filter((itemId) => itemId !== id))
@@ -135,10 +155,10 @@ function ChatPanel() {
 
   const analyzeImage = async (file: File) => {
     const id = crypto.randomUUID()
-    const previewUrl = URL.createObjectURL(file)
+    const localPreviewUrl = URL.createObjectURL(file)
     setAttachments((items) => [
       ...items,
-      { id, type: 'image', filename: file.name, size: file.size, previewUrl, status: 'uploading' },
+      { id, type: 'image', filename: file.name, size: file.size, previewUrl: localPreviewUrl, status: 'uploading' },
     ])
     const form = new FormData()
     form.append('file', file)
@@ -146,7 +166,18 @@ function ChatPanel() {
       const response = await fetch('/api/multimodal/images/analyze', { method: 'POST', body: form })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.detail || '图片识别失败')
-      updateAttachment(id, { status: 'recognized', recognition: payload.result })
+      const result = payload.result as MultimodalRecognitionResult
+      const attachment = result.attachment
+      if (attachment?.id) {
+        result.attachment_id = attachment.id
+      }
+      updateAttachment(id, {
+        id: attachment?.id || id,
+        filename: attachment?.filename || file.name,
+        previewUrl: attachment?.url || localPreviewUrl,
+        status: 'recognized',
+        recognition: result,
+      })
       antdMessage.success('图片识别完成')
     } catch (error) {
       const text = error instanceof Error ? error.message : '图片识别失败'
@@ -190,12 +221,13 @@ function ChatPanel() {
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.detail || '语音识别失败')
       const result = payload.result as MultimodalRecognitionResult
-      updateAttachment(id, { status: 'recognized', recognition: result })
       setInputValue(result.normalized_transcript || result.raw_transcript || '')
       if (result.requires_write_confirmation) {
+        updateAttachment(id, { status: 'recognized', recognition: result })
         setShowVoiceConfirm(true)
         antdMessage.warning('语音中可能包含写操作，请核对识别文本后再发送')
       } else {
+        removeAttachment(id)
         antdMessage.success('语音识别完成')
       }
     } catch (error) {
@@ -321,7 +353,28 @@ function ChatPanel() {
     )
   }
 
-  const renderMessageContent = (content: string, role: string) => {
+  const renderMessageAttachments = (items?: MessageAttachment[]) => {
+    const images = (items || []).filter((item) => item.type === 'image' && item.previewUrl)
+    if (!images.length) return null
+    return (
+      <div className="message-attachments">
+        {images.map((item) => (
+          <a
+            key={item.id}
+            href={item.previewUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="message-image-link"
+            title={item.filename}
+          >
+            <img src={item.previewUrl} alt={item.filename} className="message-image-thumb" />
+          </a>
+        ))}
+      </div>
+    )
+  }
+
+  const renderMessageContent = (content: string, role: string, attachments?: MessageAttachment[]) => {
     // Detect special message types
     if (content.startsWith('[需要确认]')) {
       const lines = content.split('\n')
@@ -502,14 +555,17 @@ function ChatPanel() {
 
     // User messages: plain text with line breaks
     return (
-      <div className="msg-text">
-        {content.split('\n').map((line, i) => (
-          <span key={i}>
-            {line}
-            {i < content.split('\n').length - 1 && <br />}
-          </span>
-        ))}
-      </div>
+      <>
+        {renderMessageAttachments(attachments)}
+        <div className="msg-text">
+          {content.split('\n').map((line, i) => (
+            <span key={i}>
+              {line}
+              {i < content.split('\n').length - 1 && <br />}
+            </span>
+          ))}
+        </div>
+      </>
     )
   }
 
@@ -562,7 +618,7 @@ function ChatPanel() {
                     {new Date(msg.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
                   </Text>
                 </div>
-                {renderMessageContent(msg.content, msg.role)}
+                {renderMessageContent(msg.content, msg.role, msg.attachments)}
               </div>
             </div>
           )
@@ -643,7 +699,7 @@ function ChatPanel() {
             shape="circle"
             icon={<SendOutlined />}
             onClick={handleSend}
-            disabled={(!inputValue.trim() && !attachments.some((item) => item.status === 'recognized')) || isThinking}
+            disabled={(!inputValue.trim() && !hasRecognizedAttachment) || hasBlockingAttachment || isThinking}
             className="send-button"
           />
         </div>

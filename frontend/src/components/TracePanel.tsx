@@ -6,6 +6,8 @@ import {
   SafetyOutlined,
   ToolOutlined,
   BulbOutlined,
+  DatabaseOutlined,
+  SearchOutlined,
   ApartmentOutlined,
   StopOutlined,
   MessageOutlined,
@@ -56,7 +58,7 @@ interface TraceDisplayItem {
   timestamp: string
   title: string
   detail: string
-  status: 'running' | 'success' | 'failure' | 'blocked' | 'rejected' | 'skipped'
+  status: 'running' | 'success' | 'warning' | 'failure' | 'blocked' | 'rejected' | 'skipped'
   toolName?: string
   target?: string
   executionCount?: number
@@ -101,9 +103,9 @@ function TracePanel() {
       const recovered = (
         failed
         && !!response
-        && isCompletionResponse(response)
         && (
-          response.event_type === 'success'
+          isCompletionResponse(response)
+          || response.event_type === 'success'
           || group.events.some((event, index) => (
             index > latestFailureIndex && isOperationalSuccessEvent(event)
           ))
@@ -413,14 +415,19 @@ function TracePanel() {
     failure: 6,
     blocked: 5,
     rejected: 4,
+    warning: 4,
     success: 4,
     skipped: 3,
     running: 1,
   }
 
-  const mergeStatus = (current: TraceDisplayItem['status'], next: TraceDisplayItem['status']) => (
-    statusRank[next] > statusRank[current] ? next : current
-  )
+  const mergeStatus = (current: TraceDisplayItem['status'], next: TraceDisplayItem['status']) => {
+    if ((current === 'failure' && next === 'success') || (current === 'success' && next === 'failure')) {
+      return 'warning'
+    }
+    if (current === 'warning' && next === 'success') return 'warning'
+    return statusRank[next] > statusRank[current] ? next : current
+  }
 
   const shouldSkipStandaloneEvent = (event: TraceEvidence) => (
     event.phase === 'input_received'
@@ -580,7 +587,9 @@ function TracePanel() {
           item.executionCount = (item.executionCount || 0) + (executionHit ? 1 : 0)
           if (!item.target && tool.target) item.target = tool.target
           if (!item.detail && tool.target) item.detail = `目标：${tool.target}`
-          if (event.phase === 'verification' && event.event_type === 'success') item.status = 'success'
+          if (event.phase === 'verification' && event.event_type === 'success' && item.status !== 'failure' && item.status !== 'warning') {
+            item.status = 'success'
+          }
           toolIndexes.set(getToolKey({ toolName: tool.toolName, target: item.target || tool.target }), existingIndex)
           return
         }
@@ -673,7 +682,11 @@ function TracePanel() {
     const iconStyle = { fontSize: 14 }
     if (item.status === 'blocked') return <StopOutlined style={{ ...iconStyle, color: 'var(--accent-red)' }} />
     if (item.status === 'failure') return <CloseCircleOutlined style={{ ...iconStyle, color: 'var(--accent-red)' }} />
+    if (item.status === 'warning') return <CheckCircleOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
     if (item.status === 'rejected') return <CloseCircleOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
+    if (item.phase === 'knowledge_retrieval') return <SearchOutlined style={{ ...iconStyle, color: 'var(--accent-blue)' }} />
+    if (item.phase === 'context_management') return <ApartmentOutlined style={{ ...iconStyle, color: 'var(--accent-purple)' }} />
+    if (item.phase === 'knowledge_save') return <DatabaseOutlined style={{ ...iconStyle, color: 'var(--accent-green)' }} />
     if (item.kind === 'tool') return <ToolOutlined style={{ ...iconStyle, color: 'var(--accent-purple)' }} />
     if (item.kind === 'approval') return <SafetyOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
     if (item.kind === 'planning') return <BulbOutlined style={{ ...iconStyle, color: 'var(--accent-yellow)' }} />
@@ -702,7 +715,7 @@ function TracePanel() {
 
   const getItemColor = (item: TraceDisplayItem): string => {
     if (item.status === 'failure' || item.status === 'blocked') return 'red'
-    if (item.status === 'rejected' || item.status === 'skipped') return 'orange'
+    if (item.status === 'warning' || item.status === 'rejected' || item.status === 'skipped') return 'orange'
     if (item.status === 'success') return 'green'
     if (item.kind === 'tool') return 'purple'
     if (item.kind === 'approval') return 'orange'
@@ -721,6 +734,7 @@ function TracePanel() {
 
   const getItemStatusLabel = (item: TraceDisplayItem) => {
     if (item.status === 'failure') return '失败'
+    if (item.status === 'warning') return '有警告'
     if (item.status === 'blocked') return '已拦截'
     if (item.status === 'rejected') return '已拒绝'
     if (item.status === 'skipped') return '已跳过'

@@ -65,17 +65,31 @@ async def get_session_messages(session_id: str):
         )
         rows = await cursor.fetchall()
         messages = [dict(row) for row in rows]
+        if messages:
+            attachment_map = await _load_message_attachments(db, [message["id"] for message in messages])
+            for message in messages:
+                message["attachments"] = attachment_map.get(message["id"], [])
     return {"messages": messages}
 
 
 @router.post("/{session_id}/messages")
 async def save_message(session_id: str, message: dict):
     """Save a message to a session."""
+    attachments = _coerce_attachment_refs(message.get("attachments"))
     async with aiosqlite.connect(get_knowledge_db_path()) as db:
         await db.execute(
             "INSERT OR REPLACE INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
             (message["id"], session_id, message["role"], message["content"], message["timestamp"]),
         )
+        if attachments:
+            ids = [item["id"] for item in attachments if item.get("id")]
+            placeholders = ",".join("?" for _ in ids)
+            await db.execute(
+                f"""UPDATE message_attachments
+                SET session_id = ?, message_id = ?
+                WHERE id IN ({placeholders})""",
+                (session_id, message["id"], *ids),
+            )
         # Update session title from first user message
         if message["role"] == "user":
             cursor = await db.execute(
@@ -96,6 +110,20 @@ async def save_message(session_id: str, message: dict):
             )
         await db.commit()
     return {"status": "saved"}
+
+
+def _coerce_attachment_refs(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    refs: list[dict] = []
+    for item in value[:5]:
+        if not isinstance(item, dict):
+            continue
+        attachment_id = item.get("id")
+        input_type = item.get("type") or item.get("input_type")
+        if isinstance(attachment_id, str) and input_type in {"image", "audio"}:
+            refs.append({"id": attachment_id, "type": input_type})
+    return refs
 
 
 @router.get("/{session_id}/trace")
@@ -201,3 +229,30 @@ def _json_loads(value: str | None, default):
         return json.loads(value)
     except Exception:
         return default
+
+
+async def _load_message_attachments(db: aiosqlite.Connection, message_ids: list[str]) -> dict[str, list[dict]]:
+    if not message_ids:
+        return {}
+    placeholders = ",".join("?" for _ in message_ids)
+    cursor = await db.execute(
+        f"""SELECT id, message_id, input_type, filename, content_type, size, sha256
+        FROM message_attachments
+        WHERE message_id IN ({placeholders})
+        ORDER BY created_at ASC""",
+        message_ids,
+    )
+    rows = await cursor.fetchall()
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        item = {
+            "id": row["id"],
+            "type": row["input_type"],
+            "filename": row["filename"],
+            "content_type": row["content_type"],
+            "size": row["size"],
+            "sha256": row["sha256"],
+            "previewUrl": f"/api/multimodal/attachments/{row['id']}",
+        }
+        grouped.setdefault(row["message_id"], []).append(item)
+    return grouped

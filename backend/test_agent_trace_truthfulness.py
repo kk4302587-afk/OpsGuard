@@ -18,7 +18,7 @@ from app.mcp_tools.process_tools import ToolResult  # noqa: E402
 
 
 class AutoApprovalManager:
-    def register_pending(self, request_id, session_id, tool_name, tool_args, risk_level, description, future):
+    def register_pending(self, request_id, session_id, tool_name, tool_args, risk_level, description, future, **kwargs):
         future.set_result(True)
 
     def remove_pending(self, request_id):
@@ -26,7 +26,7 @@ class AutoApprovalManager:
 
 
 class RejectingApprovalManager:
-    def register_pending(self, request_id, session_id, tool_name, tool_args, risk_level, description, future):
+    def register_pending(self, request_id, session_id, tool_name, tool_args, risk_level, description, future, **kwargs):
         future.set_result(False)
 
     def remove_pending(self, request_id):
@@ -146,8 +146,7 @@ def test_read_result_final_reply_is_rendered_from_call_id_ledger() -> None:
             })
 
             assert result.get("is_blocked") is False, result["final_response"]
-            assert "`" in result["final_response"]
-            assert "/get_service_status" in result["final_response"]
+            assert "服务状态检查" in result["final_response"]
             assert "inactive" in result["final_response"]
             assert "尚未执行" in result["final_response"]
             assert "已执行成功" not in result["final_response"]
@@ -225,7 +224,7 @@ def test_successful_approved_write_is_rendered_as_executed_from_ledger() -> None
             })
 
             assert result.get("is_blocked") is False, result["final_response"]
-            assert "`call_write_1`/start_service 已执行成功" in result["final_response"]
+            assert "启动服务：nginx：已执行成功" in result["final_response"]
             assert "审批：已通过" in result["final_response"]
             assert any(event.get("source") == "structured_final_response_guard" for event in events)
         finally:
@@ -464,6 +463,8 @@ def test_existing_directory_noop_and_policy_append_dedupe() -> None:
                 approvals = [event for event in events if event.get("type") == "approval_request"]
                 assert len(approvals) == 1
                 assert "write_file" in approvals[0]["command"]
+                assert approvals[0]["preview"]["preview_type"] == "diff"
+                assert "hello-from-opsguard" in approvals[0]["preview"]["diff"]
                 assert any(event.get("source") == "noop_write_guard" for event in events)
                 assert any(event.get("source") == "intent_policy_compiler" and event.get("execution_state") == "skipped" for event in events)
             finally:
