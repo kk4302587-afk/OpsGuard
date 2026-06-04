@@ -1,36 +1,39 @@
-/* OpsGuard Global Styles - Premium Dark Theme v2 */
+/* OpsGuard Global Styles - Light gray operations workspace */
 
 :root {
-  /* Background layers (6 levels) */
-  --bg-base: #09090b;
-  --bg-primary: #0c0d11;
-  --bg-secondary: #141518;
-  --bg-elevated: #1a1b20;
-  --bg-hover: #222328;
-  --bg-active: #2a2b30;
+  /* Background layers */
+  --bg-base: #f3f5f8;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8fafc;
+  --bg-elevated: #ffffff;
+  --bg-hover: #edf2f7;
+  --bg-active: #e2e8f0;
+  --bg-nav: #e9eef5;
+  --bg-header: #ffffff;
+  --bg-workspace: #f3f5f8;
 
-  /* Border - ultra subtle */
-  --border-color: rgba(255, 255, 255, 0.05);
-  --border-color-strong: rgba(255, 255, 255, 0.08);
-  --border-gradient: linear-gradient(180deg, rgba(255,255,255,0.07) 0%, rgba(255,255,255,0.02) 100%);
+  /* Border */
+  --border-color: #d9e0ea;
+  --border-color-strong: #c8d2df;
+  --border-gradient: linear-gradient(180deg, #eef3f8 0%, #d9e0ea 100%);
 
-  /* Text hierarchy - softer whites */
-  --text-primary: #d8dce2;
-  --text-secondary: #8b929e;
-  --text-muted: #555b66;
-  --text-dim: #363a42;
+  /* Text hierarchy */
+  --text-primary: #1f2937;
+  --text-secondary: #4b5563;
+  --text-muted: #6b7280;
+  --text-dim: #9aa3af;
 
-  /* Accent colors - slightly desaturated */
-  --accent-green: #34d399;
-  --accent-green-dim: rgba(52, 211, 153, 0.10);
-  --accent-green-glow: rgba(52, 211, 153, 0.15);
-  --accent-blue: #60a5fa;
-  --accent-blue-dim: rgba(96, 165, 250, 0.10);
-  --accent-yellow: #fbbf24;
-  --accent-yellow-dim: rgba(251, 191, 36, 0.10);
-  --accent-red: #f87171;
-  --accent-red-dim: rgba(248, 113, 113, 0.10);
-  --accent-purple: #a78bfa;
+  /* Accent colors */
+  --accent-green: #059669;
+  --accent-green-dim: rgba(5, 150, 105, 0.10);
+  --accent-green-glow: rgba(5, 150, 105, 0.16);
+  --accent-blue: #2563eb;
+  --accent-blue-dim: rgba(37, 99, 235, 0.10);
+  --accent-yellow: #b7791f;
+  --accent-yellow-dim: rgba(183, 121, 31, 0.12);
+  --accent-red: #dc2626;
+  --accent-red-dim: rgba(220, 38, 38, 0.10);
+  --accent-purple: #7c3aed;
 
   /* Typography */
   --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Consolas, monospace;
@@ -52,14 +55,14 @@
   --radius-xl: 18px;
 
   /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
-  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.6);
-  --glow-green: 0 0 24px rgba(52, 211, 153, 0.12);
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 8px 24px rgba(15, 23, 42, 0.10);
+  --shadow-lg: 0 18px 48px rgba(15, 23, 42, 0.14);
+  --glow-green: 0 0 0 3px rgba(5, 150, 105, 0.10);
 
   /* Glass effect */
-  --glass-bg: rgba(20, 21, 24, 0.7);
-  --glass-border: rgba(255, 255, 255, 0.06);
+  --glass-bg: rgba(255, 255, 255, 0.86);
+  --glass-border: rgba(203, 213, 225, 0.85);
   --glass-blur: blur(12px);
 }
 
@@ -81,15 +84,8 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Subtle noise texture overlay */
 body::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  opacity: 0.022;
-  pointer-events: none;
-  z-index: 99999;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  content: none;
 }
 
 #root {
@@ -107,12 +103,12 @@ body::after {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.06);
+  background: #cbd5e1;
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: #94a3b8;
 }
 
 /* Code */
@@ -124,7 +120,7 @@ code, pre {
 
 /* Selection */
 ::selection {
-  background: rgba(52, 211, 153, 0.2);
+  background: rgba(5, 150, 105, 0.18);
 }
 
 /* ===== Ant Design Premium Overrides ===== */
@@ -141,6 +137,13 @@ code, pre {
   border-color: var(--border-color-strong) !important;
   box-shadow: var(--shadow-md) !important;
   transform: translateY(-1px);
+}
+
+.ant-typography,
+.ant-card,
+.ant-modal,
+.ant-drawer {
+  color: var(--text-primary);
 }
 
 .ant-tag {
@@ -181,7 +184,6 @@ code, pre {
   border: 1px solid var(--border-color-strong) !important;
   border-radius: var(--radius-lg) !important;
   box-shadow: var(--shadow-lg) !important;
-  backdrop-filter: var(--glass-blur) !important;
 }
 
 .ant-statistic-title {

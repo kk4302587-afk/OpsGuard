@@ -57,7 +57,7 @@
 }
 
 .md-code-block pre {
-  background: var(--bg-primary);
+  background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: 6px;
   padding: 32px 12px 10px;
@@ -112,7 +112,7 @@
 }
 
 .md-content th {
-  background: var(--bg-primary);
+  background: var(--bg-secondary);
   font-weight: 600;
   color: var(--text-secondary);
 }

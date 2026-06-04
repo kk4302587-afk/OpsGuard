@@ -402,25 +402,25 @@ function TopologyGraph() {
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'item',
-      backgroundColor: '#21252b',
-      borderColor: '#2d3139',
+      backgroundColor: '#ffffff',
+      borderColor: '#c8d2df',
       confine: true,
-      extraCssText: 'max-width: 360px; white-space: normal; word-break: break-word; line-height: 1.5;',
-      textStyle: { color: '#e4e7eb', fontSize: 12 },
+      extraCssText: 'max-width: 360px; white-space: normal; word-break: break-word; line-height: 1.5; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.14);',
+      textStyle: { color: '#1f2937', fontSize: 12 },
       formatter: (params: any) => {
         if (params.dataType === 'node') {
           const cat = params.data.rawCategory || ''
           const annotations = (params.data.annotations || []) as TopologyAnnotation[]
           const annotationText = annotations.slice(0, 3).map((item) => (
-            `<br/><span style="color:${roleColors[item.rca_role] || '#8b929a'}">${roleLabels[item.rca_role] || item.rca_role}</span>` +
-            `<br/><span style="color:#8b929a">来源：${item.source} / ${item.execution_state === 'executed' ? '已执行' : '失败'}</span>` +
+            `<br/><span style="color:${roleColors[item.rca_role] || '#6b7280'}">${roleLabels[item.rca_role] || item.rca_role}</span>` +
+            `<br/><span style="color:#6b7280">来源：${item.source} / ${item.execution_state === 'executed' ? '已执行' : '失败'}</span>` +
             `<br/>${escapeHtml(compactText(item.evidence_summary, 160))}`
           )).join('')
-          return `<strong>${escapeHtml(params.data.name)}</strong><br/><span style="color:#8b929a">类型：${categoryLabels[cat] || cat}</span><br/><span style="color:#8b929a">状态：${params.data.statusLabel}</span>${params.data.value ? `<br/>${escapeHtml(compactText(params.data.value, 120))}` : ''}${annotationText}`
+          return `<strong>${escapeHtml(params.data.name)}</strong><br/><span style="color:#6b7280">类型：${categoryLabels[cat] || cat}</span><br/><span style="color:#6b7280">状态：${params.data.statusLabel}</span>${params.data.value ? `<br/>${escapeHtml(compactText(params.data.value, 120))}` : ''}${annotationText}`
         }
         if (params.dataType === 'edge') {
-          const inferred = params.data.inferred ? '<br/><span style="color:#d19a66">推断关系</span>' : '<br/><span style="color:#00d4aa">检测关系</span>'
-          return `<span style="color:#8b929a">关系：${params.data.relation || ''}</span>${inferred}`
+          const inferred = params.data.inferred ? '<br/><span style="color:#b7791f">推断关系</span>' : '<br/><span style="color:#059669">检测关系</span>'
+          return `<span style="color:#6b7280">关系：${params.data.relation || ''}</span>${inferred}`
         }
         return ''
       },
@@ -437,8 +437,8 @@ function TopologyGraph() {
         label: {
           show: true,
           position: 'bottom',
-          color: '#8b929a',
-          fontSize: 9,
+          color: '#4b5563',
+          fontSize: 11,
           fontFamily: "'JetBrains Mono', monospace",
           formatter: (params: any) => {
             const name = params.data.name as string
@@ -482,14 +482,14 @@ function TopologyGraph() {
             symbolSize: role ? size + 8 : size,
             label: {
               show: isSelected || isAnnotated || Boolean(role) || node.category === 'service' || (!hasMappedEvidence && node.category === 'process'),
-              color: isDimmedBackground ? '#6f7782' : '#d8dee9',
+              color: isDimmedBackground ? '#9aa3af' : '#1f2937',
               fontWeight: isSelected || isAnnotated || role ? 700 : 500,
             },
             itemStyle: {
               color: nodeColor,
               opacity: isDimmedBackground ? 0.45 : 0.95,
-              shadowBlur: isAnnotated || isSelected ? 24 : 6,
-              shadowColor: isAnnotated || isSelected ? nodeColor + '80' : nodeColor + '35',
+              shadowBlur: isAnnotated || isSelected ? 14 : 3,
+              shadowColor: isAnnotated || isSelected ? nodeColor + '45' : 'rgba(15, 23, 42, 0.16)',
               borderColor: isAnnotated || isSelected ? nodeColor : nodeColor + '99',
               borderWidth: isSelected ? 4 : isAnnotated ? 3 : 1.5,
             },
@@ -504,7 +504,7 @@ function TopologyGraph() {
             inferred: edge.inferred,
             annotations: edge.annotations || [],
             lineStyle: {
-              color: hasEvidence ? '#00d4aa' : hasMappedEvidence ? '#3d4450' : '#4b5563',
+              color: hasEvidence ? '#059669' : hasMappedEvidence ? '#c8d2df' : '#94a3b8',
               width: hasEvidence ? 2.8 : edge.inferred ? 1.2 : 1.8,
               curveness: 0.2,
               opacity: hasEvidence ? 0.9 : hasMappedEvidence ? 0.45 : 0.6,
@@ -521,9 +521,9 @@ function TopologyGraph() {
         },
         emphasis: {
           focus: 'adjacency',
-          lineStyle: { width: 4, color: '#00d4aa' },
-          itemStyle: { shadowBlur: 20, shadowColor: '#00d4aa40' },
-          label: { show: true, fontSize: 11, color: '#e4e7eb' },
+          lineStyle: { width: 4, color: '#059669' },
+          itemStyle: { shadowBlur: 12, shadowColor: 'rgba(5, 150, 105, 0.22)' },
+          label: { show: true, fontSize: 13, color: '#1f2937' },
         },
         blur: {
           itemStyle: { opacity: 0.3 },
@@ -633,7 +633,7 @@ function TopologyGraph() {
             borderLeft: '1px solid var(--border-color)',
             padding: 16,
             overflow: 'auto',
-            background: 'rgba(255, 255, 255, 0.02)',
+            background: 'var(--bg-primary)',
           }}
         >
           <Space direction="vertical" size={14} style={{ width: '100%' }}>
@@ -685,7 +685,7 @@ function TopologyGraph() {
                         padding: '8px 10px',
                         border: '1px solid var(--border-color)',
                         borderRadius: 6,
-                        background: 'rgba(255, 255, 255, 0.03)',
+                        background: 'var(--bg-secondary)',
                       }}
                     >
                       <Space wrap size={4} style={{ marginBottom: 6 }}>
@@ -811,7 +811,7 @@ function TopologyGraph() {
                             padding: '8px 10px',
                             border: '1px solid var(--border-color)',
                             borderRadius: 6,
-                            background: 'rgba(255, 255, 255, 0.03)',
+                            background: 'var(--bg-secondary)',
                           }}
                         >
                           <Tag color={annotation.rca_role === 'affected' ? 'red' : annotation.rca_role === 'suspected_root_cause' ? 'orange' : 'gold'} style={{ marginBottom: 6 }}>

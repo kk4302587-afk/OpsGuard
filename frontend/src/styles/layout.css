@@ -1,4 +1,4 @@
-/* Layout styles - Premium spacing and glass effects */
+/* Layout styles - light gray operations workspace */
 
 .app-layout {
   height: 100vh;
@@ -13,12 +13,11 @@
   height: 56px;
   min-height: 56px;
   padding: 0 var(--space-5);
-  border-bottom: 1px solid var(--border-color);
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  border-bottom: 1px solid var(--border-color-strong);
+  background: var(--bg-header);
   display: flex;
   align-items: center;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
 }
 
 /* Left navigation rail */
@@ -26,13 +25,14 @@
   width: 64px;
   min-width: 64px;
   height: 100%;
-  background: var(--bg-primary);
-  border-right: 1px solid var(--border-color);
+  background: var(--bg-nav);
+  border-right: 1px solid var(--border-color-strong);
   display: flex;
   flex-direction: column;
   align-items: center;
   padding-top: var(--space-4);
   gap: var(--space-2);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.62);
 }
 
 .nav-rail-item {
@@ -50,14 +50,16 @@
 }
 
 .nav-rail-item:hover {
-  background: var(--bg-hover);
-  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.74);
+  color: var(--text-primary);
   transform: scale(1.05);
 }
 
 .nav-rail-item-active {
-  background: var(--accent-green-dim);
+  background: #ffffff;
   color: var(--accent-green);
+  border: 1px solid rgba(5, 150, 105, 0.24);
+  box-shadow: var(--shadow-sm);
 }
 
 .nav-rail-item-active::before {
@@ -76,7 +78,7 @@
 /* Chat page panels */
 .session-sider {
   height: 100%;
-  border-right: 1px solid var(--border-color);
+  border-right: 1px solid var(--border-color-strong);
   background: var(--bg-primary);
   overflow-y: auto;
 }
@@ -84,12 +86,12 @@
 .chat-content {
   height: 100%;
   overflow: hidden;
-  background: var(--bg-base);
+  background: var(--bg-workspace);
 }
 
 .trace-sider {
   height: 100%;
-  border-left: 1px solid var(--border-color);
+  border-left: 1px solid var(--border-color-strong);
   background: var(--bg-primary);
   overflow-y: auto;
 }
@@ -99,10 +101,11 @@
   color: var(--text-secondary) !important;
   border-color: var(--border-color-strong) !important;
   background: var(--bg-elevated) !important;
+  box-shadow: var(--shadow-sm) !important;
 }
 
 .topology-header-button:hover {
   color: var(--accent-green) !important;
-  border-color: rgba(52, 211, 153, 0.28) !important;
+  border-color: rgba(5, 150, 105, 0.28) !important;
   background: var(--accent-green-dim) !important;
 }

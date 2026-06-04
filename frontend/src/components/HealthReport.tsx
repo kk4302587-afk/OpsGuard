@@ -117,11 +117,11 @@ function HealthReport() {
       radius: '100%',
       progress: { show: true, width: 12, roundCap: true, itemStyle: { color } },
       pointer: { show: false },
-      axisLine: { lineStyle: { width: 12, color: [[1, '#2d3139']] } },
+      axisLine: { lineStyle: { width: 12, color: [[1, '#e2e8f0']] } },
       axisTick: { show: false },
       splitLine: { show: false },
       axisLabel: { show: false },
-      title: { show: true, offsetCenter: [0, '70%'], fontSize: 11, color: '#8b929a' },
+      title: { show: true, offsetCenter: [0, '70%'], fontSize: 11, color: '#6b7280' },
       detail: {
         valueAnimation: true,
         offsetCenter: [0, '20%'],

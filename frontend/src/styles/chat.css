@@ -126,17 +126,16 @@
   /* Glass card effect */
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
-  backdrop-filter: blur(6px);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  box-shadow: var(--shadow-sm);
 }
 
 .bubble-user {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-color);
+  background: #ecfdf5;
+  border: 1px solid rgba(5, 150, 105, 0.18);
 }
 
 .bubble-assistant {
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
   border: 1px solid var(--border-color);
 }
 
@@ -182,7 +181,7 @@
   border-radius: var(--radius-sm);
   overflow: hidden;
   border: 1px solid var(--border-color);
-  background: var(--bg-base);
+  background: var(--bg-secondary);
 }
 
 .message-image-thumb {
@@ -251,7 +250,7 @@
   font-family: var(--font-mono);
   font-size: 13px;
   color: var(--text-primary);
-  background: var(--bg-base);
+  background: var(--bg-primary);
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
@@ -276,7 +275,7 @@
   padding: var(--space-3);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--bg-secondary);
 }
 
 .approval-preview-head {
@@ -346,13 +345,13 @@
 }
 
 .approval-preview-diff-line-add {
-  color: #b7f29b;
-  background: rgba(152, 195, 121, 0.12);
+  color: #166534;
+  background: rgba(22, 163, 74, 0.10);
 }
 
 .approval-preview-diff-line-remove {
-  color: #ffb4b4;
-  background: rgba(224, 108, 117, 0.12);
+  color: #991b1b;
+  background: rgba(220, 38, 38, 0.10);
 }
 
 .approval-preview-diff-line-context {
@@ -376,7 +375,7 @@
 /* Input area */
 .input-container {
   padding: var(--space-4) var(--space-6) var(--space-5);
-  border-top: 1px solid var(--border-color);
+  border-top: 1px solid var(--border-color-strong);
   background: var(--bg-primary);
 }
 
@@ -384,7 +383,7 @@
   display: flex;
   align-items: flex-end;
   gap: var(--space-3);
-  background: var(--bg-base);
+  background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   padding: var(--space-3) var(--space-4);
@@ -407,7 +406,7 @@
   padding: var(--space-2);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
-  background: var(--bg-base);
+  background: var(--bg-secondary);
 }
 
 .attachment-recognized {
@@ -527,8 +526,8 @@
 }
 
 .input-wrapper:focus-within {
-  border-color: rgba(52, 211, 153, 0.3);
-  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.05);
+  border-color: rgba(47, 201, 154, 0.34);
+  box-shadow: 0 0 0 3px rgba(47, 201, 154, 0.06);
 }
 
 .chat-input {

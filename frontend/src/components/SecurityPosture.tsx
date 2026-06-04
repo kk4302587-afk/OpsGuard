@@ -253,11 +253,11 @@ function SecurityPosture() {
         radius: '96%',
         progress: { show: true, width: 16, roundCap: true, itemStyle: { color: cfg.color } },
         pointer: { show: false },
-        axisLine: { lineStyle: { width: 16, color: [[1, '#222328']] } },
+        axisLine: { lineStyle: { width: 16, color: [[1, '#e2e8f0']] } },
         axisTick: { show: false },
         splitLine: { show: false },
         axisLabel: { show: false },
-        title: { show: true, offsetCenter: [0, '62%'], fontSize: 12, color: '#8b929e' },
+        title: { show: true, offsetCenter: [0, '62%'], fontSize: 12, color: '#6b7280' },
         detail: {
           valueAnimation: true,
           offsetCenter: [0, '12%'],
@@ -273,14 +273,14 @@ function SecurityPosture() {
 
   const riskPieOption = {
     tooltip: { trigger: 'item' },
-    legend: { bottom: 0, textStyle: { color: '#8b929e', fontSize: 11 } },
+    legend: { bottom: 0, textStyle: { color: '#4b5563', fontSize: 11 } },
     series: [{
       type: 'pie',
       radius: ['42%', '64%'],
       center: ['50%', '48%'],
       avoidLabelOverlap: true,
       label: {
-        color: '#d8dce2',
+        color: '#1f2937',
         formatter: '{b}: {c}',
         fontSize: 12,
         margin: 8,
@@ -288,7 +288,7 @@ function SecurityPosture() {
       labelLine: {
         length: 12,
         length2: 14,
-        lineStyle: { color: '#555b66' },
+        lineStyle: { color: '#c8d2df' },
       },
       data: riskDistribution,
     }],
@@ -299,19 +299,19 @@ function SecurityPosture() {
     xAxis: {
       type: 'category',
       data: categoryDistribution.map(item => item.name),
-      axisLabel: { color: '#8b929e', fontSize: 11 },
-      axisLine: { lineStyle: { color: '#363a42' } },
+      axisLabel: { color: '#4b5563', fontSize: 11 },
+      axisLine: { lineStyle: { color: '#c8d2df' } },
       axisTick: { show: false },
     },
     yAxis: {
       type: 'value',
-      axisLabel: { color: '#8b929e', fontSize: 11 },
-      splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
+      axisLabel: { color: '#4b5563', fontSize: 11 },
+      splitLine: { lineStyle: { color: '#e2e8f0' } },
     },
     series: [{
       type: 'bar',
       data: categoryDistribution.map(item => item.value),
-      itemStyle: { color: '#34d399', borderRadius: [4, 4, 0, 0] },
+      itemStyle: { color: '#059669', borderRadius: [4, 4, 0, 0] },
       barMaxWidth: 28,
     }],
   }
@@ -491,7 +491,7 @@ function SecurityPosture() {
           <div style={{ color, fontSize: 28, lineHeight: '36px', fontWeight: 700, marginTop: 4 }}>{value}</div>
           <Text style={{ color: 'var(--text-secondary)', fontSize: 12 }}>{subtitle}</Text>
         </div>
-        <div style={{ color, fontSize: 22, background: 'rgba(255,255,255,0.04)', width: 38, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 6 }}>
+        <div style={{ color, fontSize: 22, background: 'var(--bg-secondary)', width: 38, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 6 }}>
           {icon}
         </div>
       </div>

@@ -1,6 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { ConfigProvider, theme } from 'antd'
+import { ConfigProvider } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import App from './App'
 import './styles/global.css'
@@ -10,16 +10,15 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <ConfigProvider
       locale={zhCN}
       theme={{
-        algorithm: theme.darkAlgorithm,
         token: {
-          colorPrimary: '#34d399',
-          colorBgContainer: '#141518',
-          colorBgElevated: '#1a1b20',
-          colorBgLayout: '#0c0d11',
-          colorBorder: 'rgba(255, 255, 255, 0.05)',
-          colorText: '#d8dce2',
-          colorTextSecondary: '#8b929e',
-          colorTextTertiary: '#555b66',
+          colorPrimary: '#059669',
+          colorBgContainer: '#ffffff',
+          colorBgElevated: '#ffffff',
+          colorBgLayout: '#f3f5f8',
+          colorBorder: '#d9e0ea',
+          colorText: '#1f2937',
+          colorTextSecondary: '#4b5563',
+          colorTextTertiary: '#6b7280',
           borderRadius: 10,
           fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', 'Helvetica Neue', sans-serif",
           fontSize: 14,
@@ -28,13 +27,13 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         },
         components: {
           Layout: {
-            headerBg: '#0c0d11',
-            siderBg: '#0c0d11',
-            bodyBg: '#09090b',
+            headerBg: '#ffffff',
+            siderBg: '#e9eef5',
+            bodyBg: '#f3f5f8',
           },
           Card: {
-            colorBgContainer: '#141518',
-            colorBorderSecondary: 'rgba(255, 255, 255, 0.05)',
+            colorBgContainer: '#ffffff',
+            colorBorderSecondary: '#d9e0ea',
             paddingLG: 16,
           },
           Button: {
@@ -42,19 +41,19 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             controlHeight: 32,
           },
           Input: {
-            colorBgContainer: '#0c0d11',
-            colorBorder: 'rgba(255, 255, 255, 0.06)',
+            colorBgContainer: '#ffffff',
+            colorBorder: '#c8d2df',
           },
           Modal: {
-            colorBgElevated: '#1a1b20',
+            colorBgElevated: '#ffffff',
             borderRadiusLG: 14,
           },
           Select: {
-            colorBgContainer: '#141518',
+            colorBgContainer: '#ffffff',
           },
           Collapse: {
             colorBgContainer: 'transparent',
-            colorBorder: 'rgba(255, 255, 255, 0.05)',
+            colorBorder: '#d9e0ea',
           },
           Tag: {
             borderRadiusSM: 4,

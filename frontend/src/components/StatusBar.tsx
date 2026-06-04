@@ -36,6 +36,14 @@ function StatusBar() {
     window.dispatchEvent(new CustomEvent('opsguard:navigate', { detail: 'topology' }))
   }
 
+  const metricStyle = {
+    height: 30,
+    padding: '0 10px',
+    borderRadius: 6,
+    background: 'var(--bg-secondary)',
+    border: '1px solid var(--border-color)',
+  }
+
   return (
     <div style={{ display: 'flex', alignItems: 'center', width: '100%', justifyContent: 'space-between' }}>
       <Space size="middle">
@@ -59,21 +67,21 @@ function StatusBar() {
             故障图谱
           </Button>
         </Tooltip>
-        <Space size={4}>
+        <Space size={4} style={metricStyle}>
           <DashboardOutlined style={{ color: getStatusColor(status?.cpu?.percent || 0) }} />
           <Text style={{ fontFamily: 'var(--font-mono)', fontSize: 14 }}>
             CPU {status?.cpu?.percent || 0}%
           </Text>
         </Space>
 
-        <Space size={4}>
+        <Space size={4} style={metricStyle}>
           <CloudServerOutlined style={{ color: getStatusColor(status?.memory?.percent || 0) }} />
           <Text style={{ fontFamily: 'var(--font-mono)', fontSize: 14 }}>
             MEM {status?.memory?.percent || 0}%
           </Text>
         </Space>
 
-        <Space size={4}>
+        <Space size={4} style={metricStyle}>
           <HddOutlined style={{ color: getStatusColor(status?.disk?.percent || 0) }} />
           <Text style={{ fontFamily: 'var(--font-mono)', fontSize: 14 }}>
             DISK {status?.disk?.percent || 0}%
