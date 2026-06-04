@@ -12,6 +12,14 @@ import {
   ToolOutlined,
   FolderOutlined,
   DesktopOutlined,
+  FileSearchOutlined,
+  DatabaseOutlined,
+  UserOutlined,
+  SafetyOutlined,
+  ClockCircleOutlined,
+  CloudServerOutlined,
+  HistoryOutlined,
+  LineChartOutlined,
 } from '@ant-design/icons'
 
 const { Title, Text } = Typography
@@ -46,7 +54,35 @@ const categoryIcons: Record<string, any> = {
   service: <ToolOutlined />,
   config: <FolderOutlined />,
   system: <DesktopOutlined />,
+  file: <FileSearchOutlined />,
+  package: <DatabaseOutlined />,
+  user: <UserOutlined />,
+  firewall: <SafetyOutlined />,
+  cron: <ClockCircleOutlined />,
+  backup: <CloudServerOutlined />,
+  recent_changes: <HistoryOutlined />,
+  observability: <LineChartOutlined />,
 }
+
+const categoryLabels: Record<string, string> = {
+  process: '进程管理',
+  disk: '磁盘文件',
+  network: '网络诊断',
+  log: '日志分析',
+  service: '服务管理',
+  config: '配置检查',
+  system: '系统概览',
+  file: '文件操作',
+  package: '软件包管理',
+  user: '用户管理',
+  firewall: '防火墙',
+  cron: '定时任务',
+  backup: '备份恢复',
+  recent_changes: '近期变更',
+  observability: '可观测性',
+}
+
+const getCategoryLabel = (category: ToolCategory) => categoryLabels[category.key] || category.label || category.key
 
 /**
  * MCP Tools registry page - displays all available tools grouped by category.
@@ -147,7 +183,7 @@ function ToolsPanel() {
                     {categoryIcons[category.key] || <ApiOutlined />}
                   </span>
                   <span style={{ flex: 1, minWidth: 0, fontWeight: active ? 700 : 600, fontSize: 14 }}>
-                    {category.label}
+                    {getCategoryLabel(category)}
                   </span>
                   <Badge
                     count={category.count}
@@ -173,7 +209,7 @@ function ToolsPanel() {
                   </span>
                   <div>
                     <Title level={5} style={{ color: 'var(--text-primary)', margin: 0, fontSize: 20 }}>
-                      {activeCategory.label}
+                      {getCategoryLabel(activeCategory)}
                     </Title>
                     <Text style={{ color: 'var(--text-muted)', fontSize: 13 }}>
                       当前分类共 {activeCategory.count} 个工具

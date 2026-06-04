@@ -26,7 +26,7 @@
   min-width: 64px;
   height: 100%;
   background: var(--bg-nav);
-  border-right: 1px solid var(--border-color-strong);
+  border-right: 1px solid #cbd5e1;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -43,15 +43,15 @@
   justify-content: center;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  color: var(--text-muted);
+  color: #64748b;
   font-size: 18px;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
 }
 
 .nav-rail-item:hover {
-  background: rgba(255, 255, 255, 0.74);
-  color: var(--text-primary);
+  background: #dbe6f3;
+  color: #334155;
   transform: scale(1.05);
 }
 
@@ -59,7 +59,7 @@
   background: #ffffff;
   color: var(--accent-green);
   border: 1px solid rgba(5, 150, 105, 0.24);
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
 }
 
 .nav-rail-item-active::before {
@@ -72,7 +72,7 @@
   height: 18px;
   background: var(--accent-green);
   border-radius: 0 3px 3px 0;
-  box-shadow: var(--glow-green);
+  box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.10);
 }
 
 /* Chat page panels */
