@@ -47,7 +47,17 @@ function StatusBar() {
   return (
     <div style={{ display: 'flex', alignItems: 'center', width: '100%', justifyContent: 'space-between' }}>
       <Space size="middle">
-        <Text strong style={{ color: 'var(--accent-green)', fontFamily: 'var(--font-mono)', fontSize: 14 }}>
+        <Text
+          strong
+          onClick={() => window.dispatchEvent(new CustomEvent('opsguard:exit'))}
+          style={{
+            color: 'var(--accent-green)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 14,
+            cursor: 'pointer',
+            userSelect: 'none'
+          }}
+        >
           <SafetyCertificateOutlined style={{ marginRight: 6 }} />
           OpsGuard
         </Text>

@@ -35,25 +35,29 @@ function Sidebar() {
             onClick={() => setActiveSession(session.id)}
             className="session-item"
             style={{
-              padding: '12px 14px',
+              padding: session.id === activeSessionId ? '12px 14px 12px 11px' : '12px 14px',
               borderRadius: 8,
               marginBottom: 4,
               cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
-              background: session.id === activeSessionId ? 'var(--bg-hover)' : 'transparent',
+              background: session.id === activeSessionId ? 'var(--bg-primary)' : 'transparent',
               border: session.id === activeSessionId ? '1px solid var(--border-color)' : '1px solid transparent',
-              transition: 'all 0.15s ease',
+              borderLeft: session.id === activeSessionId ? '3px solid var(--accent-green)' : '3px solid transparent',
+              boxShadow: session.id === activeSessionId ? '0 2px 6px rgba(15, 23, 42, 0.03)' : 'none',
+              transition: 'all 0.2s ease',
             }}
             onMouseEnter={(e) => {
               if (session.id !== activeSessionId) {
                 e.currentTarget.style.background = 'var(--bg-elevated)'
+                e.currentTarget.style.borderLeft = '3px solid transparent'
               }
             }}
             onMouseLeave={(e) => {
               if (session.id !== activeSessionId) {
                 e.currentTarget.style.background = 'transparent'
+                e.currentTarget.style.borderLeft = '3px solid transparent'
               }
             }}
           >

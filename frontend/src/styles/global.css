@@ -112,7 +112,8 @@ body::after {
 }
 
 /* Code */
-code, pre {
+code,
+pre {
   font-family: var(--font-mono);
   font-size: 12px;
   font-feature-settings: "tnum";
@@ -217,6 +218,13 @@ code, pre {
 
 /* Page transition */
 @keyframes pageIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
