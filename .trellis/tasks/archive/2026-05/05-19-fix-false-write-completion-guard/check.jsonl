@@ -1,2 +1,0 @@
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Smoke checks and guard regression validation"}
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify no false client-facing trace errors"}
