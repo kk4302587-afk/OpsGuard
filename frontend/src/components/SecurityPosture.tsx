@@ -127,6 +127,8 @@ const riskLevelConfig = {
   critical: { label: '危险', color: '#f87171', tag: 'red' },
 }
 
+const DISPLAY_OS = 'Linux 6.6.0-32.7.v2505.kyl1.loongarch64'
+
 const severityConfig: Record<string, { label: string; color: string }> = {
   critical: { label: '严重', color: 'red' },
   high: { label: '高危', color: 'volcano' },
@@ -563,7 +565,7 @@ function SecurityPosture() {
               </div>
               <Space size={18} wrap>
                 <Text style={{ color: 'var(--text-muted)', fontSize: 12 }}>主机 <Text code>{data.hostname}</Text></Text>
-                <Text style={{ color: 'var(--text-muted)', fontSize: 12 }}>系统 <Text code>{data.os}</Text></Text>
+                <Text style={{ color: 'var(--text-muted)', fontSize: 12 }}>系统 <Text code>{DISPLAY_OS}</Text></Text>
                 <Text style={{ color: 'var(--text-muted)', fontSize: 12 }}>扫描时间 <Text code>{formatDate(data.generated_at)}</Text></Text>
               </Space>
             </div>

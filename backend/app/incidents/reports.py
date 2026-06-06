@@ -16,6 +16,15 @@ from app.incidents.store import get_incident, get_incident_events
 
 CONFIRMED_STATES = {"executed", "failed"}
 INFERRED_STATES = {"inferred"}
+NOISY_SOURCES = {
+    "SafetyGuardrail.check_input",
+    "context_manager.build_context_package",
+    "knowledge_store.search",
+    "tool_plan",
+    "tools_registry",
+    "intent_policy_compiler",
+}
+NOISY_PHASES = {"context_management"}
 
 
 async def generate_handoff_note(incident_id: str, *, db_path: str | None = None) -> dict | None:
@@ -114,49 +123,59 @@ async def generate_postmortem_draft(incident_id: str, *, db_path: str | None = N
 def _confirmed_facts(events: list[dict]) -> list[str]:
     facts = []
     for event in events:
+        if _is_noise_event(event):
+            continue
         evidence = _evidence(event)
         if evidence.get("execution_state") in CONFIRMED_STATES:
             facts.append(_event_fact(event, evidence))
-    return _dedupe(facts)
+    return _dedupe(facts)[:8]
 
 
 def _inferred_hypotheses(events: list[dict]) -> list[str]:
     hypotheses = []
     for event in events:
+        if _is_noise_event(event):
+            continue
         evidence = _evidence(event)
         if evidence.get("execution_state") in INFERRED_STATES:
             hypotheses.append(_event_fact(event, evidence, prefix="推断"))
-    return _dedupe(hypotheses)
+    return _dedupe(hypotheses)[:6]
 
 
 def _failure_events(events: list[dict]) -> list[str]:
     failures = []
     for event in events:
+        if _is_noise_event(event):
+            continue
         evidence = _evidence(event)
         if event.get("event_type") in {"failure", "blocked"} or evidence.get("execution_state") == "failed":
             reason = evidence.get("failure_reason") or event.get("detail") or event.get("title")
             failures.append(_compact(reason))
-    return _dedupe(failures)
+    return _dedupe(failures)[:6]
 
 
 def _next_checks(events: list[dict]) -> list[str]:
     checks = []
     for event in events:
+        if _is_noise_event(event):
+            continue
         next_check = _evidence(event).get("next_check")
         if next_check:
             checks.append(_compact(next_check))
-    return _dedupe(checks)
+    return _dedupe(checks)[:5]
 
 
 def _timeline_lines(events: list[dict]) -> list[str]:
     lines = []
     for event in events:
+        if _is_noise_event(event):
+            continue
         stamp = _fmt_time(event.get("timestamp"))
         title = _compact(event.get("title") or event.get("detail") or event.get("phase"))
         state = _evidence(event).get("execution_state")
         suffix = f" [{_state_label(state)}]" if state else ""
         lines.append(f"{stamp} - {_phase_label(event.get('phase'))} / {_event_type_label(event.get('event_type'))}: {title}{suffix}")
-    return lines
+    return _dedupe(lines)[:12]
 
 
 def _mitigation_lines(events: list[dict]) -> list[str]:
@@ -236,7 +255,8 @@ def _event_fact(event: dict, evidence: dict, prefix: str = "事实") -> str:
     claim = evidence.get("claim") or event.get("title") or event.get("detail") or "timeline event"
     observed = evidence.get("observed") or event.get("detail") or ""
     state = _state_label(evidence.get("execution_state") or "unknown")
-    return f"{prefix}：{source} [{state}] - {_compact(claim)}" + (f" | 观测：{_compact(observed)}" if observed else "")
+    observed_text = _human_observed(observed)
+    return f"{prefix}：{source} [{state}] - {_compact(claim, 140)}" + (f" | 观测：{observed_text}" if observed_text else "")
 
 
 def _evidence(event: dict) -> dict:
@@ -264,10 +284,32 @@ def _text_or_placeholder(value: Any, placeholder: str) -> str:
     return text or placeholder
 
 
-def _compact(value: Any, max_chars: int = 400) -> str:
+def _compact(value: Any, max_chars: int = 180) -> str:
     text = str(value or "")
     text = " ".join(text.split())
     return text[:max_chars] + ("..." if len(text) > max_chars else "")
+
+
+def _is_noise_event(event: dict) -> bool:
+    evidence = _evidence(event)
+    source = str(evidence.get("source") or "")
+    phase = str(event.get("phase") or "")
+    if source in NOISY_SOURCES or phase in NOISY_PHASES:
+        return True
+    return False
+
+
+def _human_observed(value: Any) -> str:
+    text = _compact(value, 180)
+    if not text:
+        return ""
+    stripped = text.strip()
+    if stripped.startswith(("{", "[")):
+        return "已记录结构化结果，详见事件时间线。"
+    noisy_tokens = ("layers_checked", "state_label", "match_reason", "safe_to_reuse", "current_user_request")
+    if any(token in stripped for token in noisy_tokens):
+        return "已记录结构化结果，详见事件时间线。"
+    return stripped
 
 
 def _fmt_time(value: Any) -> str:

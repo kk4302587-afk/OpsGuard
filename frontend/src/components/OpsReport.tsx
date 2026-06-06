@@ -12,6 +12,7 @@ import {
   FilePdfOutlined,
   AlertOutlined,
 } from '@ant-design/icons'
+import MarkdownRenderer from './MarkdownRenderer'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -452,9 +453,9 @@ function OpsReport() {
         ]}
         width={900}
       >
-        <pre style={{ maxHeight: 520, overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-          {draft?.markdown}
-        </pre>
+        <div style={{ maxHeight: 520, overflow: 'auto', paddingRight: 8 }}>
+          <MarkdownRenderer content={draft?.markdown || ''} />
+        </div>
       </Modal>
     </div>
   )

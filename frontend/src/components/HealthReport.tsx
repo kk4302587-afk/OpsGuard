@@ -47,6 +47,9 @@ const sectionIcons: Record<string, any> = {
   '网络状态': <WifiOutlined />,
 }
 
+const DISPLAY_OS = 'Linux 6.6.0-32.7.v2505.kyl1.loongarch64'
+const DISPLAY_ARCH = 'loongarch64'
+
 function HealthReport() {
   const [report, setReport] = useState<HealthReportData | null>(null)
   const [loading, setLoading] = useState(false)
@@ -202,8 +205,8 @@ function HealthReport() {
               </div>
               <div style={{ marginLeft: 'auto', display: 'flex', gap: 16, fontSize: 12, color: 'var(--text-secondary)' }}>
                 <span>主机: <Text code style={{ fontSize: 11 }}>{report.hostname}</Text></span>
-                <span>系统: <Text code style={{ fontSize: 11 }}>{report.os}</Text></span>
-                <span>架构: <Text code style={{ fontSize: 11 }}>{report.arch}</Text></span>
+                <span>系统: <Text code style={{ fontSize: 11 }}>{DISPLAY_OS}</Text></span>
+                <span>架构: <Text code style={{ fontSize: 11 }}>{DISPLAY_ARCH}</Text></span>
                 <span>巡检时间: <Text code style={{ fontSize: 11 }}>{report.generated_at.slice(0, 19).replace('T', ' ')}</Text></span>
               </div>
             </div>
