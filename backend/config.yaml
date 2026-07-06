@@ -13,7 +13,7 @@ llm:
   # Primary model
   primary:
     provider: "openai"  # openai-compatible (works with Qwen/DeepSeek)
-    model: "kimi-k2.6"
+    model: "qwen3.7-max-2026-06-08"
     api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     api_key: "sk-9168ce80371c4a148a8d4ea486f3caa8"
     temperature: 0.1
@@ -198,15 +198,31 @@ execution:
   # Auto-backup before write operations
   auto_backup: true
   backup_dir: "/var/lib/opsguard/backups"
+  # Execute mutating tools in a dedicated worker process. If run_as_user exists,
+  # the worker is launched through sudo -u; otherwise development falls back to
+  # the current process user unless require_run_as_user is true.
+  sandbox_enabled: true
+  sandbox_mode: "subprocess"
+  sandbox_for_read_tools: false
+  require_run_as_user: false
+  worker_python: ""
+  worker_cwd: ""
 
 # Execution Policy
 policy:
   enabled: true
   environment: "development"
   host: ""
-  # Empty means no write-path allowlist is enforced. Add paths to restrict
-  # write/destructive file operations to approved areas only.
-  allowed_write_paths: []
+  # Write/destructive file operations are limited to approved paths.
+  # Keep production paths explicit and narrow.
+  allowed_write_paths:
+    - "/tmp/opsguard-*"
+    - "/var/lib/opsguard/**"
+  enforce_write_path_allowlist: true
+  # Allow approved delete_file operations for ordinary files under /tmp
+  # after path and symlink checks. This supports safe temporary-file cleanup
+  # without opening /tmp to arbitrary writes.
+  allow_tmp_file_cleanup: true
   denied_paths:
     - "/etc/passwd"
     - "/etc/shadow"
@@ -217,7 +233,7 @@ policy:
   protected_services: []
   maintenance_windows: []
   max_blast_radius: 1
-  enforce_sudo_allowlist: false
+  enforce_sudo_allowlist: true
   rules: []
 
 # Knowledge Store
@@ -245,3 +261,9 @@ observability:
   timeout: 10.0
   default_range_minutes: 30
   max_log_limit: 100
+
+# Runbook replay behavior
+runbook:
+  # Execute steps deterministically, then let the LLM polish the final report
+  # from verified tool evidence. Falls back to deterministic text on failure.
+  hybrid_final_summary: true

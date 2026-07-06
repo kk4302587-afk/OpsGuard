@@ -7,8 +7,10 @@ Supports rollback to the previous state if something goes wrong.
 import os
 import shutil
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -46,6 +48,23 @@ class BackupManager:
         except IOError as e:
             logger.error(f"Failed to save backup manifest: {e}")
 
+    def _append_record(self, record: dict) -> dict:
+        self._manifest.append(record)
+        self._save_manifest()
+        return record
+
+    def _new_id(self) -> str:
+        return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+    def find_backup(self, backup_id: str) -> dict | None:
+        """Find a backup record by exact or punctuation-insensitive id."""
+        normalized = _normalize_backup_id(backup_id)
+        for record in self._manifest:
+            record_id = str(record.get("id") or "")
+            if record_id == backup_id or _normalize_backup_id(record_id) == normalized:
+                return record
+        return None
+
     def backup_file(self, filepath: str, operation: str = "unknown") -> dict | None:
         """Create a backup of a file before modifying it.
 
@@ -61,7 +80,7 @@ class BackupManager:
             logger.debug(f"No backup needed: {filepath} does not exist (new file)")
             return None
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        timestamp = self._new_id()
         backup_name = f"{source.name}.{timestamp}.bak"
         backup_path = self._backup_dir / backup_name
 
@@ -73,16 +92,14 @@ class BackupManager:
                 "original_path": str(source.absolute()),
                 "backup_path": str(backup_path.absolute()),
                 "operation": operation,
+                "rollback_type": "restore_file",
                 "timestamp": datetime.now().isoformat(),
                 "size": source.stat().st_size,
                 "restored": False,
             }
 
-            self._manifest.append(record)
-            self._save_manifest()
-
             logger.info(f"Backup created: {filepath} -> {backup_path}")
-            return record
+            return self._append_record(record)
 
         except (IOError, OSError) as e:
             logger.error(f"Backup failed for {filepath}: {e}")
@@ -102,7 +119,7 @@ class BackupManager:
         if not source.exists() or not source.is_dir():
             return None
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        timestamp = self._new_id()
         backup_name = f"{source.name}.{timestamp}.bak"
         backup_path = self._backup_dir / backup_name
 
@@ -114,16 +131,14 @@ class BackupManager:
                 "original_path": str(source.absolute()),
                 "backup_path": str(backup_path.absolute()),
                 "operation": operation,
+                "rollback_type": "restore_directory",
                 "timestamp": datetime.now().isoformat(),
                 "is_directory": True,
                 "restored": False,
             }
 
-            self._manifest.append(record)
-            self._save_manifest()
-
             logger.info(f"Directory backup created: {dirpath} -> {backup_path}")
-            return record
+            return self._append_record(record)
 
         except (IOError, OSError) as e:
             logger.error(f"Directory backup failed for {dirpath}: {e}")
@@ -138,7 +153,7 @@ class BackupManager:
         Returns:
             True if rollback succeeded
         """
-        record = next((r for r in self._manifest if r["id"] == backup_id), None)
+        record = self.find_backup(backup_id)
         if not record:
             logger.error(f"Backup record not found: {backup_id}")
             return False
@@ -147,15 +162,57 @@ class BackupManager:
             logger.warning(f"Backup already restored: {backup_id}")
             return False
 
-        backup_path = Path(record["backup_path"])
+        rollback_type = record.get("rollback_type") or ("restore_directory" if record.get("is_directory") else "restore_file")
+        backup_path = Path(record.get("backup_path") or "")
         original_path = Path(record["original_path"])
 
-        if not backup_path.exists():
+        if rollback_type in {"restore_file", "restore_directory"} and not backup_path.exists():
             logger.error(f"Backup file missing: {backup_path}")
             return False
 
         try:
-            if record.get("is_directory"):
+            if rollback_type == "delete_created_path":
+                paths = [Path(item) for item in record.get("created_paths", []) if item]
+                if not paths:
+                    paths = [original_path]
+                for path in paths:
+                    if path.is_dir():
+                        shutil.rmtree(str(path))
+                    elif path.exists() or path.is_symlink():
+                        path.unlink()
+            elif rollback_type == "move_path":
+                source_path = Path(record.get("source_path") or (record.get("metadata") or {}).get("source_path") or "")
+                destination_path = Path(record.get("destination_path") or (record.get("metadata") or {}).get("destination_path") or "")
+                if source_path.exists():
+                    if destination_path.exists():
+                        raise OSError(f"Rollback destination already exists: {destination_path}")
+                    shutil.move(str(source_path), str(destination_path))
+            elif rollback_type == "restore_permissions":
+                os.chmod(original_path, int(str(record["mode"]), 8))
+            elif rollback_type == "restore_owner":
+                subprocess.run(
+                    ["sudo", "chown", str(record["owner"]), str(original_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=True,
+                )
+            elif rollback_type == "restore_service_state":
+                service = str(record["service"])
+                previous = str(record.get("previous_state") or "")
+                action = "start" if previous == "active" else "stop"
+                subprocess.run(
+                    ["sudo", "systemctl", action, service],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=True,
+                )
+            elif rollback_type == "restore_firewall_rule":
+                _restore_firewall_rule(record)
+            elif rollback_type == "restore_crontab":
+                _restore_crontab(record)
+            elif record.get("is_directory"):
                 if original_path.exists():
                     shutil.rmtree(str(original_path))
                 shutil.copytree(str(backup_path), str(original_path))
@@ -169,9 +226,31 @@ class BackupManager:
             logger.info(f"Rollback successful: {original_path}")
             return True
 
-        except (IOError, OSError) as e:
+        except Exception as e:
             logger.error(f"Rollback failed: {e}")
             return False
+
+    def create_inverse_record(
+        self,
+        *,
+        rollback_type: str,
+        operation: str,
+        original_path: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict:
+        """Create a rollback record that does not need a copied backup file."""
+        timestamp = self._new_id()
+        record = {
+            "id": timestamp,
+            "rollback_type": rollback_type,
+            "operation": operation,
+            "original_path": str(Path(original_path).absolute()) if original_path else "",
+            "backup_path": "",
+            "timestamp": datetime.now().isoformat(),
+            "restored": False,
+        }
+        record.update(metadata or {})
+        return self._append_record(record)
 
     def get_backups(self, filepath: str = None, limit: int = 20) -> list[dict]:
         """Get backup history, optionally filtered by file path.
@@ -228,7 +307,7 @@ def list_backups(filepath: str = "", limit: int = 20) -> ToolResult:
 def rollback_backup(backup_id: str) -> ToolResult:
     """Restore a backup by id."""
     try:
-        record = next((r for r in backup_manager.get_backups(limit=1000) if r.get("id") == backup_id), None)
+        record = backup_manager.find_backup(backup_id)
         if not record:
             return ToolResult(success=False, data="", error=f"Backup not found: {backup_id}")
         ok = backup_manager.rollback(backup_id)
@@ -244,3 +323,71 @@ def rollback_backup(backup_id: str) -> ToolResult:
         )
     except Exception as e:
         return ToolResult(success=False, data="", error=str(e))
+
+
+def _normalize_backup_id(backup_id: str) -> str:
+    return "".join(char for char in str(backup_id or "") if char.isalnum())
+
+
+def _restore_crontab(record: dict[str, Any]) -> None:
+    user = str(record.get("user") or "")
+    had_crontab = bool(record.get("had_crontab"))
+    previous = str(record.get("previous_crontab") or "")
+    if had_crontab:
+        cmd = ["crontab", "-"]
+        if user:
+            cmd = ["sudo", "crontab", "-u", user, "-"]
+        subprocess.run(cmd, input=previous, capture_output=True, text=True, timeout=10, check=True)
+        return
+
+    cmd = ["crontab", "-r"]
+    if user:
+        cmd = ["sudo", "crontab", "-u", user, "-r"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    if result.returncode != 0 and "no crontab" not in (result.stderr or "").lower():
+        raise RuntimeError(result.stderr or result.stdout or "failed to remove crontab")
+
+
+def _restore_firewall_rule(record: dict[str, Any]) -> None:
+    backend = str(record.get("firewall_backend") or "iptables")
+    port = int(record.get("port"))
+    protocol = str(record.get("protocol") or "tcp")
+    before_allowed = bool(record.get("before_allowed"))
+    before_blocked = bool(record.get("before_blocked"))
+
+    if backend == "firewall-cmd":
+        if before_allowed:
+            _run_checked(["sudo", "firewall-cmd", "--permanent", f"--add-port={port}/{protocol}"])
+        else:
+            _run_checked(["sudo", "firewall-cmd", "--permanent", f"--remove-port={port}/{protocol}"], allow_failure=True)
+        _run_checked(["sudo", "firewall-cmd", "--reload"])
+        return
+
+    if backend == "ufw":
+        if before_allowed:
+            _run_checked(["sudo", "ufw", "allow", f"{port}/{protocol}"])
+        else:
+            _run_checked(["sudo", "ufw", "delete", "allow", f"{port}/{protocol}"], allow_failure=True)
+        if before_blocked:
+            _run_checked(["sudo", "ufw", "deny", f"{port}/{protocol}"])
+        else:
+            _run_checked(["sudo", "ufw", "delete", "deny", f"{port}/{protocol}"], allow_failure=True)
+        return
+
+    _restore_iptables_rule(port, protocol, "ACCEPT", before_allowed)
+    _restore_iptables_rule(port, protocol, "DROP", before_blocked)
+
+
+def _restore_iptables_rule(port: int, protocol: str, target: str, should_exist: bool) -> None:
+    check = ["sudo", "iptables", "-C", "INPUT", "-p", protocol, "--dport", str(port), "-j", target]
+    present = subprocess.run(check, capture_output=True, text=True, timeout=10).returncode == 0
+    if should_exist and not present:
+        _run_checked(["sudo", "iptables", "-A", "INPUT", "-p", protocol, "--dport", str(port), "-j", target])
+    elif not should_exist and present:
+        _run_checked(["sudo", "iptables", "-D", "INPUT", "-p", protocol, "--dport", str(port), "-j", target])
+
+
+def _run_checked(command: list[str], *, allow_failure: bool = False) -> None:
+    result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+    if result.returncode != 0 and not allow_failure:
+        raise RuntimeError(result.stderr or result.stdout or f"command failed: {' '.join(command)}")

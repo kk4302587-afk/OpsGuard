@@ -66,6 +66,12 @@ class ExecutionConfig(BaseModel):
     timeout: int = 30
     auto_backup: bool = True
     backup_dir: str = "/var/lib/opsguard/backups"
+    sandbox_enabled: bool = True
+    sandbox_mode: str = "subprocess"
+    sandbox_for_read_tools: bool = False
+    require_run_as_user: bool = False
+    worker_python: str = ""
+    worker_cwd: str = ""
 
 
 class PolicyRuleConfig(BaseModel):
@@ -86,12 +92,14 @@ class PolicyConfig(BaseModel):
     enabled: bool = True
     environment: str = "development"
     host: str = ""
-    allowed_write_paths: list[str] = []
+    allowed_write_paths: list[str] = Field(default_factory=lambda: ["/tmp/opsguard-*", "/var/lib/opsguard/**"])
+    enforce_write_path_allowlist: bool = True
+    allow_tmp_file_cleanup: bool = True
     denied_paths: list[str] = []
     protected_services: list[str] = []
     maintenance_windows: list[str] = []
     max_blast_radius: int = 1
-    enforce_sudo_allowlist: bool = False
+    enforce_sudo_allowlist: bool = True
     rules: list[PolicyRuleConfig] = []
 
 
@@ -127,6 +135,10 @@ class ObservabilityConfig(BaseModel):
     max_log_limit: int = 100
 
 
+class RunbookConfig(BaseModel):
+    hybrid_final_summary: bool = True
+
+
 class Settings(BaseModel):
     app: AppConfig = AppConfig()
     llm: LLMConfig = LLMConfig()
@@ -138,6 +150,7 @@ class Settings(BaseModel):
     websocket: WebSocketConfig = WebSocketConfig()
     mcp: MCPConfig = MCPConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
+    runbook: RunbookConfig = RunbookConfig()
 
 
 def _resolve_env_vars(value: str) -> str:

@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState } from 'react'
-import { Collapse, Input, Button, Typography, Tag, Tooltip, message as antdMessage } from 'antd'
+import { Collapse, Input, Button, Typography, Tag, Tooltip, Drawer, Image, message as antdMessage } from 'antd'
 import {
   SendOutlined,
   RobotOutlined,
@@ -13,6 +13,9 @@ import {
   AudioOutlined,
   DeleteOutlined,
   FileImageOutlined,
+  FileTextOutlined,
+  ReloadOutlined,
+  CopyOutlined,
 } from '@ant-design/icons'
 import { MessageAttachment, MultimodalRecognitionResult, useChatStore } from '../stores/chatStore'
 import DiagnosisProgress from './DiagnosisProgress'
@@ -23,6 +26,20 @@ import '../styles/chat.css'
 
 const { TextArea } = Input
 const { Text } = Typography
+
+interface WrittenFileContent {
+  path: string
+  size: number
+  max_bytes: number
+  truncated: boolean
+  mtime?: string
+  content: string
+  write?: {
+    tool_name?: string
+    timestamp?: string
+    target?: string
+  }
+}
 
 interface PendingAttachment {
   id: string
@@ -53,12 +70,53 @@ const renderRecommendedToolTip = (tool: Record<string, unknown>) => {
   return [reason, args ? `参数：${args}` : ''].filter(Boolean).join('\n') || '建议先执行只读检查'
 }
 
+const pathRegex = /(^|[\s`"'“”‘’（(：:])((?:\/[^\s`"'“”‘’。，；、：:!！?？)）\]}<>]+)+)/g
+
+const extractWrittenFilePaths = (content: string): string[] => {
+  if (!/(已执行操作|执行成功|已成功|文件写入|写入|追加|添加内容|创建|覆盖|复制|移动|调整配置文件)/.test(content)) {
+    return []
+  }
+
+  const paths = new Set<string>()
+  let match: RegExpExecArray | null
+  pathRegex.lastIndex = 0
+  while ((match = pathRegex.exec(content)) !== null) {
+    const rawPath = cleanExtractedPath(match[2] || '')
+    if (!isLikelyWrittenFilePath(rawPath)) continue
+
+    const start = Math.max(0, match.index - 120)
+    const end = Math.min(content.length, match.index + rawPath.length + 120)
+    const context = content.slice(start, end)
+    if (/(写入|追加|添加内容|创建|覆盖|复制|移动|调整配置文件|已执行成功|执行成功|已成功)/.test(context)) {
+      paths.add(rawPath)
+    }
+  }
+  return removeParentPathCandidates(Array.from(paths))
+}
+
+const cleanExtractedPath = (path: string): string => (
+  path
+    .replace(/[，。；、:：.)）\]}]+$/g, '')
+    .replace(/\/+$/g, '')
+)
+
+const isLikelyWrittenFilePath = (path: string): boolean => {
+  if (!path.startsWith('/') || path === '/') return false
+  if (path.includes('://') || path.includes('{') || path.includes('}')) return false
+  if (path.startsWith('/api/') || path.startsWith('/ws/')) return false
+  return path.split('/').filter(Boolean).length >= 2
+}
+
+const removeParentPathCandidates = (paths: string[]): string[] => (
+  paths.filter((path) => !paths.some((other) => other !== path && other.startsWith(`${path}/`)))
+)
+
 /**
  * Main chat panel - conversation flow with styled message bubbles.
  */
 function ChatPanel() {
   const {
-    messages, inputValue, setInputValue, sendMessage, isThinking,
+    messages, inputValue, setInputValue, sendMessage, isThinking, activeSessionId,
     pendingRunbookSuggestion, acceptRunbookSuggestion, dismissRunbookSuggestion,
   } = useChatStore()
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -71,6 +129,11 @@ function ChatPanel() {
   const [confirmedVoiceIds, setConfirmedVoiceIds] = useState<string[]>([])
   const [confirmedLowConfidenceIds, setConfirmedLowConfidenceIds] = useState<string[]>([])
   const [showVoiceConfirm, setShowVoiceConfirm] = useState(false)
+  const [fileDrawerOpen, setFileDrawerOpen] = useState(false)
+  const [fileContent, setFileContent] = useState<WrittenFileContent | null>(null)
+  const [fileContentPath, setFileContentPath] = useState('')
+  const [fileContentError, setFileContentError] = useState('')
+  const [isFileContentLoading, setIsFileContentLoading] = useState(false)
   const hasRecognizedAttachment = attachments.some((item) => item.status === 'recognized')
   const hasBlockingAttachment = attachments.some((item) => item.status === 'uploading' || item.status === 'failed')
 
@@ -136,6 +199,45 @@ function ChatPanel() {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
+    }
+  }
+
+  const fetchWrittenFileContent = async (path: string) => {
+    if (!activeSessionId) {
+      antdMessage.warning('请先选择或创建会话')
+      return
+    }
+
+    setFileDrawerOpen(true)
+    setFileContentPath(path)
+    setFileContent(null)
+    setFileContentError('')
+    setIsFileContentLoading(true)
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(activeSessionId)}/written-file-content?path=${encodeURIComponent(path)}&max_bytes=1048576`,
+      )
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(payload.detail || '读取文件内容失败')
+      }
+      setFileContent(payload as WrittenFileContent)
+    } catch (error) {
+      const text = error instanceof Error ? error.message : '读取文件内容失败'
+      setFileContentError(text)
+      antdMessage.error(text)
+    } finally {
+      setIsFileContentLoading(false)
+    }
+  }
+
+  const handleCopyFileContent = async () => {
+    if (!fileContent?.content) return
+    try {
+      await navigator.clipboard?.writeText(fileContent.content)
+      antdMessage.success('文件内容已复制')
+    } catch {
+      antdMessage.error('复制失败')
     }
   }
 
@@ -359,16 +461,38 @@ function ChatPanel() {
     return (
       <div className="message-attachments">
         {images.map((item) => (
-          <a
+          <Image
             key={item.id}
-            href={item.previewUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="message-image-link"
-            title={item.filename}
+            src={item.previewUrl}
+            alt={item.filename}
+            className="message-image-thumb"
+            rootClassName="message-image-preview"
+            width={96}
+            height={72}
+            preview={{ mask: '查看大图' }}
+          />
+        ))}
+      </div>
+    )
+  }
+
+  const renderWrittenFileActions = (content: string) => {
+    const paths = extractWrittenFilePaths(content)
+    if (!paths.length) return null
+
+    return (
+      <div className="written-file-actions">
+        {paths.map((path) => (
+          <Button
+            key={path}
+            size="small"
+            icon={<FileTextOutlined />}
+            onClick={() => fetchWrittenFileContent(path)}
+            className="written-file-action-btn"
           >
-            <img src={item.previewUrl} alt={item.filename} className="message-image-thumb" />
-          </a>
+            查看当前内容
+            <span className="written-file-path">{path}</span>
+          </Button>
         ))}
       </div>
     )
@@ -550,7 +674,12 @@ function ChatPanel() {
 
     // Assistant messages: render as Markdown
     if (role === 'assistant') {
-      return <MarkdownRenderer content={content} />
+      return (
+        <>
+          <MarkdownRenderer content={content} />
+          {renderWrittenFileActions(content)}
+        </>
+      )
     }
 
     // User messages: plain text with line breaks
@@ -704,6 +833,56 @@ function ChatPanel() {
           />
         </div>
       </div>
+      <Drawer
+        title="当前文件内容"
+        placement="right"
+        width={720}
+        open={fileDrawerOpen}
+        onClose={() => setFileDrawerOpen(false)}
+        extra={(
+          <div className="file-content-drawer-actions">
+            <Tooltip title="刷新当前内容">
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                disabled={!fileContentPath || isFileContentLoading}
+                onClick={() => fetchWrittenFileContent(fileContentPath)}
+              />
+            </Tooltip>
+            <Tooltip title="复制内容">
+              <Button
+                size="small"
+                icon={<CopyOutlined />}
+                disabled={!fileContent?.content}
+                onClick={handleCopyFileContent}
+              />
+            </Tooltip>
+          </div>
+        )}
+      >
+        <div className="file-content-drawer">
+          <div className="file-content-meta">
+            <Text className="file-content-path">{fileContentPath}</Text>
+            {fileContent && (
+              <div className="file-content-facts">
+                <Tag color="blue">{fileContent.size} bytes</Tag>
+                {fileContent.truncated && <Tag color="orange">已截断至 {fileContent.max_bytes} bytes</Tag>}
+                {fileContent.mtime && <Tag>修改时间 {new Date(fileContent.mtime).toLocaleString()}</Tag>}
+              </div>
+            )}
+          </div>
+          {isFileContentLoading ? (
+            <div className="file-content-loading">
+              <LoadingOutlined />
+              <Text>正在读取...</Text>
+            </div>
+          ) : fileContentError ? (
+            <div className="file-content-error">{fileContentError}</div>
+          ) : fileContent ? (
+            <pre className="file-content-viewer">{fileContent.content || '(空文件)'}</pre>
+          ) : null}
+        </div>
+      </Drawer>
     </div>
   )
 }

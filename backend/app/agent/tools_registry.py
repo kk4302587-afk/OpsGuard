@@ -787,8 +787,10 @@ class ToolsRegistry:
 
     def _rollback_capability(self, name: str, category: str) -> tuple[bool, str]:
         """Return best-known rollback support for a tool."""
-        if name in {"create_file", "write_file", "delete_file", "delete_directory", "move_file", "change_permissions", "change_owner"}:
+        if name in {"create_file", "write_file", "delete_file", "delete_directory"}:
             return True, "backup"
+        if name in {"create_directory", "move_file", "copy_file", "change_permissions", "change_owner"}:
+            return True, "inverse_action"
         if name in {"restart_service", "start_service", "stop_service"}:
             return True, "service_state"
         if name in {"allow_port", "block_port", "add_cron_job", "remove_cron_job"}:

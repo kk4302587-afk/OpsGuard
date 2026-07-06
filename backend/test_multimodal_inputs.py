@@ -15,6 +15,7 @@ from app.multimodal.provider import (
     trace_events_from_context,
     validate_audio,
     validate_image,
+    _normalize_image_result,
 )
 from app.websocket.gateway import _coerce_multimodal_context, _hydrate_multimodal_context
 
@@ -71,6 +72,22 @@ def test_ops_entity_extraction_and_tool_recommendations() -> None:
     assert "check_config_syntax" in tools
     assert "check_port" in tools
     assert "服务状态检查" in display_names
+
+
+def test_image_analysis_normalizes_model_input_type_and_text_list() -> None:
+    enhanced = _normalize_image_result({
+        "input_type": "terminal",
+        "image_category": "unknown",
+        "summary": "截图里的命令",
+        "extracted_text": ["rm -rf /tmp/test", "systemctl restart nginx"],
+        "confidence": "medium",
+    })
+
+    assert enhanced["input_type"] == "image"
+    assert enhanced["image_category"] == "terminal"
+    assert enhanced["extracted_text"] == "rm -rf /tmp/test\nsystemctl restart nginx"
+    assert "nginx" in enhanced["entities"]["services"]
+    assert "/tmp/test" in enhanced["entities"]["paths"]
 
 
 def test_low_confidence_result_requires_user_confirmation() -> None:
@@ -146,8 +163,10 @@ def test_gateway_hydrates_multimodal_context_from_attachment_id(tmp_path=None, m
                     "image",
                     "nginx.png",
                     json.dumps({
-                        "input_type": "image",
+                        "input_type": "terminal",
                         "summary": "截图显示 nginx failed",
+                        "extracted_text": ["rm -rf /tmp/test", "systemctl restart nginx"],
+                        "image_category": "unknown",
                         "confidence": "medium",
                     }, ensure_ascii=False),
                 ),
@@ -164,6 +183,8 @@ def test_gateway_hydrates_multimodal_context_from_attachment_id(tmp_path=None, m
 
         assert len(hydrated) == 1
         assert hydrated[0]["input_type"] == "image"
+        assert hydrated[0]["image_category"] == "terminal"
+        assert hydrated[0]["extracted_text"] == "rm -rf /tmp/test\nsystemctl restart nginx"
         assert hydrated[0]["attachment_id"] == "att-image-1"
         assert "nginx failed" in hydrated[0]["summary"]
 

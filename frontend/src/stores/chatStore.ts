@@ -58,6 +58,24 @@ export interface OperationPreview {
   metadata?: Record<string, unknown>
 }
 
+export interface ChangePlan {
+  id?: string
+  kind?: string
+  tool_name?: string
+  tool_display_name?: string
+  description?: string
+  target?: string
+  risk_level?: string
+  approval?: Record<string, unknown>
+  steps?: Array<Record<string, unknown>>
+  risks?: Array<Record<string, unknown>>
+  rollback?: Record<string, unknown>
+  validation?: Array<Record<string, unknown>>
+  preview?: Record<string, unknown>
+  policy?: Record<string, unknown>
+  runbook?: Record<string, unknown> | null
+}
+
 const isApprovalTrace = (event: TraceEvent): boolean => (
   event.phase === 'approval_request'
   && event.event_type === 'pending'
@@ -189,9 +207,10 @@ interface ChatStore {
     impact?: string
     rollback_strategy?: string
     supports_rollback?: boolean
-	    preview_strategy?: string
-	    preview?: OperationPreview
-	    policy?: Record<string, unknown>
+    preview_strategy?: string
+    preview?: OperationPreview
+    change_plan?: ChangePlan
+    policy?: Record<string, unknown>
     approval_level?: string
     execution_identity?: Record<string, unknown>
   } | null
@@ -236,7 +255,7 @@ interface ChatStore {
   } | null
   acceptRunbookSuggestion: () => void
   dismissRunbookSuggestion: () => void
-  runRunbookDirectly: (runbookId: string) => void
+  runRunbookDirectly: (runbookId: string, runbookName?: string) => void
 
   // WebSocket
   ws: WebSocket | null
@@ -448,14 +467,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set({ pendingRunbookSuggestion: null, isThinking: true })
   },
 
-  runRunbookDirectly: (runbookId: string) => {
+  runRunbookDirectly: (runbookId: string, runbookName?: string) => {
     const { ws } = get()
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       console.error('Cannot run runbook: WebSocket not connected')
       return
     }
-    ws.send(JSON.stringify({ type: 'run_runbook', runbook_id: runbookId }))
-    set({ isThinking: true })
+    const displayName = runbookName || runbookId
+    const userMessage: Message = {
+      id: createClientId('user'),
+      role: 'user',
+      content: `执行 Runbook「${displayName}」`,
+      timestamp: new Date().toISOString(),
+    }
+    ws.send(JSON.stringify({ type: 'run_runbook', runbook_id: runbookId, runbook_name: runbookName }))
+    set((state) => ({
+      ...appendUserTurn(state, userMessage),
+    }))
   },
 
   fetchSessions: async () => {
@@ -747,9 +775,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               impact: data.impact || undefined,
               rollback_strategy: data.rollback_strategy,
               supports_rollback: data.supports_rollback,
-	              preview_strategy: data.preview_strategy,
-	              preview: isRecord(data.preview) ? data.preview : undefined,
-	              policy: isRecord(data.policy) ? data.policy : undefined,
+              preview_strategy: data.preview_strategy,
+              preview: isRecord(data.preview) ? data.preview : undefined,
+              change_plan: isRecord(data.change_plan) ? data.change_plan : undefined,
+              policy: isRecord(data.policy) ? data.policy : undefined,
               approval_level: typeof data.approval_level === 'string' ? data.approval_level : undefined,
               execution_identity: isRecord(data.execution_identity) ? data.execution_identity : undefined,
             },

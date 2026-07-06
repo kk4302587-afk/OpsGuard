@@ -259,6 +259,7 @@ def test_runbook_execution_creates_incident_from_real_step_events() -> None:
         original_get_path = runbook_executor.get_knowledge_db_path
         original_get_tool = runbook_executor.tools_registry.get_tool
         original_log = runbook_executor.audit_logger.log
+        original_hybrid = runbook_executor.settings.runbook.hybrid_final_summary
 
         def fake_get_tool(name: str):
             if name == "get_service_status":
@@ -284,6 +285,7 @@ def test_runbook_execution_creates_incident_from_real_step_events() -> None:
                 runbook_executor.get_knowledge_db_path = lambda: db_path
                 runbook_executor.tools_registry.get_tool = fake_get_tool
                 runbook_executor.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+                runbook_executor.settings.runbook.hybrid_final_summary = False
 
                 summary = await runbook_executor.execute_runbook(
                     "runbook-incident",
@@ -302,6 +304,7 @@ def test_runbook_execution_creates_incident_from_real_step_events() -> None:
                 runbook_executor.get_knowledge_db_path = original_get_path
                 runbook_executor.tools_registry.get_tool = original_get_tool
                 runbook_executor.audit_logger.log = original_log
+                runbook_executor.settings.runbook.hybrid_final_summary = original_hybrid
 
         assert "诊断追踪" not in summary
         assert len(incidents) == 1

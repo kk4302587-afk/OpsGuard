@@ -14,6 +14,7 @@ os.chdir(Path(__file__).parent)
 
 from app.agent import graph  # noqa: E402
 from app.agent.tools_registry import RiskLevel, ToolDefinition  # noqa: E402
+from app.config import settings  # noqa: E402
 from app.mcp_tools.process_tools import ToolResult  # noqa: E402
 
 
@@ -410,6 +411,10 @@ def test_existing_directory_noop_and_policy_append_dedupe() -> None:
                         risk_level=RiskLevel.WRITE,
                         category="file",
                         display_name="写入文件",
+                        supports_preview=True,
+                        preview_strategy="diff",
+                        supports_rollback=True,
+                        rollback_strategy="backup",
                     )
                 return None
 
@@ -432,8 +437,10 @@ def test_existing_directory_noop_and_policy_append_dedupe() -> None:
             from app.websocket import approval as approval_module
             original_approval_manager = approval_module.approval_manager
             original_assess_impact = graph.assess_impact
+            old_allowed_paths = list(settings.policy.allowed_write_paths)
             originals = _patch_common(fake_get_tool)
             try:
+                settings.policy.allowed_write_paths = [tmpdir]
                 graph.call_llm = fake_reasoning_call
                 graph.tools_registry.get_tool = fake_get_tool
                 graph.tools_registry.get_all_tools_for_llm = lambda: []
@@ -464,10 +471,226 @@ def test_existing_directory_noop_and_policy_append_dedupe() -> None:
                 assert len(approvals) == 1
                 assert "write_file" in approvals[0]["command"]
                 assert approvals[0]["preview"]["preview_type"] == "diff"
+                assert approvals[0]["change_plan"]["tool_name"] == "write_file"
+                assert approvals[0]["change_plan"]["approval"]["status"] == "pending"
+                assert approvals[0]["change_plan"]["rollback"]["supported"] is True
                 assert "hello-from-opsguard" in approvals[0]["preview"]["diff"]
                 assert any(event.get("source") == "noop_write_guard" for event in events)
                 assert any(event.get("source") == "intent_policy_compiler" and event.get("execution_state") == "skipped" for event in events)
             finally:
+                settings.policy.allowed_write_paths = old_allowed_paths
+                graph.assess_impact = original_assess_impact
+                approval_module.approval_manager = original_approval_manager
+                _restore_common(originals)
+
+    asyncio.run(scenario())
+
+
+def test_duplicate_rollback_request_does_not_reapprove_in_same_turn() -> None:
+    async def scenario() -> None:
+        events: list[dict] = []
+        executed: list[tuple[str, dict]] = []
+        llm_calls = 0
+        rollback_args = {"backup_id": "20260704180458224366"}
+
+        async def fake_reasoning_call(messages, tools=None):
+            nonlocal llm_calls
+            llm_calls += 1
+            if llm_calls <= 2:
+                return {
+                    "content": "",
+                    "tool_calls": [
+                        {"id": f"call_rollback_{llm_calls}", "name": "rollback_backup", "arguments": rollback_args}
+                    ],
+                }
+            return {"content": "自由文本草稿：回滚已处理。", "tool_calls": []}
+
+        def fake_get_tool(name: str):
+            if name == "rollback_backup":
+                return ToolDefinition(
+                    name=name,
+                    description="Rollback backup",
+                    parameters={"type": "object", "properties": {}},
+                    function=lambda **kwargs: ToolResult(success=False, data="", error="not used"),
+                    risk_level=RiskLevel.DESTRUCTIVE,
+                    category="backup",
+                    display_name="恢复备份",
+                    supports_preview=True,
+                    preview_strategy="restore_preview",
+                    supports_rollback=False,
+                    rollback_strategy="manual",
+                )
+            return None
+
+        async def fake_execute_tool(tool_name, tool_args, tool_def=None):
+            executed.append((tool_name, dict(tool_args)))
+            return ToolResult(success=False, data="", error="Backup not found: 20260704180458224366")
+
+        async def fake_structured_final_reply(**kwargs):
+            return {"valid": True, "markdown": "ok", "data": {}}
+
+        async def capture_event(event: dict) -> None:
+            events.append(event)
+
+        from app.websocket import approval as approval_module
+        original_approval_manager = approval_module.approval_manager
+        original_assess_impact = graph.assess_impact
+        originals = _patch_common(fake_get_tool)
+        try:
+            graph.call_llm = fake_reasoning_call
+            graph.tools_registry.get_tool = fake_get_tool
+            graph.tools_registry.get_all_tools_for_llm = lambda: []
+            graph.audit_logger.log = _noop_log
+            graph.record_tool_execution = _noop_record_tool_execution
+            graph.execute_tool = fake_execute_tool
+            graph.assess_impact = lambda *args, **kwargs: asyncio.sleep(0, result="测试回滚影响评估")
+            graph.generate_structured_final_reply = fake_structured_final_reply
+            approval_module.approval_manager = AutoApprovalManager()
+
+            result = await graph.reasoning_node({
+                "session_id": "rollback-duplicate-dedupe",
+                "incident_id": "",
+                "user_message": "执行回滚",
+                "send_to_client": capture_event,
+                "messages": [],
+                "risk_warning": "",
+                "knowledge_hint": "",
+                "recent_changes_hint": "",
+                "multimodal_hint": "",
+                "multimodal_context": [],
+            })
+
+            assert result.get("is_blocked") is False
+            assert executed == [("rollback_backup", rollback_args)]
+            approvals = [event for event in events if event.get("type") == "approval_request"]
+            assert len(approvals) == 1
+            assert any(event.get("source") == "duplicate_tool_guard" for event in events)
+        finally:
+            graph.assess_impact = original_assess_impact
+            approval_module.approval_manager = original_approval_manager
+            _restore_common(originals)
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_request_advances_tmp_candidates_to_delete_approval() -> None:
+    async def scenario() -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:
+            first = Path(tmpdir) / "opsguard-junk-a.tmp"
+            second = Path(tmpdir) / "opsguard-junk-b.tmp"
+            first.write_text("junk-a", encoding="utf-8")
+            second.write_text("junk-b", encoding="utf-8")
+
+            events: list[dict] = []
+            executed: list[tuple[str, dict]] = []
+            llm_calls = 0
+
+            async def fake_reasoning_call(messages, tools=None):
+                nonlocal llm_calls
+                llm_calls += 1
+                if llm_calls == 1:
+                    return {
+                        "content": "",
+                        "tool_calls": [
+                            {"id": "call_find_junk", "name": "find_large_files", "arguments": {"path": "/tmp", "min_size": "10M", "limit": 20}}
+                        ],
+                    }
+                return {"content": "自由文本草稿：发现临时垃圾文件。", "tool_calls": []}
+
+            def fake_get_tool(name: str):
+                if name == "find_large_files":
+                    return ToolDefinition(
+                        name=name,
+                        description="Find large files",
+                        parameters={"type": "object", "properties": {}},
+                        function=lambda **kwargs: ToolResult(success=True, data="not used"),
+                        risk_level=RiskLevel.READ,
+                        category="disk",
+                        display_name="查找大文件",
+                    )
+                if name == "delete_file":
+                    return ToolDefinition(
+                        name=name,
+                        description="Delete file",
+                        parameters={"type": "object", "properties": {}},
+                        function=lambda **kwargs: ToolResult(success=True, data="not used"),
+                        risk_level=RiskLevel.DESTRUCTIVE,
+                        category="file",
+                        display_name="删除文件",
+                        supports_preview=True,
+                        preview_strategy="before_after",
+                        supports_rollback=True,
+                        rollback_strategy="backup",
+                    )
+                return None
+
+            async def fake_execute_tool(tool_name, tool_args, tool_def=None):
+                executed.append((tool_name, dict(tool_args)))
+                if tool_name == "find_large_files":
+                    return ToolResult(success=True, data={
+                        "files": [
+                            f"-rw-r--r-- 1 root root 11M Jul 4 19:00 {first}",
+                            f"-rw-r--r-- 1 root root 12M Jul 4 19:00 {second}",
+                        ],
+                        "count": 2,
+                    })
+                if tool_name == "delete_file":
+                    Path(str(tool_args["filepath"])).unlink()
+                    return ToolResult(success=True, data=f"Deleted: {tool_args['filepath']}")
+                raise AssertionError(f"Unexpected tool: {tool_name}")
+
+            async def fake_structured_final_reply(**kwargs):
+                return {"valid": True, "markdown": "ok", "data": {}}
+
+            async def capture_event(event: dict) -> None:
+                events.append(event)
+
+            from app.websocket import approval as approval_module
+            original_approval_manager = approval_module.approval_manager
+            original_assess_impact = graph.assess_impact
+            old_allowed_paths = list(settings.policy.allowed_write_paths)
+            originals = _patch_common(fake_get_tool)
+            try:
+                settings.policy.allowed_write_paths = [tmpdir]
+                graph.call_llm = fake_reasoning_call
+                graph.tools_registry.get_tool = fake_get_tool
+                graph.tools_registry.get_all_tools_for_llm = lambda: []
+                graph.audit_logger.log = _noop_log
+                graph.record_tool_execution = _noop_record_tool_execution
+                graph.execute_tool = fake_execute_tool
+                graph.assess_impact = lambda *args, **kwargs: asyncio.sleep(0, result="测试删除影响评估")
+                graph.generate_structured_final_reply = fake_structured_final_reply
+                approval_module.approval_manager = AutoApprovalManager()
+
+                result = await graph.reasoning_node({
+                    "session_id": "cleanup-tmp-auto-approval",
+                    "incident_id": "",
+                    "user_message": "帮我清理系统的垃圾文件",
+                    "send_to_client": capture_event,
+                    "messages": [],
+                    "risk_warning": "",
+                    "knowledge_hint": "",
+                    "recent_changes_hint": "",
+                    "multimodal_hint": "",
+                    "multimodal_context": [],
+                })
+
+                assert result.get("is_blocked") is False
+                assert executed == [
+                    ("find_large_files", {"path": "/tmp", "min_size": "10M", "limit": 20}),
+                    ("delete_file", {"filepath": str(first)}),
+                    ("delete_file", {"filepath": str(second)}),
+                ]
+                approvals = [event for event in events if event.get("type") == "approval_request"]
+                assert len(approvals) == 2
+                assert all("delete_file" in event["command"] for event in approvals)
+                assert any(event.get("source") == "intent_policy_compiler" for event in events)
+                assert not first.exists()
+                assert not second.exists()
+            finally:
+                settings.policy.allowed_write_paths = old_allowed_paths
                 graph.assess_impact = original_assess_impact
                 approval_module.approval_manager = original_approval_manager
                 _restore_common(originals)

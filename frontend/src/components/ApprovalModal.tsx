@@ -6,7 +6,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import { useChatStore } from '../stores/chatStore'
-import type { OperationPreview } from '../stores/chatStore'
+import type { ChangePlan, OperationPreview } from '../stores/chatStore'
 import { summarizeOperation } from '../utils/operationSummary'
 
 const { Text, Paragraph } = Typography
@@ -20,10 +20,11 @@ interface ApprovalModalProps {
     description: string
     impact?: string
     rollback_strategy?: string
-	    supports_rollback?: boolean
-	    preview_strategy?: string
-	    preview?: OperationPreview
-	    policy?: Record<string, unknown>
+    supports_rollback?: boolean
+    preview_strategy?: string
+    preview?: OperationPreview
+    change_plan?: ChangePlan
+    policy?: Record<string, unknown>
     approval_level?: string
     execution_identity?: Record<string, unknown>
   } | null
@@ -111,6 +112,19 @@ function textValue(value: unknown, fallback = '-'): string {
 
 function textArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : []
+}
+
+function recordArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+    : []
+}
+
+function planRollbackLabel(plan?: ChangePlan): string {
+  const rollback = plan?.rollback || {}
+  const label = textValue(rollback.label, '')
+  if (label) return label
+  return rollback.supported ? rollbackLabel(textValue(rollback.strategy, '')) : '无可靠自动回滚'
 }
 
 function renderPreviewMetadata(preview?: OperationPreview): string {
@@ -247,22 +261,26 @@ function ApprovalModal({ visible, request, onClose }: ApprovalModalProps) {
   const policy = request.policy || {}
   const identity = request.execution_identity || policy.execution_identity as Record<string, unknown> | undefined || {}
   const matchedRules = textList(policy.matched_rules)
-	  const policyWarnings = textList(policy.warnings)
-	  const policyReasons = textList(policy.reasons)
-	  const policyAllowed = policy.allowed !== false
-	  const preview = request.preview
-	  const previewWarnings = textArray(preview?.warnings)
-	  const previewLimitations = textArray(preview?.limitations)
-	  const previewMetadata = renderPreviewMetadata(preview)
-	  const impactText = cleanedImpactText(request.impact, Boolean(preview))
-	  const addedContent = typeof metadataValue(preview, 'added_content') === 'string'
-	    ? String(metadataValue(preview, 'added_content'))
-	    : ''
-	  const proposedContent = typeof metadataValue(preview, 'proposed_content') === 'string'
-	    ? String(metadataValue(preview, 'proposed_content'))
-	    : ''
-	  const renderedDiffLines = diffLines(preview?.diff)
-	  const summaryItems = previewSummaryItems(preview)
+  const policyWarnings = textList(policy.warnings)
+  const policyReasons = textList(policy.reasons)
+  const policyAllowed = policy.allowed !== false
+  const preview = request.preview
+  const changePlan = request.change_plan
+  const planSteps = recordArray(changePlan?.steps)
+  const planRisks = recordArray(changePlan?.risks)
+  const planValidation = recordArray(changePlan?.validation)
+  const previewWarnings = textArray(preview?.warnings)
+  const previewLimitations = textArray(preview?.limitations)
+  const previewMetadata = renderPreviewMetadata(preview)
+  const impactText = cleanedImpactText(request.impact, Boolean(preview))
+  const addedContent = typeof metadataValue(preview, 'added_content') === 'string'
+    ? String(metadataValue(preview, 'added_content'))
+    : ''
+  const proposedContent = typeof metadataValue(preview, 'proposed_content') === 'string'
+    ? String(metadataValue(preview, 'proposed_content'))
+    : ''
+  const renderedDiffLines = diffLines(preview?.diff)
+  const summaryItems = previewSummaryItems(preview)
 
   return (
     <Modal
@@ -321,98 +339,147 @@ function ApprovalModal({ visible, request, onClose }: ApprovalModalProps) {
           <Descriptions.Item label="操作描述">
             <Text>{request.description}</Text>
           </Descriptions.Item>
-	          <Descriptions.Item label="预览/回滚">
-	            <Space direction="vertical" size={2}>
-	              <Text>预览：{previewLabel(preview?.preview_type || request.preview_strategy)}</Text>
-	              <Text>
+          <Descriptions.Item label="预览/回滚">
+            <Space direction="vertical" size={2}>
+              <Text>预览：{previewLabel(preview?.preview_type || request.preview_strategy)}</Text>
+              <Text>
                 回滚：{request.supports_rollback
                   ? `${rollbackLabel(request.rollback_strategy)}可用`
                   : '无可靠自动回滚'}
               </Text>
-	            </Space>
-	          </Descriptions.Item>
-	          {preview && (
-	            <Descriptions.Item label="审批前预览">
-	              <Space direction="vertical" size={10} style={{ width: '100%' }}>
-	                <div className="approval-preview-card">
-	                  <div className="approval-preview-head">
-	                    <Space wrap size={6}>
-	                      <Tag color={previewStatusColor(preview.status)}>
-	                        {previewStatusLabel(preview.status)}
-	                      </Tag>
-	                      <Tag color="blue">{previewTitle(preview)}</Tag>
-	                      {preview.target && <Tag color="default">{preview.target}</Tag>}
-	                    </Space>
-	                  </div>
-	                  <div className="approval-preview-grid">
-	                    {summaryItems.map((item) => (
-	                      <div key={item.label}>
-	                        <Text type="secondary">{item.label}</Text>
-	                        <div className="approval-preview-value" title={item.title}>
-	                          {item.value}
-	                        </div>
-	                      </div>
-	                    ))}
-	                  </div>
-	                </div>
-	                {addedContent && (
-	                  <div className="approval-preview-section">
-	                    <Text type="secondary">将追加</Text>
-	                    <pre className="approval-preview-snippet approval-preview-snippet-add">
-	                      {addedContent}
-	                    </pre>
-	                  </div>
-	                )}
-	                {!addedContent && proposedContent && (
-	                  <div className="approval-preview-section">
-	                    <Text type="secondary">计划内容</Text>
-	                    <pre className="approval-preview-snippet">
-	                      {proposedContent}
-	                    </pre>
-	                  </div>
-	                )}
-	                {previewWarnings.length > 0 && (
-	                  <Alert
-	                    type="warning"
-	                    showIcon
-	                    message={previewWarnings.slice(0, 3).join('；')}
-	                  />
-	                )}
-	                {previewLimitations.length > 0 && (
-	                  <Alert
-	                    type={preview.status === 'unavailable' ? 'error' : 'info'}
-	                    showIcon
-	                    message={previewLimitations.slice(0, 3).join('；')}
-	                  />
-	                )}
-	                {renderedDiffLines.length > 0 && (
-	                  <Collapse
-	                    size="small"
-	                    ghost
-	                    className="approval-preview-collapse"
-	                    items={[{
-	                      key: 'diff',
-	                      label: '查看完整差异',
-	                      children: (
-	                        <div className="approval-preview-diff">
-	                          {renderedDiffLines.map((line, index) => (
-	                            <div className={lineClassName(line.kind)} key={`${line.kind}-${index}`}>
-	                              {line.text}
-	                            </div>
-	                          ))}
-	                        </div>
-	                      ),
-	                    }]}
-	                  />
-	                )}
-	                {!preview.diff && previewMetadata && (
-	                  <pre className="approval-preview-snippet">
-	                    {previewMetadata}
-	                  </pre>
-	                )}
-	              </Space>
-	            </Descriptions.Item>
-	          )}
+            </Space>
+          </Descriptions.Item>
+          {changePlan && (
+            <Descriptions.Item label="变更计划">
+              <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                <div className="approval-change-plan">
+                  <div className="approval-change-plan-head">
+                    <Text strong>{textValue(changePlan.tool_display_name, summary.title)}</Text>
+                    <Tag color={changePlan.kind === 'runbook_step' ? 'purple' : 'blue'}>
+                      {changePlan.kind === 'runbook_step' ? 'Runbook 步骤' : 'Agent 操作'}
+                    </Tag>
+                  </div>
+                  <div className="approval-change-plan-grid">
+                    <div>
+                      <Text type="secondary">目标</Text>
+                      <div className="approval-preview-value">{textValue(changePlan.target, summary.target || '-')}</div>
+                    </div>
+                    <div>
+                      <Text type="secondary">审批状态</Text>
+                      <div className="approval-preview-value">{textValue(changePlan.approval?.status, 'pending')}</div>
+                    </div>
+                    <div>
+                      <Text type="secondary">回滚</Text>
+                      <div className="approval-preview-value">{planRollbackLabel(changePlan)}</div>
+                    </div>
+                    <div>
+                      <Text type="secondary">验证</Text>
+                      <div className="approval-preview-value">{planValidation.length ? `${planValidation.length} 项` : '-'}</div>
+                    </div>
+                  </div>
+                </div>
+                {planSteps.length > 0 && (
+                  <div className="approval-plan-list">
+                    {planSteps.slice(0, 4).map((step, index) => (
+                      <div className="approval-plan-item" key={`${textValue(step.tool_name, 'step')}-${index}`}>
+                        <Text strong>{textValue(step.title, `步骤 ${index + 1}`)}</Text>
+                        <Text type="secondary">{textValue(step.target, '')}</Text>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {planRisks.length > 0 && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message={planRisks.slice(0, 3).map((risk) => textValue(risk.title)).join('；')}
+                  />
+                )}
+              </Space>
+            </Descriptions.Item>
+          )}
+          {preview && (
+            <Descriptions.Item label="审批前预览">
+              <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                <div className="approval-preview-card">
+                  <div className="approval-preview-head">
+                    <Space wrap size={6}>
+                      <Tag color={previewStatusColor(preview.status)}>
+                        {previewStatusLabel(preview.status)}
+                      </Tag>
+                      <Tag color="blue">{previewTitle(preview)}</Tag>
+                      {preview.target && <Tag color="default">{preview.target}</Tag>}
+                    </Space>
+                  </div>
+                  <div className="approval-preview-grid">
+                    {summaryItems.map((item) => (
+                      <div key={item.label}>
+                        <Text type="secondary">{item.label}</Text>
+                        <div className="approval-preview-value" title={item.title}>
+                          {item.value}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                {addedContent && (
+                  <div className="approval-preview-section">
+                    <Text type="secondary">将追加</Text>
+                    <pre className="approval-preview-snippet approval-preview-snippet-add">
+                      {addedContent}
+                    </pre>
+                  </div>
+                )}
+                {!addedContent && proposedContent && (
+                  <div className="approval-preview-section">
+                    <Text type="secondary">计划内容</Text>
+                    <pre className="approval-preview-snippet">
+                      {proposedContent}
+                    </pre>
+                  </div>
+                )}
+                {previewWarnings.length > 0 && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message={previewWarnings.slice(0, 3).join('；')}
+                  />
+                )}
+                {previewLimitations.length > 0 && (
+                  <Alert
+                    type={preview.status === 'unavailable' ? 'error' : 'info'}
+                    showIcon
+                    message={previewLimitations.slice(0, 3).join('；')}
+                  />
+                )}
+                {renderedDiffLines.length > 0 && (
+                  <Collapse
+                    size="small"
+                    ghost
+                    className="approval-preview-collapse"
+                    items={[{
+                      key: 'diff',
+                      label: '查看完整差异',
+                      children: (
+                        <div className="approval-preview-diff">
+                          {renderedDiffLines.map((line, index) => (
+                            <div className={lineClassName(line.kind)} key={`${line.kind}-${index}`}>
+                              {line.text}
+                            </div>
+                          ))}
+                        </div>
+                      ),
+                    }]}
+                  />
+                )}
+                {!preview.diff && previewMetadata && (
+                  <pre className="approval-preview-snippet">
+                    {previewMetadata}
+                  </pre>
+                )}
+              </Space>
+            </Descriptions.Item>
+          )}
           <Descriptions.Item label="策略">
             <Space direction="vertical" size={2}>
               <Space wrap>
@@ -480,13 +547,13 @@ function ApprovalModal({ visible, request, onClose }: ApprovalModalProps) {
           </Text>
         </div>
 
-	        {impactText && (
-	          <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(97, 175, 239, 0.08)', borderRadius: 4, border: '1px solid rgba(97, 175, 239, 0.2)' }}>
-	            <Text style={{ fontSize: 12, color: 'var(--accent-blue)', whiteSpace: 'pre-line' }}>
-	              {impactText}
-	            </Text>
-	          </div>
-	        )}
+        {impactText && (
+          <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(97, 175, 239, 0.08)', borderRadius: 4, border: '1px solid rgba(97, 175, 239, 0.2)' }}>
+            <Text style={{ fontSize: 12, color: 'var(--accent-blue)', whiteSpace: 'pre-line' }}>
+              {impactText}
+            </Text>
+          </div>
+        )}
       </div>
     </Modal>
   )

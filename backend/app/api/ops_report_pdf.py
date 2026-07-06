@@ -27,24 +27,46 @@ def _register_font():
     global _font_registered, _font_name, _font_bold
     if _font_registered:
         return
-    font_paths = [
+    regular_candidates = [
+        "/usr/share/fonts/gb-cjk/国标宋体.ttf",
+        "/usr/share/fonts/google-droid-fonts/DroidSansFallback.ttf",
+        "/usr/share/fonts/google-droid-fonts/DroidSans.ttf",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttf",
     ]
-    for font_path in font_paths:
-        if Path(font_path).exists():
-            try:
-                pdfmetrics.registerFont(TTFont("CJK", font_path))
-                _font_name = "CJK"
-                _font_bold = "CJK"
-                _font_registered = True
-                return
-            except Exception:
-                continue
+    bold_candidates = [
+        "/usr/share/fonts/gb-cjk/国标黑体.ttf",
+        "/usr/share/fonts/gb-cjk/国标小标宋.ttf",
+        "/usr/share/fonts/google-droid-fonts/DroidSansFallback.ttf",
+        "/usr/share/fonts/gb-cjk/国标宋体.ttf",
+        "/usr/share/fonts/google-droid-fonts/DroidSans-Bold.ttf",
+        "C:/Windows/Fonts/msyhbd.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+    ]
+    regular = _first_supported_font(regular_candidates, "CJK")
+    if regular:
+        _font_name = regular
+        _font_bold = _first_supported_font(bold_candidates, "CJK-Bold") or regular
+        _font_registered = True
+        return
     _font_registered = True
+
+
+def _first_supported_font(paths: list[str], font_name: str) -> str:
+    for font_path in paths:
+        if not Path(font_path).exists():
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont(font_name, font_path))
+            return font_name
+        except Exception:
+            continue
+    return ""
 
 
 C_GREEN = colors.HexColor('#00d4aa')

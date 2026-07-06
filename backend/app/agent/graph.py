@@ -35,6 +35,8 @@ from app.agent.tool_executor import execute_tool, get_tools_for_llm
 from app.agent.tool_execution_store import (
     record_tool_execution,
 )
+from app.agent.change_plan import build_change_plan, change_plan_summary, mark_change_plan_rollback
+from app.agent.rollback_plan import effective_rollback_capability, prepare_rollback_point, rollback_summary
 from app.agent.tools_registry import tools_registry, RiskLevel
 from app.agent.execution_policy import evaluate_tool_policy, policy_summary
 from app.agent.operation_preview import build_operation_preview
@@ -454,11 +456,15 @@ async def reasoning_node(state: AgentState) -> dict:
         iteration += 1
         llm_response = await call_llm(messages, tools=all_tools)
 
-        if not llm_response["tool_calls"] and not policy_compiled_tool_used:
-            compiled_tool_call = _compile_deterministic_tool_call(user_message)
+        if not llm_response["tool_calls"]:
+            compiled_tool_call = _compile_cleanup_tool_call(user_message, tool_ledger_this_turn)
+            is_cleanup_compiled_tool = bool(compiled_tool_call)
+            if not compiled_tool_call and not policy_compiled_tool_used:
+                compiled_tool_call = _compile_deterministic_tool_call(user_message)
             if compiled_tool_call:
                 if _has_equivalent_tool_call(tool_ledger_this_turn, compiled_tool_call["name"], compiled_tool_call["arguments"]):
-                    policy_compiled_tool_used = True
+                    if not is_cleanup_compiled_tool:
+                        policy_compiled_tool_used = True
                     await send_to_client(trace_event(
                         phase="planning",
                         event_type="success",
@@ -479,7 +485,8 @@ async def reasoning_node(state: AgentState) -> dict:
                         ),
                     ))
                 else:
-                    policy_compiled_tool_used = True
+                    if not is_cleanup_compiled_tool:
+                        policy_compiled_tool_used = True
                     llm_response["tool_calls"] = [compiled_tool_call]
                     await send_to_client(trace_event(
                         phase="planning",
@@ -543,6 +550,45 @@ async def reasoning_node(state: AgentState) -> dict:
                     continue
 
                 display_name = tool_def.display_name or tool_name
+                if (
+                    tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE)
+                    and _has_equivalent_tool_call(tool_ledger_this_turn, tool_name, tool_args)
+                ):
+                    duplicate_message = (
+                        f"本轮已处理过相同的 {display_name} 请求，"
+                        "跳过重复审批和重复执行。"
+                    )
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [
+                        {"id": call_id, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)}}
+                    ]})
+                    messages.append({"role": "tool", "tool_call_id": call_id, "content": f"SKIPPED_DUPLICATE: {duplicate_message}"})
+                    tool_ledger_this_turn.append(make_tool_ledger_entry(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        risk_level=tool_def.risk_level.value,
+                        status="skipped_duplicate",
+                        result={"success": False, "data": "", "error": duplicate_message},
+                        error=duplicate_message,
+                        execution_state="skipped",
+                        approval_granted=False,
+                    ))
+                    await send_to_client(trace_event(
+                        phase="tool_call",
+                        event_type="success",
+                        content=duplicate_message,
+                        evidence=build_evidence(
+                            claim=f"{display_name} 重复请求已跳过",
+                            evidence_type="command",
+                            source="duplicate_tool_guard",
+                            observed={"tool_name": tool_name, "tool_args": tool_args},
+                            confidence="high",
+                            execution_state="skipped",
+                            next_check="请查看本轮第一次相同工具调用的执行结果。",
+                        ),
+                    ))
+                    continue
+
                 if _is_read_only_intent(user_message) and tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
                     block_reason = (
                         "用户本轮请求是只读查询，不能执行会改变系统状态的操作。"
@@ -631,6 +677,7 @@ async def reasoning_node(state: AgentState) -> dict:
                 await audit_logger.log(session_id, AuditPhase.TOOL_CALL, AuditEventType.START, f"工具调用: {tool_name}", {"args": tool_args})
 
                 # Approval for write operations
+                change_plan = None
                 if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
                     cmd_check = _guardrail.check_command(json.dumps(tool_args))
                     if not cmd_check.is_safe:
@@ -750,6 +797,15 @@ async def reasoning_node(state: AgentState) -> dict:
                     loop = _asyncio.get_running_loop()
                     approval_future = loop.create_future()
                     supports_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
+                    change_plan = build_change_plan(
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        tool_def=tool_def,
+                        preview=preview,
+                        policy=policy_decision.to_dict(),
+                        approval_status="pending",
+                        approval_request_id=request_id,
+                    )
                     try:
                         approval_manager.register_pending(
                             request_id,
@@ -764,6 +820,7 @@ async def reasoning_node(state: AgentState) -> dict:
                             supports_rollback=supports_rollback,
                             preview_strategy=tool_def.preview_strategy,
                             preview=preview,
+                            change_plan=change_plan,
                             policy=policy_decision.to_dict(),
                             approval_level=policy_decision.approval_level,
                             execution_identity=policy_decision.execution_identity,
@@ -789,6 +846,7 @@ async def reasoning_node(state: AgentState) -> dict:
                         "supports_rollback": supports_rollback,
                         "preview_strategy": tool_def.preview_strategy,
                         "preview": preview,
+                        "change_plan": change_plan,
                         "policy": policy_decision.to_dict(),
                         "approval_level": policy_decision.approval_level,
                         "execution_identity": policy_decision.execution_identity,
@@ -805,6 +863,7 @@ async def reasoning_node(state: AgentState) -> dict:
                                 "impact": impact_text or tool_args,
                                 "policy": policy_decision.to_dict(),
                                 "preview": preview,
+                                "change_plan": change_plan,
                             },
                             confidence="high",
                             execution_state="skipped",
@@ -888,30 +947,29 @@ async def reasoning_node(state: AgentState) -> dict:
 
                 # Execute tool
                 try:
-                    # Backup before write
-                    backup_record = None
+                    # Prepare rollback point before write
+                    rollback_record = None
                     before_change_state = None
                     if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
-                        from app.mcp_tools.backup import backup_manager
-                        target_path = tool_args.get("filepath") or tool_args.get("path") or tool_args.get("service")
                         can_backup_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
-                        if can_backup_rollback and rollback_strategy == "backup" and target_path and isinstance(target_path, str):
-                            backup_record = backup_manager.backup_file(target_path, operation=f"{tool_name}")
-                            if backup_record:
+                        if can_backup_rollback:
+                            rollback_record = prepare_rollback_point(tool_name, tool_args)
+                            mark_change_plan_rollback(change_plan, rollback_record)
+                            if rollback_record:
                                 await send_to_client(trace_event(
                                     phase="execution",
                                     event_type="start",
-                                    content=f"已创建回滚备份：{target_path}",
+                                    content=f"已创建回滚点：{rollback_summary(rollback_record)}\n{change_plan_summary(change_plan)}",
                                     evidence=build_evidence(
-                                        claim=f"{display_name} 执行前已创建回滚备份",
+                                        claim=f"{display_name} 执行前已创建回滚点",
                                         evidence_type="config",
-                                        source="BackupManager.backup_file",
-                                        observed=target_path,
+                                        source="rollback_plan.prepare_rollback_point",
+                                        observed={"rollback": rollback_record, "change_plan": change_plan},
                                         confidence="high",
                                         execution_state="executed",
                                     ),
                                 ))
-                        before_change_state = _capture_pre_change_state(tool_name, tool_args, backup_record)
+                        before_change_state = _capture_pre_change_state(tool_name, tool_args, rollback_record)
 
                     current_turn_tool_count += 1
                     result = await execute_tool(tool_name, tool_args, tool_def)
@@ -964,7 +1022,7 @@ async def reasoning_node(state: AgentState) -> dict:
                             ))
 
                         # Before/After change diff
-                        change_diff = _capture_change_diff(tool_name, tool_args, backup_record, before_change_state)
+                        change_diff = _capture_change_diff(tool_name, tool_args, rollback_record, before_change_state)
                         if change_diff:
                             await send_to_client(trace_event(
                                 phase="verification",
@@ -979,23 +1037,23 @@ async def reasoning_node(state: AgentState) -> dict:
                             ))
 
                     if result_success:
-                        if backup_record:
+                        if rollback_record:
                             await send_to_client(trace_event(
                                 phase="execution",
                                 event_type="success",
                                 content=(
                                     "已创建回滚点：\n"
-                                    f"- 回滚ID：{backup_record.get('id')}\n"
-                                    f"- 目标：{backup_record.get('original_path')}\n"
-                                    "- 策略：备份回滚\n"
-                                    f"- 创建时间：{backup_record.get('timestamp')}\n"
+                                    f"- 回滚ID：{rollback_record.get('id')}\n"
+                                    f"- 目标：{rollback_record.get('original_path')}\n"
+                                    f"- 策略：{rollback_summary(rollback_record).split('，')[0]}\n"
+                                    f"- 创建时间：{rollback_record.get('timestamp')}\n"
                                     "- 恢复方式：使用 rollback_backup 或 /api/backups/{id}/rollback"
                                 ),
                                 evidence=build_evidence(
                                     claim=f"{display_name} 已创建可用回滚点",
                                     evidence_type="config",
-                                    source="BackupManager.backup_file",
-                                    observed=backup_record,
+                                    source="rollback_plan.prepare_rollback_point",
+                                    observed=rollback_record,
                                     confidence="high",
                                     execution_state="executed",
                                 ),
@@ -2291,12 +2349,93 @@ def _compile_deterministic_tool_call(user_message: str) -> dict | None:
     return None
 
 
+def _compile_cleanup_tool_call(user_message: str, tool_ledger: list[dict]) -> dict | None:
+    """Advance explicit cleanup requests from read-only discovery to approval."""
+    if not _is_cleanup_execution_intent(user_message):
+        return None
+
+    for filepath in _tmp_cleanup_candidates_from_ledger(tool_ledger):
+        tool_args = {"filepath": filepath}
+        if not _has_equivalent_tool_call(tool_ledger, "delete_file", tool_args):
+            return _tool_call("delete_file", tool_args)
+    return None
+
+
+def _is_cleanup_execution_intent(text: str) -> bool:
+    if not text:
+        return False
+    normalized = text.strip()
+    if _is_history_recall_intent(normalized):
+        return False
+    return _matches_any(normalized, (
+        r"(帮我|请|执行|开始|给我|立即|现在|麻烦)?.{0,20}(清理|删除|移除).{0,30}(垃圾|临时|缓存|tmp|/tmp|无用|大文件)",
+        r"\b(clean|cleanup|delete|remove)\b.{0,40}\b(junk|garbage|temp|tmp|cache|large files?)\b",
+    ))
+
+
+def _tmp_cleanup_candidates_from_ledger(tool_ledger: list[dict]) -> list[str]:
+    candidates: list[str] = []
+    for item in tool_ledger:
+        if item.get("tool_name") != "find_large_files" or item.get("status") != "success":
+            continue
+        tool_args = item.get("tool_args") if isinstance(item.get("tool_args"), dict) else {}
+        search_path = str(tool_args.get("path") or "")
+        if search_path and not (search_path == "/tmp" or search_path.startswith("/tmp/")):
+            continue
+        for line in _extract_find_large_file_lines(item):
+            filepath = _extract_tmp_file_path_from_find_line(line)
+            if filepath and filepath not in candidates:
+                candidates.append(filepath)
+            if len(candidates) >= 3:
+                return candidates
+    return candidates
+
+
+def _extract_find_large_file_lines(item: dict) -> list[str]:
+    summary = item.get("result_summary") or ""
+    if not isinstance(summary, str) or not summary:
+        return []
+    try:
+        data = json.loads(summary)
+    except json.JSONDecodeError:
+        data = None
+    files = data.get("files") if isinstance(data, dict) else None
+    if isinstance(files, list):
+        return [str(line) for line in files]
+    return re.findall(r"/tmp/[^\s`'\"，。；;,)\]}]+", summary)
+
+
+def _extract_tmp_file_path_from_find_line(line: str) -> str:
+    match = re.search(r"(/tmp/[^\s`'\"，。；;,)\]}]+)$", str(line).strip())
+    if not match:
+        return ""
+    filepath = match.group(1).rstrip(".,，。；;")
+    if not _is_safe_tmp_cleanup_file(filepath):
+        return ""
+    return filepath
+
+
+def _is_safe_tmp_cleanup_file(filepath: str) -> bool:
+    if not filepath.startswith("/tmp/") or filepath in {"/tmp", "/tmp/"}:
+        return False
+    if any(token in filepath for token in ("*", "?", "[", "]", "{", "}", "\x00")):
+        return False
+    path = Path(filepath)
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        return False
+    if not str(resolved).startswith("/tmp/"):
+        return False
+    return path.exists() and path.is_file()
+
+
 def _has_equivalent_tool_call(tool_ledger: list[dict], tool_name: str, tool_args: dict) -> bool:
     """Return True when this turn already handled the same effective tool call."""
     for item in tool_ledger:
         if item.get("tool_name") != tool_name:
             continue
-        if item.get("status") not in {"success", "rejected", "blocked"}:
+        if item.get("status") not in {"success", "failure", "rejected", "blocked", "skipped_duplicate"}:
             continue
         if _canonical_tool_args(tool_name, item.get("tool_args") or {}) == _canonical_tool_args(tool_name, tool_args):
             return True
@@ -2310,6 +2449,8 @@ def _canonical_tool_args(tool_name: str, tool_args: dict) -> dict:
             "content": str(tool_args.get("content") or ""),
             "append": bool(tool_args.get("append", False)),
         }
+    if tool_name == "rollback_backup":
+        return {"backup_id": _canonical_backup_id(tool_args.get("backup_id"))}
     if tool_name == "create_directory":
         return {
             "dirpath": str(tool_args.get("dirpath") or ""),
@@ -2318,6 +2459,10 @@ def _canonical_tool_args(tool_name: str, tool_args: dict) -> dict:
             "mode": str(tool_args.get("mode") or "755"),
         }
     return tool_args
+
+
+def _canonical_backup_id(value: object) -> str:
+    return re.sub(r"[^0-9A-Za-z]", "", str(value or ""))
 
 
 def _is_noop_create_directory(tool_name: str, tool_args: dict) -> bool:
@@ -2675,36 +2820,7 @@ def _rollback_strategy_label(strategy: str) -> str:
 
 def _effective_rollback_capability(tool_name: str, tool_args: dict, tool_def) -> tuple[bool, str]:
     """Return rollback capability that can be truthfully claimed before approval."""
-    if not tool_def or not tool_def.supports_rollback:
-        return False, "none"
-
-    if tool_def.rollback_strategy in {"service_state", "snapshot_restore"}:
-        return True, tool_def.rollback_strategy
-
-    if tool_def.rollback_strategy != "backup":
-        return False, "none"
-
-    path_value = tool_args.get("filepath") or tool_args.get("path")
-    if tool_name == "create_file":
-        if not tool_args.get("overwrite") or not path_value:
-            return False, "none"
-        from pathlib import Path
-
-        path = Path(str(path_value))
-        if path.exists() and path.is_file():
-            return True, tool_def.rollback_strategy
-        return False, "none"
-
-    if tool_name in {"write_file", "delete_file", "change_permissions"} and path_value:
-        from pathlib import Path
-
-        path = Path(str(path_value))
-        if path.exists() and path.is_file():
-            return True, tool_def.rollback_strategy
-        return False, "none"
-
-    # No complete inverse action or reliable directory/ownership restore exists yet.
-    return False, "none"
+    return effective_rollback_capability(tool_name, tool_args, tool_def)
 
 
 async def assess_impact(tool_name: str, tool_args: dict, session_id: str, send_to_client) -> str | None:

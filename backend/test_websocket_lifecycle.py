@@ -112,6 +112,7 @@ def test_reconnect_snapshot_replays_running_state_and_approval() -> None:
                 "Start service",
                 future,
                 preview={"status": "partial", "preview_type": "impact_only", "target": "service"},
+                change_plan={"tool_name": "start_service", "approval": {"status": "pending"}},
             )
 
             await gateway._send_runtime_snapshot(ws, session_id, state)
@@ -121,6 +122,7 @@ def test_reconnect_snapshot_replays_running_state_and_approval() -> None:
             assert approvals
             assert approvals[0]["request_id"] == "approval-2"
             assert approvals[0]["preview"]["target"] == "service"
+            assert approvals[0]["change_plan"]["tool_name"] == "start_service"
         finally:
             task.cancel()
             approval_manager.cancel_all(session_id)

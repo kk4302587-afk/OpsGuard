@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import aiosqlite
@@ -20,7 +21,19 @@ from app.agent.runbook_governance import (
     validate_runbook,
 )
 from app.agent.tools_registry import RiskLevel, ToolDefinition
+from app.config import settings
+from app.mcp_tools import backup
 from app.mcp_tools.process_tools import ToolResult
+
+
+@contextmanager
+def _runbook_hybrid_disabled():
+    old_value = runbook_executor.settings.runbook.hybrid_final_summary
+    runbook_executor.settings.runbook.hybrid_final_summary = False
+    try:
+        yield
+    finally:
+        runbook_executor.settings.runbook.hybrid_final_summary = old_value
 
 
 async def _create_legacy_runbook(db_path: str, runbook_id: str, steps: list[dict]) -> None:
@@ -157,7 +170,8 @@ def test_executor_updates_governance_stats() -> None:
                 runbook_executor.get_knowledge_db_path = lambda: db_path
                 runbook_executor.tools_registry.get_tool = fake_get_tool
                 runbook_executor.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
-                summary = await runbook_executor.execute_runbook("session-exec", "rb-exec", capture_event)
+                with _runbook_hybrid_disabled():
+                    summary = await runbook_executor.execute_runbook("session-exec", "rb-exec", capture_event)
             finally:
                 runbook_executor.get_knowledge_db_path = original_get_path
                 runbook_executor.tools_registry.get_tool = original_get_tool
@@ -252,12 +266,13 @@ def test_executor_renders_template_steps_before_execution() -> None:
                 runbook_executor.tools_registry.get_tool = fake_get_tool
                 runbook_executor.execute_tool = fake_execute_tool
                 runbook_executor.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
-                summary = await runbook_executor.execute_runbook(
-                    "session-template",
-                    "rb-template",
-                    capture_event,
-                    user_message=f"读取 {target} 的内容",
-                )
+                with _runbook_hybrid_disabled():
+                    summary = await runbook_executor.execute_runbook(
+                        "session-template",
+                        "rb-template",
+                        capture_event,
+                        user_message=f"读取 {target} 的内容",
+                    )
             finally:
                 runbook_executor.get_knowledge_db_path = original_get_path
                 runbook_executor.tools_registry.get_tool = original_get_tool
@@ -381,7 +396,8 @@ def test_executor_runs_named_failure_branch() -> None:
                 runbook_executor.tools_registry.get_tool = fake_get_tool
                 runbook_executor.execute_tool = fake_execute_tool
                 runbook_executor.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
-                summary = await runbook_executor.execute_runbook("session-branch", "rb-branch", capture_event)
+                with _runbook_hybrid_disabled():
+                    summary = await runbook_executor.execute_runbook("session-branch", "rb-branch", capture_event)
             finally:
                 runbook_executor.get_knowledge_db_path = original_get_path
                 runbook_executor.tools_registry.get_tool = original_get_tool
@@ -453,7 +469,8 @@ def test_executor_treats_invalid_validation_result_as_branch_failure() -> None:
                 runbook_executor.tools_registry.get_tool = fake_get_tool
                 runbook_executor.execute_tool = fake_execute_tool
                 runbook_executor.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
-                summary = await runbook_executor.execute_runbook("session-invalid-config", "rb-invalid-config", capture_event)
+                with _runbook_hybrid_disabled():
+                    summary = await runbook_executor.execute_runbook("session-invalid-config", "rb-invalid-config", capture_event)
             finally:
                 runbook_executor.get_knowledge_db_path = original_get_path
                 runbook_executor.tools_registry.get_tool = original_get_tool
@@ -468,6 +485,92 @@ def test_executor_treats_invalid_validation_result_as_branch_failure() -> None:
     asyncio.run(scenario())
 
 
+def test_executor_write_step_uses_structured_plan_and_rollback_point() -> None:
+    async def scenario() -> None:
+        events: list[dict] = []
+        original_get_path = runbook_executor.get_knowledge_db_path
+        original_get_tool = runbook_executor.tools_registry.get_tool
+        original_execute = runbook_executor.execute_tool
+        original_log = runbook_executor.audit_logger.log
+        original_register = runbook_executor.approval_manager.register_pending
+        original_remove = runbook_executor.approval_manager.remove_pending
+        original_backup_dir = backup.backup_manager._backup_dir
+        original_manifest_path = backup.backup_manager._manifest_path
+        original_manifest = list(backup.backup_manager._manifest)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backup.backup_manager._backup_dir = Path(tmpdir) / "backups"
+            backup.backup_manager._backup_dir.mkdir(parents=True, exist_ok=True)
+            backup.backup_manager._manifest_path = backup.backup_manager._backup_dir / "manifest.json"
+            backup.backup_manager._manifest = []
+            old_allowed_paths = list(settings.policy.allowed_write_paths)
+            settings.policy.allowed_write_paths = [tmpdir]
+
+            db_path = str(Path(tmpdir) / "knowledge.db")
+            target = Path(tmpdir) / "app.conf"
+            target.write_text("before\n", encoding="utf-8")
+            steps = [{"tool_name": "write_file", "tool_args": {"filepath": str(target), "content": "after\n", "append": False}}]
+            await _create_legacy_runbook(db_path, "rb-write", steps)
+
+            def fake_get_tool(name: str):
+                if name == "write_file":
+                    return ToolDefinition(
+                        name=name,
+                        description="write",
+                        parameters={"type": "object", "properties": {}},
+                        function=lambda **kwargs: ToolResult(success=True, data="not used"),
+                        risk_level=RiskLevel.WRITE,
+                        category="file",
+                        display_name="写入文件",
+                        supports_preview=True,
+                        preview_strategy="diff",
+                        supports_rollback=True,
+                        rollback_strategy="backup",
+                    )
+                return None
+
+            async def fake_execute_tool(tool_name, tool_args, tool_def=None):
+                target.write_text(tool_args["content"], encoding="utf-8")
+                return ToolResult(success=True, data="written")
+
+            def auto_register(request_id, session_id, tool_name, tool_args, risk_level, description, future, **kwargs):
+                assert kwargs["change_plan"]["tool_name"] == "write_file"
+                assert kwargs["change_plan"]["rollback"]["supported"] is True
+                future.set_result(True)
+
+            async def capture_event(event: dict) -> None:
+                events.append(event)
+
+            try:
+                runbook_executor.get_knowledge_db_path = lambda: db_path
+                runbook_executor.tools_registry.get_tool = fake_get_tool
+                runbook_executor.execute_tool = fake_execute_tool
+                runbook_executor.audit_logger.log = lambda *args, **kwargs: asyncio.sleep(0)
+                runbook_executor.approval_manager.register_pending = auto_register
+                runbook_executor.approval_manager.remove_pending = lambda request_id: None
+                with _runbook_hybrid_disabled():
+                    summary = await runbook_executor.execute_runbook("session-write", "rb-write", capture_event)
+            finally:
+                runbook_executor.get_knowledge_db_path = original_get_path
+                runbook_executor.tools_registry.get_tool = original_get_tool
+                runbook_executor.execute_tool = original_execute
+                runbook_executor.audit_logger.log = original_log
+                runbook_executor.approval_manager.register_pending = original_register
+                runbook_executor.approval_manager.remove_pending = original_remove
+                backup.backup_manager._backup_dir = original_backup_dir
+                backup.backup_manager._manifest_path = original_manifest_path
+                backup.backup_manager._manifest = original_manifest
+                settings.policy.allowed_write_paths = old_allowed_paths
+
+            assert "执行概览" in summary
+            assert target.read_text(encoding="utf-8") == "after\n"
+            approvals = [event for event in events if event.get("type") == "approval_request"]
+            assert approvals and approvals[0]["change_plan"]["kind"] == "runbook_step"
+            assert any(event.get("source") == "rollback_plan.prepare_rollback_point" for event in events)
+
+    asyncio.run(scenario())
+
+
 def main() -> None:
     test_schema_versioning_and_bookkeeping()
     test_staleness_and_validation_are_truthful()
@@ -477,6 +580,7 @@ def main() -> None:
     test_preflight_executes_readonly_preconditions()
     test_executor_runs_named_failure_branch()
     test_executor_treats_invalid_validation_result_as_branch_failure()
+    test_executor_write_step_uses_structured_plan_and_rollback_point()
     print("runbook governance regression OK")
 
 

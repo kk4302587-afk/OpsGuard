@@ -7,7 +7,7 @@ Message protocol:
     {type: "runbook_decision", decision, original_message?}
                                                         "execute" or "dismiss" the
                                                         last suggested runbook
-    {type: "run_runbook", runbook_id}                   direct execute from Runbook UI
+    {type: "run_runbook", runbook_id, runbook_name?}    direct execute from Runbook UI
     {type: "ping"}                                      heartbeat
 
   Server → Client:
@@ -173,6 +173,7 @@ async def _send_runtime_snapshot(websocket: WebSocket, session_id: str, state: d
             "supports_rollback": request.supports_rollback,
             "preview_strategy": request.preview_strategy,
             "preview": request.preview,
+            "change_plan": request.change_plan,
             "policy": request.policy,
             "approval_level": request.approval_level,
             "execution_identity": request.execution_identity,
@@ -334,10 +335,12 @@ async def handle_run_runbook(session_id: str, message: dict):
     if not runbook_id:
         await _send_to_session(session_id, {"type": "error", "content": "缺少 runbook_id"})
         return
+    runbook_name = str(message.get("runbook_name") or runbook_id)
     await _replay_runbook(
         session_id,
         runbook_id=runbook_id,
         origin="direct",
+        original_message=f"执行 Runbook「{runbook_name}」",
     )
 
 
@@ -524,10 +527,19 @@ async def _load_attachment_recognition(attachment_ids: list[str]) -> list[dict]:
             parsed = {}
         if not isinstance(parsed, dict):
             parsed = {}
-        input_type = parsed.get("input_type") or row["input_type"]
+        original_input_type = parsed.get("input_type")
+        input_type = row["input_type"] or original_input_type
         if input_type not in {"image", "audio"}:
             continue
         parsed["input_type"] = input_type
+        if (
+            input_type == "image"
+            and isinstance(original_input_type, str)
+            and original_input_type not in {"", "image"}
+            and (not parsed.get("image_category") or parsed.get("image_category") == "unknown")
+        ):
+            parsed["image_category"] = original_input_type
+        parsed["extracted_text"] = _coerce_text_field(parsed.get("extracted_text"))
         parsed["attachment_id"] = row["id"]
         parsed.setdefault("attachment", {
             "id": row["id"],
@@ -537,6 +549,12 @@ async def _load_attachment_recognition(attachment_ids: list[str]) -> list[dict]:
         })
         items.append(parsed)
     return items
+
+
+def _coerce_text_field(value) -> str:
+    if isinstance(value, list):
+        return "\n".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
 
 
 def _coerce_attachment_refs(value) -> list[dict]:

@@ -34,6 +34,7 @@ class ApprovalRequest:
     supports_rollback: bool = False
     preview_strategy: str = "none"
     preview: dict = field(default_factory=dict)
+    change_plan: dict = field(default_factory=dict)
     policy: dict = field(default_factory=dict)
     approval_level: str = "standard"
     execution_identity: dict = field(default_factory=dict)
@@ -70,6 +71,7 @@ class ApprovalManager:
         supports_rollback: bool = False,
         preview_strategy: str = "none",
         preview: dict | None = None,
+        change_plan: dict | None = None,
         policy: dict | None = None,
         approval_level: str = "standard",
         execution_identity: dict | None = None,
@@ -91,6 +93,7 @@ class ApprovalManager:
             supports_rollback=supports_rollback,
             preview_strategy=preview_strategy,
             preview=preview or {},
+            change_plan=change_plan or {},
             policy=policy or {},
             approval_level=approval_level,
             execution_identity=execution_identity or {},

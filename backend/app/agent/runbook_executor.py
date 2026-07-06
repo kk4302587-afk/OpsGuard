@@ -16,6 +16,7 @@ which runbook to suggest; once the user confirms, this module does the work.
 
 import asyncio
 import json
+import re
 import uuid
 from typing import Callable
 
@@ -23,18 +24,23 @@ import aiosqlite
 from loguru import logger
 
 from app.agent.tool_executor import execute_tool
+from app.agent.tool_execution_store import record_tool_execution
 from app.agent.tools_registry import tools_registry, RiskLevel
 from app.agent.runbook_governance import ensure_runbook_schema, record_runbook_result
 from app.agent.runbook_preflight import preflight_runbook
 from app.agent.runbook_governance import serialize_runbook
 from app.agent.execution_policy import evaluate_tool_policy, policy_summary
 from app.agent.operation_preview import build_operation_preview
+from app.agent.change_plan import build_change_plan, change_plan_summary, mark_change_plan_rollback
+from app.agent.rollback_plan import effective_rollback_capability, prepare_rollback_point, rollback_summary
+from app.agent.llm import call_llm
 from app.agent.trace_evidence import (
     build_evidence,
     trace_event,
     verification_evidence,
 )
 from app.audit.logger import audit_logger, AuditPhase, AuditEventType
+from app.config import settings
 from app.database import get_knowledge_db_path
 from app.incidents import store as incident_store
 from app.safety.guardrail import SafetyGuardrail
@@ -286,6 +292,220 @@ def _summarize_result(tool_name: str, result_repr) -> str:
     return _preview_text(data)
 
 
+def _extract_service_status(data, service: str = "") -> dict[str, str]:
+    """Extract the service state from common service-status result shapes."""
+    status = {
+        "service": service,
+        "active": "",
+        "substate": "",
+        "loaded": "",
+        "unit_file_state": "",
+    }
+    if isinstance(data, dict):
+        status["service"] = str(data.get("service") or data.get("name") or service)
+        for key in ("active", "ActiveState", "active_state", "status"):
+            value = data.get(key)
+            if value not in (None, ""):
+                status["active"] = str(value)
+                break
+        for key in ("substate", "SubState", "sub_state"):
+            value = data.get(key)
+            if value not in (None, ""):
+                status["substate"] = str(value)
+                break
+        for key in ("loaded", "LoadState", "load_state"):
+            value = data.get(key)
+            if value not in (None, ""):
+                status["loaded"] = str(value)
+                break
+        for key in ("unit_file_state", "UnitFileState", "enabled"):
+            value = data.get(key)
+            if value not in (None, ""):
+                status["unit_file_state"] = str(value)
+                break
+        return status
+
+    text = str(data or "")
+    loaded_match = re.search(r"Loaded:\s*([A-Za-z-]+)(?:\s+\(([^)]*)\))?", text, re.IGNORECASE)
+    active_match = re.search(r"Active:\s*([A-Za-z-]+)(?:\s+\(([^)]+)\))?", text, re.IGNORECASE)
+    if loaded_match:
+        status["loaded"] = loaded_match.group(1).strip()
+        if loaded_match.group(2):
+            for part in (item.strip() for item in loaded_match.group(2).split(";")):
+                if part in {"enabled", "disabled", "static", "masked", "indirect", "generated"}:
+                    status["unit_file_state"] = part
+                    break
+    if active_match:
+        status["active"] = active_match.group(1).strip()
+        if active_match.group(2):
+            status["substate"] = active_match.group(2).strip()
+    return status
+
+
+def _service_status_label(status: dict[str, str]) -> str:
+    active = (status.get("active") or "").lower()
+    substate = (status.get("substate") or "").lower()
+    if active in {"active", "running"} or substate == "running":
+        return "运行中"
+    if active in {"inactive", "dead"} or substate == "dead":
+        return "未运行"
+    if active in {"failed", "error"}:
+        return "异常"
+    if active in {"activating", "deactivating", "reloading"}:
+        return "状态切换中"
+    return "未知"
+
+
+def _service_status_detail(status: dict[str, str]) -> str:
+    parts = []
+    active = status.get("active") or ""
+    substate = status.get("substate") or ""
+    loaded = status.get("loaded") or ""
+    unit_file_state = status.get("unit_file_state") or ""
+    if active:
+        detail = active
+        if substate:
+            detail += f" ({substate})"
+        parts.append(f"Active={detail}")
+    if loaded:
+        parts.append(f"Loaded={loaded}")
+    if unit_file_state:
+        parts.append(f"开机状态={unit_file_state}")
+    return "，".join(parts) if parts else "未解析到 systemd 状态字段"
+
+
+def _key_findings(executed: list[dict]) -> list[str]:
+    findings: list[str] = []
+    for item in executed:
+        if not item.get("success"):
+            continue
+        if item.get("tool") == "get_service_status":
+            status = item.get("service_status") or {}
+            service = status.get("service") or item.get("target") or "服务"
+            findings.append(
+                f"{service} 当前状态：{_service_status_label(status)}（{_service_status_detail(status)}）"
+            )
+        elif item.get("tool") == "health_check":
+            findings.append(f"系统健康检查：{item.get('summary')}")
+        elif item.get("tool") in {"get_disk_usage", "get_inode_usage"}:
+            findings.append(f"{item.get('action')}：{item.get('summary')}")
+        elif item.get("tool") == "find_large_files":
+            findings.append(f"大文件检查：{item.get('summary')}")
+    return findings
+
+
+def _runbook_ledger(runbook_name: str, plan_steps: list[dict], executed: list[dict]) -> dict:
+    """Build a compact evidence ledger for LLM-only report polishing."""
+    return {
+        "runbook": runbook_name,
+        "step_count": len(plan_steps),
+        "success_count": sum(1 for item in executed if item.get("success")),
+        "read_steps": sum(1 for step in plan_steps if step.get("risk_level") == RiskLevel.READ),
+        "write_steps": sum(1 for step in plan_steps if step.get("risk_level") == RiskLevel.WRITE),
+        "destructive_steps": sum(1 for step in plan_steps if step.get("risk_level") == RiskLevel.DESTRUCTIVE),
+        "key_findings": _key_findings(executed),
+        "executed_steps": [
+            {
+                "step": item.get("step"),
+                "tool": item.get("tool"),
+                "display_name": item.get("display_name"),
+                "action": item.get("action"),
+                "risk": item.get("risk"),
+                "success": bool(item.get("success")),
+                "summary": item.get("summary"),
+                "target": item.get("target"),
+                "service_status": item.get("service_status"),
+            }
+            for item in executed
+        ],
+    }
+
+
+async def _hybrid_final_summary(
+    *,
+    runbook_name: str,
+    plan_steps: list[dict],
+    executed: list[dict],
+    failed_step: int | None,
+    abort_reason: str | None,
+    deterministic_summary: str,
+) -> str:
+    """Ask the LLM to polish the final report without changing execution facts."""
+    if not settings.runbook.hybrid_final_summary:
+        return deterministic_summary
+
+    ledger = _runbook_ledger(runbook_name, plan_steps, executed)
+    failed_text = "无" if failed_step is None else f"步骤 {failed_step}: {abort_reason or '未知'}"
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是 OpsGuard Runbook 执行报告润色器。只能基于用户提供的 JSON 证据和确定性摘要写最终回复。\n"
+                "禁止新增工具、禁止声称执行了 evidence 中没有的操作、禁止编造当前状态。\n"
+                "输出中文 Markdown，结构固定为：**结论**、**关键结论**、**执行概览**、**执行明细**、**下一步建议**。\n"
+                "对服务状态要一眼可见，例如 nginx 当前状态：运行中/未运行/异常，并保留 Active/Loaded 关键字段。\n"
+                "如果只有只读步骤，必须明确本次未修改系统。不要输出 JSON。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Runbook 名称：{runbook_name}\n"
+                f"失败信息：{failed_text}\n\n"
+                f"确定性摘要（可作为兜底格式）：\n{deterministic_summary}\n\n"
+                f"唯一可信执行证据 JSON：\n{json.dumps(ledger, ensure_ascii=False, default=str)}"
+            ),
+        },
+    ]
+
+    try:
+        response = await call_llm(messages, tools=None)
+        polished = (response.get("content") or "").strip()
+        validation_error = _validate_hybrid_summary(polished, runbook_name, ledger, deterministic_summary)
+        if validation_error:
+            logger.warning(f"Runbook hybrid summary rejected: {validation_error}")
+            return deterministic_summary
+        return polished
+    except Exception as e:
+        logger.warning(f"Runbook hybrid summary failed; falling back to deterministic summary: {e}")
+        return deterministic_summary
+
+
+def _validate_hybrid_summary(markdown: str, runbook_name: str, ledger: dict, deterministic_summary: str) -> str:
+    if not markdown:
+        return "empty response"
+    if len(markdown) > 5000:
+        return "response too long"
+    if runbook_name not in markdown:
+        return "missing runbook name"
+    if "**结论**" not in markdown:
+        return "missing conclusion section"
+    if "执行概览" not in markdown:
+        return "missing execution overview"
+    if ledger.get("key_findings") and "关键结论" not in markdown:
+        return "missing key findings section"
+    forbidden_markers = [
+        "我已重启",
+        "已重启服务",
+        "已启动服务",
+        "已停止服务",
+        "已删除",
+        "已清理",
+        "已修改",
+    ]
+    has_successful_write = any(
+        item.get("success") and item.get("risk") in {"写操作", "破坏性操作"}
+        for item in ledger.get("executed_steps", [])
+    )
+    if not has_successful_write and any(marker in markdown for marker in forbidden_markers):
+        return "claims write action without successful write evidence"
+    for finding in ledger.get("key_findings") or []:
+        anchor = str(finding).split("（", 1)[0].strip()
+        if anchor and anchor not in markdown and anchor not in deterministic_summary:
+            return f"missing key finding anchor: {anchor}"
+    return ""
+
+
 def _runbook_step_success(tool_name: str, result_repr) -> bool:
     """Return whether a tool result should let the Runbook continue normally."""
     if not isinstance(result_repr, dict):
@@ -488,8 +708,20 @@ def _format_final_summary(
             f"   参数：{step['args_text']}"
         )
 
+    findings = _key_findings(executed)
+    if findings:
+        insert_at = 7
+        lines[insert_at:insert_at] = [
+            "",
+            "关键结论：",
+            *(f"- {finding}" for finding in findings[:5]),
+        ]
+
     if failed_step is None and not (write_count or destructive_count):
-        lines.extend(["", "下一步建议：如果需要真正清理或修改系统，请基于以上检查结果再发起确认操作。"])
+        next_step = "下一步建议：如果需要真正清理或修改系统，请基于以上检查结果再发起确认操作。"
+        if any(item.get("tool") == "get_service_status" for item in executed):
+            next_step = "下一步建议：如果状态异常，再基于上面的服务状态发起修复操作；如果状态正常，无需处理。"
+        lines.extend(["", next_step])
     return "\n".join(lines)
 
 
@@ -556,7 +788,7 @@ async def execute_runbook(
     try:
         incident_id = await incident_store.create_incident(
             session_id=session_id,
-            problem_statement=f"Runbook replay: {runbook_name}",
+            problem_statement=user_message or f"执行 Runbook「{runbook_name}」",
             source="runbook_executor",
             metadata={"runbook_id": runbook_id},
             db_path=incident_db_path,
@@ -569,12 +801,13 @@ async def execute_runbook(
 
         async def send_to_client(data: dict):
             try:
-                await incident_store.record_incident_from_message(
-                    incident_id=incident_id,
-                    session_id=session_id,
-                    message=data,
-                    db_path=incident_db_path,
-                )
+                if not (data.get("type") == "trace" and data.get("phase") == "input_received"):
+                    await incident_store.record_incident_from_message(
+                        incident_id=incident_id,
+                        session_id=session_id,
+                        message=data,
+                        db_path=incident_db_path,
+                    )
             except Exception as e:
                 logger.warning(f"Incident event recording failed for {incident_id}: {e}")
             await original_send_to_client(data)
@@ -600,6 +833,19 @@ async def execute_runbook(
     plan_steps = _plan_steps_from_raw_steps(steps)
 
     # === Announce ===
+    await send_to_client(trace_event(
+        phase="input_received",
+        event_type="start",
+        content=user_message or f"执行 Runbook「{runbook_name}」",
+        evidence=build_evidence(
+            claim=f"用户触发 Runbook「{runbook_name}」执行",
+            evidence_type="user input",
+            source="Runbook页面" if user_message else "Runbook执行器",
+            observed={"runbook_id": runbook_id, "runbook_name": runbook_name, "origin": user_message or "direct"},
+            confidence="high",
+            execution_state="executed",
+        ),
+    ))
     await send_to_client(trace_event(
         phase="planning",
         event_type="start",
@@ -692,6 +938,7 @@ async def execute_runbook(
         )
         before_change_state = None
         backup_record = None
+        change_plan = None
 
         # === Rule-engine command check (re-run because patterns may have evolved) ===
         cmd_check = _guardrail.check_command(json.dumps(tool_args))
@@ -762,9 +1009,20 @@ async def execute_runbook(
             request_id = f"rb_{runbook_id[:8]}_{idx}_{uuid.uuid4().hex[:6]}"
             loop = asyncio.get_running_loop()
             approval_future: asyncio.Future = loop.create_future()
-            from app.agent.graph import _effective_rollback_capability
-            supports_rollback, rollback_strategy = _effective_rollback_capability(tool_name, tool_args, tool_def)
+            supports_rollback, rollback_strategy = effective_rollback_capability(tool_name, tool_args, tool_def)
             preview = build_operation_preview(tool_name, tool_args, tool_def)
+            change_plan = build_change_plan(
+                tool_name=tool_name,
+                tool_args=tool_args,
+                tool_def=tool_def,
+                preview=preview,
+                policy=policy_decision.to_dict() if policy_decision else {},
+                runbook={"id": runbook_id, "name": runbook_name, "step_index": idx, "total_steps": len(steps)},
+                step_index=idx,
+                total_steps=len(steps),
+                approval_status="pending",
+                approval_request_id=request_id,
+            )
             impact_text = (
                 f"Runbook「{runbook_name}」步骤 {idx}/{len(steps)}: {step_info['action']}\n"
                 f"{policy_summary(policy_decision)}"
@@ -778,6 +1036,7 @@ async def execute_runbook(
                     supports_rollback=supports_rollback,
                     preview_strategy=tool_def.preview_strategy,
                     preview=preview,
+                    change_plan=change_plan,
                     policy=policy_decision.to_dict() if policy_decision else {},
                     approval_level=policy_decision.approval_level if policy_decision else "standard",
                     execution_identity=policy_decision.execution_identity if policy_decision else {},
@@ -799,6 +1058,7 @@ async def execute_runbook(
                 "supports_rollback": supports_rollback,
                 "preview_strategy": tool_def.preview_strategy,
                 "preview": preview,
+                "change_plan": change_plan,
                 "policy": policy_decision.to_dict() if policy_decision else {},
                 "approval_level": policy_decision.approval_level if policy_decision else "standard",
                 "execution_identity": policy_decision.execution_identity if policy_decision else {},
@@ -815,6 +1075,7 @@ async def execute_runbook(
                         "target": step_info["target"],
                         "risk": step_info["risk_label"],
                         "preview": preview,
+                        "change_plan": change_plan,
                     },
                     confidence="high",
                     execution_state="skipped",
@@ -873,28 +1134,32 @@ async def execute_runbook(
                 ),
             ))
 
-            # Backup (best-effort; ignore failures, the file may not be a path)
+            # Rollback point is created only after approval and immediately
+            # before execution, matching the normal Agent path.
             try:
-                from app.mcp_tools.backup import backup_manager
-                target_path = tool_args.get("filepath") or tool_args.get("path") or tool_args.get("service")
-                if supports_rollback and rollback_strategy == "backup" and target_path and isinstance(target_path, str):
-                    backup_record = backup_manager.backup_file(target_path, operation=f"runbook:{tool_name}")
+                if supports_rollback:
+                    backup_record = prepare_rollback_point(
+                        tool_name,
+                        tool_args,
+                        operation_prefix=f"runbook:{runbook_id}:{idx}",
+                    )
+                    mark_change_plan_rollback(change_plan, backup_record)
                     if backup_record:
                         await send_to_client(trace_event(
                             phase="execution",
                             event_type="start",
-                            content=f"{step_header} 已创建回滚备份：{target_path}",
+                            content=f"{step_header} 已创建回滚点：{rollback_summary(backup_record)}\n{change_plan_summary(change_plan)}",
                             evidence=build_evidence(
-                                claim=f"Runbook 步骤 {idx} 执行前已创建回滚备份",
+                                claim=f"Runbook 步骤 {idx} 执行前已创建回滚点",
                                 evidence_type="config",
-                                source="备份管理器",
-                                observed=target_path,
+                                source="rollback_plan.prepare_rollback_point",
+                                observed={"rollback": backup_record, "change_plan": change_plan},
                                 confidence="high",
                                 execution_state="executed",
                             ),
                         ))
             except Exception as e:
-                logger.debug(f"Runbook backup skipped: {e}")
+                logger.warning(f"Runbook rollback point skipped: {e}")
 
             try:
                 from app.agent.graph import _capture_pre_change_state
@@ -909,7 +1174,13 @@ async def execute_runbook(
             result_str = json.dumps(result_repr, ensure_ascii=False, default=str)
             success = _runbook_step_success(tool_name, result_repr)
             result_summary = _summarize_result(tool_name, result_repr)
+            service_status = (
+                _extract_service_status(result_repr.get("data"), str(tool_args.get("service") or step_info["target"]))
+                if tool_name == "get_service_status" and isinstance(result_repr, dict)
+                else None
+            )
             verification_error: str | None = None
+            call_id = f"runbook:{runbook_id}:{idx}:{uuid.uuid4().hex[:8]}"
             executed.append({
                 "step": idx,
                 "tool": tool_name,
@@ -921,6 +1192,8 @@ async def execute_runbook(
                 "success": success,
                 "summary": result_summary,
                 "preview": result_str[:200],
+                "target": step_info["target"],
+                "service_status": service_status,
             })
 
             if tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE):
@@ -976,6 +1249,20 @@ async def execute_runbook(
                             success=False,
                         ),
                     ))
+
+            await record_tool_execution(
+                session_id=session_id,
+                incident_id=incident_id or "",
+                call_id=call_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                risk_level=tool_def.risk_level.value,
+                status="success" if success else "failure",
+                result=result,
+                error=verification_error,
+                execution_state="executed" if success else "failed",
+                approval_granted=tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE),
+            )
 
             if success:
                 await audit_logger.log(
@@ -1070,6 +1357,19 @@ async def execute_runbook(
 
         except Exception as e:
             logger.error(f"Runbook step {idx} raised: {e}")
+            await record_tool_execution(
+                session_id=session_id,
+                incident_id=incident_id or "",
+                call_id=f"runbook:{runbook_id}:{idx}:{uuid.uuid4().hex[:8]}",
+                tool_name=tool_name,
+                tool_args=tool_args,
+                risk_level=tool_def.risk_level.value if tool_def else "unknown",
+                status="failure",
+                result={"success": False, "data": "", "error": str(e)},
+                error=str(e),
+                execution_state="failed",
+                approval_granted=bool(tool_def and tool_def.risk_level in (RiskLevel.WRITE, RiskLevel.DESTRUCTIVE)),
+            )
             await audit_logger.log(
                 session_id, AuditPhase.EXECUTION, AuditEventType.FAILURE,
                 f"Runbook step {idx} raised: {e}",
@@ -1165,7 +1465,29 @@ async def execute_runbook(
 
     # === Final summary message ===
     if failed_step is None:
-        summary = _format_final_summary(runbook_name, plan_steps, executed, failed_step, abort_reason)
+        deterministic_summary = _format_final_summary(runbook_name, plan_steps, executed, failed_step, abort_reason)
+        summary = await _hybrid_final_summary(
+            runbook_name=runbook_name,
+            plan_steps=plan_steps,
+            executed=executed,
+            failed_step=failed_step,
+            abort_reason=abort_reason,
+            deterministic_summary=deterministic_summary,
+        )
+        if summary != deterministic_summary:
+            await send_to_client(trace_event(
+                phase="response",
+                event_type="success",
+                content="Runbook 最终回复已由 LLM 基于真实执行证据润色。",
+                evidence=build_evidence(
+                    claim=f"Runbook「{runbook_name}」最终回复使用混合模式生成",
+                    evidence_type="config",
+                    source="runbook_hybrid_summary",
+                    observed="LLM 只润色最终报告，执行事实来自 Runbook 工具账本",
+                    confidence="high",
+                    execution_state="executed",
+                ),
+            ))
         await send_to_client(trace_event(
             phase="response",
             event_type="success",
@@ -1180,7 +1502,29 @@ async def execute_runbook(
             ),
         ))
     else:
-        summary = _format_final_summary(runbook_name, plan_steps, executed, failed_step, abort_reason)
+        deterministic_summary = _format_final_summary(runbook_name, plan_steps, executed, failed_step, abort_reason)
+        summary = await _hybrid_final_summary(
+            runbook_name=runbook_name,
+            plan_steps=plan_steps,
+            executed=executed,
+            failed_step=failed_step,
+            abort_reason=abort_reason,
+            deterministic_summary=deterministic_summary,
+        )
+        if summary != deterministic_summary:
+            await send_to_client(trace_event(
+                phase="response",
+                event_type="success",
+                content="Runbook 中止报告已由 LLM 基于真实执行证据润色。",
+                evidence=build_evidence(
+                    claim=f"Runbook「{runbook_name}」中止报告使用混合模式生成",
+                    evidence_type="config",
+                    source="runbook_hybrid_summary",
+                    observed="LLM 只润色最终报告，执行事实来自 Runbook 工具账本",
+                    confidence="high",
+                    execution_state="executed",
+                ),
+            ))
         await send_to_client(trace_event(
             phase="response",
             event_type="failure",

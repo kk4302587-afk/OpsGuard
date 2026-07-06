@@ -72,9 +72,11 @@ def evaluate_tool_policy(tool_name: str, tool_args: dict[str, Any], tool_def: An
         if _matches_path(path_value, denied_paths):
             _block(decision, f"Path is denied or protected by policy: {path_value}")
 
-    if policy.allowed_write_paths and risk_level in {"write", "destructive"}:
+    if policy.enforce_write_path_allowlist and risk_level in {"write", "destructive"}:
+        if not policy.allowed_write_paths and subject.get("paths"):
+            _block(decision, "Write path allowlist is enforced but no approved paths are configured")
         for path_value in subject.get("paths", []):
-            if not _matches_path(path_value, policy.allowed_write_paths):
+            if not _matches_path(path_value, policy.allowed_write_paths) and not _is_allowed_tmp_file_cleanup(tool_name, path_value):
                 _block(decision, f"Write path is outside approved paths: {path_value}")
 
     for service in subject.get("services", []):
@@ -257,6 +259,25 @@ def _matches_path(path_value: str, patterns: list[str]) -> bool:
         except Exception:
             continue
     return False
+
+
+def _is_allowed_tmp_file_cleanup(tool_name: str, path_value: str) -> bool:
+    """Allow tightly bounded temporary-file cleanup outside the write allowlist."""
+    if tool_name != "delete_file" or not settings.policy.allow_tmp_file_cleanup:
+        return False
+    if not path_value or any(token in path_value for token in ("*", "?", "[", "]", "{", "}", "\x00")):
+        return False
+    try:
+        candidate = Path(path_value).expanduser()
+        if candidate.is_symlink() or not candidate.exists() or not candidate.is_file():
+            return False
+        resolved = candidate.resolve(strict=True)
+        tmp_root = Path("/tmp").resolve(strict=True)
+    except Exception:
+        return False
+    if resolved == tmp_root or tmp_root not in resolved.parents:
+        return False
+    return True
 
 
 def _maintenance_window_status(windows: list[str]) -> str:

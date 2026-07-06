@@ -34,10 +34,10 @@ Thumbs.db
 
 # Logs
 *.log
+run/
 
 # AI Agent / Trellis directories
 .agents/
 .codex/
 .kiro/
 .trellis/
-

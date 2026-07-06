@@ -166,7 +166,7 @@ def _preview_delete_file(tool_args: dict[str, Any]) -> dict[str, Any]:
 
 def _preview_rollback_backup(tool_args: dict[str, Any]) -> dict[str, Any]:
     backup_id = str(tool_args.get("backup_id") or "")
-    record = next((item for item in backup_manager.get_backups(limit=1000) if item.get("id") == backup_id), None)
+    record = backup_manager.find_backup(backup_id)
     if not record:
         return _base_preview(
             status="unavailable",

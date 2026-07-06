@@ -496,6 +496,12 @@ def _audio_format(blob: UploadedBlob) -> str:
 
 
 def _normalize_image_result(result: dict[str, Any]) -> dict[str, Any]:
+    model_input_type = result.get("input_type")
+    if isinstance(model_input_type, str) and model_input_type not in {"image", ""}:
+        if not result.get("image_category") or result.get("image_category") == "unknown":
+            result["image_category"] = model_input_type
+    result["input_type"] = "image"
+    result["extracted_text"] = _normalize_text_value(result.get("extracted_text"))
     entities = result.get("entities")
     result["entities"] = entities if isinstance(entities, dict) else {}
     for key in ("diagnosis_hints", "recommended_tools", "warnings"):
@@ -505,6 +511,13 @@ def _normalize_image_result(result: dict[str, Any]) -> dict[str, Any]:
     if result.get("confidence") not in {"high", "medium", "low"}:
         result["confidence"] = "medium"
     return enhance_ops_semantics(result)
+
+
+def _normalize_text_value(value: Any) -> str:
+    """Coerce OCR text fields into prompt-ready plain text."""
+    if isinstance(value, list):
+        return "\n".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
 
 
 def enhance_ops_semantics(result: dict[str, Any]) -> dict[str, Any]:

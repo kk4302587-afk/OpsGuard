@@ -79,7 +79,7 @@ function RunbookPanel() {
       antdMessage.info('当前还有任务在进行，请等待完成')
       return
     }
-    runRunbookDirectly(runbook.id)
+    runRunbookDirectly(runbook.id, runbook.name)
     antdMessage.success(`已开始执行 Runbook「${runbook.name}」，请切换到聊天视图查看进度`)
   }
 
